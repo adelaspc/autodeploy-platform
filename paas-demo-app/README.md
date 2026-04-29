@@ -102,7 +102,7 @@ The frontend shows:
 ### Database
 
 - MySQL in the intended deployment setup
-- SQLite fallback for local bootstrapping when `DATABASE_URL` is not set
+- SQLite fallback only for `APP_ENV=local|development|test` when `DATABASE_URL` is not set
 
 ## Project Structure
 
@@ -207,19 +207,21 @@ pip install -r requirements-dev.txt
 
 ### 3. Configure environment variables
 
-Copy the example value from [`.env.example`](.env.example) and set your database URL.
+Copy [`.env.example`](.env.example) to `.env` and adjust values as needed.
 
-Example:
+For local Python-based development, a minimal setup is:
 
 ```bash
-DATABASE_URL=mysql+pymysql://app_user:app_password@db:3306/deployments
+APP_ENV=development
 ```
 
-If `DATABASE_URL` is not set, the app falls back to SQLite:
+If `DATABASE_URL` is not set and `APP_ENV` is `local`, `development`, or `test`, the app falls back to:
 
 ```text
-sqlite:///deployments.db
+sqlite:///instance/app.db
 ```
+
+Outside those environments, `DATABASE_URL` is required and the app will fail fast if it is missing.
 
 ### 4. Run migrations
 
@@ -255,6 +257,97 @@ http://127.0.0.1:5173
 
 The Vite dev server proxies `/api` and `/health` requests to the Flask backend.
 
+## Docker Workflow
+
+The repository includes a production-oriented multi-stage [Dockerfile](Dockerfile) and a local orchestration [docker-compose.yml](docker-compose.yml).
+
+### Environment variables used by Compose
+
+Copy [`.env.example`](.env.example) to `.env` before starting the stack. Docker Compose uses `.env` for variable interpolation, and the `app` and `db` services also load that same file with `env_file`.
+
+The Compose stack supports these variables:
+
+- `APP_PORT` for the host port mapped to the app container, default `5000`
+- `PORT` for the internal app port, default `5000`
+- `MYSQL_PORT` for the host port mapped to MySQL, default `3306`
+- `MYSQL_DATABASE`, default `deployments`
+- `MYSQL_USER`, default `app_user`
+- `MYSQL_PASSWORD`, default `app_password`
+- `MYSQL_ROOT_PASSWORD`, default `root_password`
+
+### Start the stack
+
+```bash
+docker compose up --build
+```
+
+The app will be available on:
+
+```text
+http://127.0.0.1:${APP_PORT:-5000}
+```
+
+### Run migrations
+
+Run schema migrations explicitly after the stack is up:
+
+```bash
+docker compose run --rm app flask db upgrade
+```
+
+### Stop the stack
+
+```bash
+docker compose down
+```
+
+To also remove the MySQL volume:
+
+```bash
+docker compose down -v
+```
+
+## Worker Testing
+
+The current worker implementation is a control-plane skeleton. It advances deployment records through the documented states and persists deployment events, but it still uses a fake executor for clone/build/push/deploy steps.
+
+### Run the worker once
+
+Create a pending deployment through the API, then execute:
+
+```bash
+python -m flask --app wsgi:app run-worker-once
+```
+
+If a pending deployment exists, the worker will move it through the state machine and record deployment events. If no pending deployment exists, it prints:
+
+```text
+No pending deployments found
+```
+
+### Inspect deployment results
+
+After running the worker, inspect the deployment and its event history through the API:
+
+```bash
+curl http://127.0.0.1:5000/api/projects/<project_id>/deployments
+curl http://127.0.0.1:5000/api/projects/<project_id>/deployments/<deployment_id>/events
+```
+
+### Automated verification
+
+Run the full test suite with:
+
+```bash
+pytest -q
+```
+
+The worker tests cover:
+
+- successful deployment processing
+- skipping the testing phase when no test command is configured
+- failure handling with persisted deployment events
+
 ## Testing
 
 Run backend tests with:
@@ -286,6 +379,6 @@ The interface intentionally uses a Linux terminal-inspired presentation for demo
 
 ## Notes
 
-- The Flask backend does not define a route for `/`, so a `404` on `http://127.0.0.1:5000/` is expected.
-- The frontend is the main user-facing entrypoint during local development.
-- The current backend returns JSON for normal API operations and validation errors.
+- During Vite-based local development, the frontend is the main user-facing entrypoint at `http://127.0.0.1:5173`.
+- In containerized or built mode, Flask serves the compiled frontend assets from `/` when `frontend/dist` is present.
+- The backend returns JSON for normal API operations and validation errors.
