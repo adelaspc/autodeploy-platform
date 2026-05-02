@@ -33,7 +33,17 @@ class PlatformDeployment(db.Model):
     build_id = db.Column(db.Integer, db.ForeignKey("builds.id"), nullable=False, index=True)
     environment = db.Column(db.String(64), nullable=False, default="production")
     status = db.Column(db.String(32), nullable=False, default="pending")
+    deploy_target = db.Column(db.String(255), nullable=True)
+    container_name = db.Column(db.String(255), nullable=True)
+    container_id = db.Column(db.String(255), nullable=True)
+    host_port = db.Column(db.Integer, nullable=True)
+    healthcheck_url = db.Column(db.String(1024), nullable=True)
     service_url = db.Column(db.String(255), nullable=True)
+    last_error = db.Column(db.Text, nullable=True)
+    started_at = db.Column(db.DateTime, nullable=True)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    claimed_at = db.Column(db.DateTime, nullable=True)
+    claimed_by = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(
         db.DateTime,
@@ -64,7 +74,17 @@ class PlatformDeployment(db.Model):
             "environment": self.environment,
             "status": self.status,
             "allowed_transitions": self.allowed_transitions,
+            "deploy_target": self.deploy_target,
+            "container_name": self.container_name,
+            "container_id": self.container_id,
+            "host_port": self.host_port,
+            "healthcheck_url": self.healthcheck_url,
             "service_url": self.service_url,
+            "last_error": self.last_error,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
+            "claimed_by": self.claimed_by,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }

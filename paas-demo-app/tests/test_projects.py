@@ -1,3 +1,9 @@
+from backend.api import projects as projects_api
+from backend.extensions import db
+from backend.models import DeploymentEvent, PlatformDeployment
+from worker.executor import ExecutionResult, WorkerExecutionError
+
+
 def create_project(client, **overrides):
     payload = {
         "name": "paas-control-plane",
@@ -189,3 +195,173 @@ def test_trigger_deployment_rejects_missing_commit_sha(client):
 
     assert response.status_code == 400
     assert response.get_json() == {"error": "Missing required field: commit_sha"}
+
+
+def test_stop_deployment_calls_executor_and_records_events(client, app, monkeypatch):
+    project_response = create_project(client, name="stoppable-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "abc123def456",
+            "status": "running",
+            "build_status": "succeeded",
+            "service_url": "http://127.0.0.1:18080",
+        },
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "local-docker"
+        deployment.container_name = "paas-stoppable-app-1"
+        deployment.container_id = "container123"
+        deployment.host_port = 18080
+        deployment.healthcheck_url = "http://127.0.0.1:18080/health"
+        db.session.commit()
+
+    class StopExecutor:
+        def stop(self, deployment):
+            return ExecutionResult(
+                "Container removed successfully.",
+                metadata={
+                    "executor": "local-docker",
+                    "stopped": True,
+                    "runtime_log_path": "/tmp/runtime.log",
+                    "runtime_log_summary": "app stopped cleanly",
+                },
+                log_path="/tmp/stop.log",
+                deploy_target="local-docker",
+                container_name=deployment.container_name,
+                container_id=deployment.container_id,
+            )
+
+    monkeypatch.setattr(projects_api, "create_executor_for_deployment", lambda deployment: StopExecutor())
+
+    response = client.patch(
+        f"/api/projects/{project_id}/deployments/{deployment_id}",
+        json={"status": "stopped", "message": "Stop requested"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "stopped"
+    assert payload["service_url"] is None
+    assert payload["container_name"] == "paas-stoppable-app-1"
+    assert payload["events"][-2]["event_type"] == "deployment.stop_started"
+    assert payload["events"][-1]["event_type"] == "deployment.stopped"
+    assert payload["events"][-1]["metadata_json"]["log_path"] == "/tmp/stop.log"
+    assert payload["events"][-1]["metadata_json"]["runtime_log_path"] == "/tmp/runtime.log"
+
+
+def test_stop_deployment_returns_error_when_cleanup_fails(client, app, monkeypatch):
+    project_response = create_project(client, name="broken-stop-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "abc123def456",
+            "status": "running",
+            "build_status": "succeeded",
+            "service_url": "http://127.0.0.1:18081",
+        },
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "local-docker"
+        deployment.container_name = "paas-broken-stop-app-1"
+        db.session.commit()
+
+    class BrokenStopExecutor:
+        def stop(self, deployment):
+            raise WorkerExecutionError(
+                "deploy.container_stop",
+                "Failed to remove container",
+                metadata={"container_name": deployment.container_name},
+            )
+
+    monkeypatch.setattr(projects_api, "create_executor_for_deployment", lambda deployment: BrokenStopExecutor())
+
+    response = client.patch(
+        f"/api/projects/{project_id}/deployments/{deployment_id}",
+        json={"status": "stopped"},
+    )
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "Failed to remove container"
+
+
+def test_get_runtime_log_returns_tailed_content(client, app, tmp_path):
+    project_response = create_project(client, name="runtime-log-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "abc123def456",
+            "status": "running",
+            "build_status": "succeeded",
+            "service_url": "http://127.0.0.1:18082",
+        },
+    )
+    deployment_id = deployment_response.get_json()["id"]
+    runtime_log_path = tmp_path / "project-1" / "deployment-1" / "logs" / "runtime.log"
+    runtime_log_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_log_path.write_text("line1\nline2\nline3\n", encoding="utf-8")
+
+    with app.app_context():
+        app.config["CONTROL_PLANE_WORKSPACE_ROOT"] = str(tmp_path)
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="deployment.apply_succeeded",
+                step="deploy",
+                level="info",
+                status="running",
+                message="runtime log available",
+                metadata_json={"runtime_log_path": str(runtime_log_path)},
+            )
+        )
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/runtime-log?tail_lines=2")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["path"] == str(runtime_log_path)
+    assert payload["content"] == "line2\nline3"
+    assert payload["line_count"] == 3
+    assert payload["truncated"] is True
+
+
+def test_get_runtime_log_rejects_paths_outside_allowed_roots(client, app, tmp_path):
+    project_response = create_project(client, name="unsafe-runtime-log-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+    runtime_log_path = tmp_path / "outside.log"
+    runtime_log_path.write_text("nope\n", encoding="utf-8")
+
+    with app.app_context():
+        app.config["CONTROL_PLANE_WORKSPACE_ROOT"] = str(tmp_path / "workspaces")
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="deployment.apply_succeeded",
+                step="deploy",
+                level="info",
+                status="running",
+                message="unsafe runtime log",
+                metadata_json={"runtime_log_path": str(runtime_log_path)},
+            )
+        )
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/runtime-log")
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "Runtime log path is outside allowed log roots"
