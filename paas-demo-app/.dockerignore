@@ -8,5 +8,4 @@ __pycache__
 *.pyd
 *.db
 .env
-frontend/node_modules
-tests
+.pytest_cache

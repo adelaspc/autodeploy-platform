@@ -1,384 +1,233 @@
-# Deployment Notes App
+# PaaS Control Plane
 
-Deployment Notes App is a small Flask + SQLAlchemy application for tracking deployment records in a PaaS-style demo environment. It is designed as an infrastructure and platform validation workload rather than a full end-user product.
+This repository is the PaaS platform backend. It manages projects, builds, deployments, deployment events, and the worker that advances deployments through the deployment state machine.
 
-The project includes:
-
-- a Flask backend with REST endpoints for deployment tracking
-- SQLAlchemy models and Flask-Migrate database migrations
-- a Vue 3 + Vite frontend with a terminal-style interface
-- health endpoints for service and database connectivity
-
-## Purpose
-
-This app is intended to exercise common platform concerns such as:
-
-- containerization
-- environment variable injection
-- database connectivity
-- migrations
-- CI/test execution
-- deployment lifecycle tracking
-- health and observability checks
-
-## Implemented Functionality
-
-### Deployment management
-
-The application can:
-
-- create deployment records
-- list deployment history
-- retrieve a single deployment by ID
-- update deployment status
-- delete deployment records
-
-Each deployment currently stores:
-
-- `application_name`
-- `version`
-- `environment`
-- `status`
-- `created_at`
-- `updated_at`
-
-### Status lifecycle rules
-
-Deployment status transitions are enforced by the backend.
-
-Allowed transitions:
-
-- `pending -> building`
-- `pending -> failed`
-- `building -> deployed`
-- `building -> failed`
-
-Terminal statuses:
-
-- `deployed`
-- `failed`
-
-The API returns `allowed_transitions` for each deployment, and the frontend disables invalid status actions.
-
-### Filtering and pagination
-
-Deployment history supports:
-
-- filtering by `environment`
-- filtering by `status`
-- filtering by `application_name` substring
-- paginated listing with `page` and `per_page`
-
-### Health diagnostics
-
-The application exposes:
-
-- `/health` for service-level health
-- `/health/db` for database connectivity checks
-
-The frontend shows:
-
-- service status
-- database status
-- last health check timestamp
-- database diagnostic details when the DB probe fails
-
-## Tech Stack
-
-### Backend
-
-- Flask
-- Flask-SQLAlchemy
-- Flask-Migrate
-- SQLAlchemy
-- PyMySQL
-- python-dotenv
-
-### Frontend
-
-- Vue 3
-- Vite
-
-### Database
-
-- MySQL in the intended deployment setup
-- SQLite fallback only for `APP_ENV=local|development|test` when `DATABASE_URL` is not set
-
-## Project Structure
+## Repository Layout
 
 ```text
 paas-demo-app/
-  backend/
-    api/
-    models/
-    config.py
-    extensions.py
-    __init__.py
-  frontend/
-    src/
-    package.json
-    vite.config.js
-  migrations/
-  tests/
-  requirements.txt
-  requirements-dev.txt
-  wsgi.py
+├── backend/
+├── worker/
+├── migrations/
+├── tests/
+├── docs/
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+└── wsgi.py
 ```
 
-## API Overview
+## Scope
 
-### Health
+- `GET/POST/PATCH/DELETE /api/projects`
+- `GET /api/projects/<id>/builds`
+- `GET/POST/PATCH /api/projects/<id>/deployments`
+- `GET /api/projects/<id>/deployments/<deployment_id>/events`
+- `GET /api/projects/<id>/deployments/<deployment_id>/runtime-log`
+- `python -m flask --app wsgi:app run-worker-once`
+- `python -m flask --app wsgi:app run-worker`
+- `python -m flask --app wsgi:app run-reconciler`
 
-- `GET /health`
-- `GET /health/db`
+## Database
 
-### Deployments
+The control plane uses its own database configuration:
 
-- `GET /api/deployments`
-- `GET /api/deployments/<id>`
-- `POST /api/deployments`
-- `PATCH /api/deployments/<id>`
-- `DELETE /api/deployments/<id>`
+- `CONTROL_PLANE_DATABASE_URL`
+- `CONTROL_PLANE_ENV`
 
-### `GET /api/deployments` query parameters
+For local development, `CONTROL_PLANE_ENV=development` falls back to `sqlite:///instance/control_plane.db`.
 
-- `application_name`
-- `environment`
-- `status`
-- `page`
-- `per_page`
+## Worker Execution
 
-### Example deployment payload
+The worker supports two executor modes:
 
-```json
-{
-  "application_name": "billing-api",
-  "version": "2026.04.27-1",
-  "environment": "staging",
-  "status": "pending"
-}
-```
+- `fake`: default, test-friendly executor with simulated infrastructure behavior
+- `local-docker`: clones a Git repository into a local workspace, builds a Docker image, optionally runs tests in the built image, optionally tags and pushes to a registry, starts a local container, and waits for the configured healthcheck to succeed
 
-### Example paginated response
+Useful settings:
 
-```json
-{
-  "items": [
-    {
-      "id": 1,
-      "application_name": "billing-api",
-      "version": "2026.04.27-1",
-      "environment": "staging",
-      "status": "pending",
-      "allowed_transitions": ["building", "failed"],
-      "created_at": "2026-04-27T12:03:31.603875",
-      "updated_at": "2026-04-27T12:03:31.603879"
-    }
-  ],
-  "page": 1,
-  "per_page": 10,
-  "total": 1,
-  "pages": 1,
-  "has_next": false,
-  "has_prev": false
-}
-```
+- `CONTROL_PLANE_EXECUTOR`
+- `CONTROL_PLANE_WORKSPACE_ROOT`
+- `CONTROL_PLANE_COMMAND_TIMEOUT_SECONDS`
+- `CONTROL_PLANE_COMMAND_RETRY_COUNT`
+- `CONTROL_PLANE_REGISTRY_ENABLED`
+- `CONTROL_PLANE_REGISTRY_URL`
+- `CONTROL_PLANE_REGISTRY_NAMESPACE`
+- `CONTROL_PLANE_REGISTRY_USERNAME`
+- `CONTROL_PLANE_REGISTRY_PASSWORD`
+- `CONTROL_PLANE_DEPLOY_HOST`
+- `CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS`
+- `CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS`
+- `CONTROL_PLANE_WORKER_POLL_INTERVAL_SECONDS`
+- `CONTROL_PLANE_WORKER_ID`
+- `CONTROL_PLANE_CLAIM_TTL_SECONDS`
+- `CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS`
 
-## Local Setup
+Pending deployments are now claimed with a worker lease before processing. That prevents two worker processes from picking the same row concurrently, and stale claims can be reclaimed after the configured TTL.
+For long-running executor commands, the worker now refreshes claims through a heartbeat callback so active deployments do not become reclaimable mid-build or mid-test.
 
-### 1. Create and activate a virtual environment
+When registry support is enabled, the deployment flow is:
+
+- clone
+- build local image
+- test local image
+- tag local image for the registry
+- push registry image
+- deploy locally from the local image
+
+The control plane still deploys locally after push in this iteration. Kubernetes is not part of the current flow yet.
+
+## Reconciliation
+
+The control plane also provides a manual reconciliation command:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+.venv/bin/flask --app wsgi:app run-reconciler
 ```
 
-### 2. Install backend dependencies
+The reconciler is independent from the main worker loop and safely repairs inconsistent state. In this iteration it:
+
+- clears stale deployment claims
+- marks `running` `local-docker` deployments as failed when their container is missing
+- removes orphan containers from failed deployments
+- removes stale workspace/log artifacts from failed deployments
+
+All reconciliation actions are best-effort and recorded as deployment events such as:
+
+- `reconcile.claim_cleared`
+- `reconcile.claim_recovered`
+- `reconcile.container_missing`
+- `reconcile.container_removed`
+- `reconcile.workspace_removed`
+- `reconcile.cleanup_failed`
+
+## Local Docker Manual Flow
+
+This repo no longer contains a sample app, so the simplest end-to-end worker test is a tiny local Git repository.
+
+1. Create a local test repository:
 
 ```bash
-pip install -r requirements.txt
+mkdir -p /tmp/local-docker-app
+cd /tmp/local-docker-app
+git init -b main
+cat > Dockerfile <<'EOF'
+FROM python:3.12-slim
+WORKDIR /app
+COPY server.py /app/server.py
+EXPOSE 5000
+CMD ["python", "/app/server.py"]
+EOF
+cat > server.py <<'EOF'
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+            return
+        self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+
+HTTPServer(("0.0.0.0", 5000), Handler).serve_forever()
+EOF
+git add Dockerfile
+git add server.py
+git commit -m "init local docker app"
 ```
 
-For tests:
+2. Start the control plane with the local Docker executor:
 
 ```bash
-pip install -r requirements-dev.txt
-```
-
-### 3. Configure environment variables
-
-Copy [`.env.example`](.env.example) to `.env` and adjust values as needed.
-
-For local Python-based development, a minimal setup is:
-
-```bash
-APP_ENV=development
-```
-
-If `DATABASE_URL` is not set and `APP_ENV` is `local`, `development`, or `test`, the app falls back to:
-
-```text
-sqlite:///instance/app.db
-```
-
-Outside those environments, `DATABASE_URL` is required and the app will fail fast if it is missing.
-
-### 4. Run migrations
-
-```bash
+cd /home/adela/autodeploy-platform/paas-demo-app
+unset CONTROL_PLANE_DATABASE_URL DATABASE_URL APP_ENV
+export CONTROL_PLANE_ENV=development
+export CONTROL_PLANE_EXECUTOR=local-docker
 .venv/bin/flask --app wsgi:app db upgrade
+.venv/bin/flask --app wsgi:app run --debug
 ```
 
-### 5. Run the backend
+3. Create a project that points at the local Git repo:
 
 ```bash
-.venv/bin/flask --app wsgi:app run
+curl -X POST http://127.0.0.1:5000/api/projects \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "local-docker-app",
+    "repo_url": "/tmp/local-docker-app",
+    "branch": "main",
+    "dockerfile_path": "Dockerfile",
+    "build_context": ".",
+    "port": 5000,
+    "healthcheck_path": "/health",
+    "env_vars": [],
+    "trigger": "manual",
+    "runtime": "dockerfile"
+  }'
 ```
 
-Backend endpoints will be available on:
-
-```text
-http://127.0.0.1:5000
-```
-
-### 6. Run the frontend
+4. Create a pending deployment:
 
 ```bash
-cd frontend
-npm install
-npm run dev
+curl -X POST http://127.0.0.1:5000/api/projects/1/deployments \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "commit_sha": "localmain001",
+    "image_name": "local-docker-app",
+    "image_tag": "localmain001",
+    "status": "pending",
+    "build_status": "pending",
+    "test_command": "sh -c true"
+  }'
 ```
 
-Frontend UI will usually be available on:
-
-```text
-http://127.0.0.1:5173
-```
-
-The Vite dev server proxies `/api` and `/health` requests to the Flask backend.
-
-## Docker Workflow
-
-The repository includes a production-oriented multi-stage [Dockerfile](Dockerfile) and a local orchestration [docker-compose.yml](docker-compose.yml).
-
-### Environment variables used by Compose
-
-Copy [`.env.example`](.env.example) to `.env` before starting the stack. Docker Compose uses `.env` for variable interpolation, and the `app` and `db` services also load that same file with `env_file`.
-
-The Compose stack supports these variables:
-
-- `APP_PORT` for the host port mapped to the app container, default `5000`
-- `PORT` for the internal app port, default `5000`
-- `MYSQL_PORT` for the host port mapped to MySQL, default `3306`
-- `MYSQL_DATABASE`, default `deployments`
-- `MYSQL_USER`, default `app_user`
-- `MYSQL_PASSWORD`, default `app_password`
-- `MYSQL_ROOT_PASSWORD`, default `root_password`
-
-### Start the stack
+5. Run the worker:
 
 ```bash
-docker compose up --build
+.venv/bin/flask --app wsgi:app run-worker-once
 ```
 
-The app will be available on:
-
-```text
-http://127.0.0.1:${APP_PORT:-5000}
-```
-
-### Run migrations
-
-Run schema migrations explicitly after the stack is up:
+6. Inspect the deployment and events:
 
 ```bash
-docker compose run --rm app flask db upgrade
+curl http://127.0.0.1:5000/api/projects/1/deployments
+curl http://127.0.0.1:5000/api/projects/1/deployments/1/events
+curl http://127.0.0.1:5000/api/projects/1/deployments/1/runtime-log
 ```
 
-### Stop the stack
+The deployment should end in `running`, with event metadata that includes command summaries, output tails, attempt counts, log paths, workspace paths, and deploy target information.
+
+In `local-docker` mode, the deployment apply event also includes:
+
+- `container_name`
+- `container_id`
+- `host_port`
+- `published_port`
+- `healthcheck_url`
+- `healthcheck_status_code`
+- `healthcheck_attempts`
+- `runtime_log_path`
+- `runtime_log_summary`
+- `runtime_output_tail`
+
+7. Stop the local deployment and clean up the container:
 
 ```bash
-docker compose down
+curl -X PATCH http://127.0.0.1:5000/api/projects/1/deployments/1 \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "status": "stopped",
+    "message": "Stop requested"
+  }'
 ```
 
-To also remove the MySQL volume:
+That stop request uses the deployment executor for the recorded `deploy_target`. In `local-docker` mode it captures container logs, removes the running container, clears `service_url`, and records `deployment.stop_started` and `deployment.stopped` events with cleanup metadata.
 
-```bash
-docker compose down -v
-```
-
-## Worker Testing
-
-The current worker implementation is a control-plane skeleton. It advances deployment records through the documented states and persists deployment events, but it still uses a fake executor for clone/build/push/deploy steps.
-
-### Run the worker once
-
-Create a pending deployment through the API, then execute:
-
-```bash
-python -m flask --app wsgi:app run-worker-once
-```
-
-If a pending deployment exists, the worker will move it through the state machine and record deployment events. If no pending deployment exists, it prints:
-
-```text
-No pending deployments found
-```
-
-### Inspect deployment results
-
-After running the worker, inspect the deployment and its event history through the API:
-
-```bash
-curl http://127.0.0.1:5000/api/projects/<project_id>/deployments
-curl http://127.0.0.1:5000/api/projects/<project_id>/deployments/<deployment_id>/events
-```
-
-### Automated verification
-
-Run the full test suite with:
-
-```bash
-pytest -q
-```
-
-The worker tests cover:
-
-- successful deployment processing
-- skipping the testing phase when no test command is configured
-- failure handling with persisted deployment events
-
-## Testing
-
-Run backend tests with:
-
-```bash
-.venv/bin/python -m pytest -q
-```
-
-Build the frontend with:
-
-```bash
-cd frontend
-npm run build
-```
-
-## Current UI Behavior
-
-The frontend provides:
-
-- deployment creation form
-- health monitor panel
-- deployment history table
-- status transition actions
-- delete action
-- history filters
-- history pagination
-
-The interface intentionally uses a Linux terminal-inspired presentation for demo and observability scenarios.
-
-## Notes
-
-- During Vite-based local development, the frontend is the main user-facing entrypoint at `http://127.0.0.1:5173`.
-- In containerized or built mode, Flask serves the compiled frontend assets from `/` when `frontend/dist` is present.
-- The backend returns JSON for normal API operations and validation errors.
+The runtime log endpoint returns tailed container output as JSON. By default it returns the last 200 lines, and you can override that with `?tail_lines=<n>` up to 2000.

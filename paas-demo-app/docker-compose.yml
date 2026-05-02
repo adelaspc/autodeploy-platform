@@ -1,5 +1,5 @@
 services:
-  app:
+  control-plane:
     build:
       context: .
     depends_on:
@@ -8,22 +8,22 @@ services:
     env_file:
       - .env
     environment:
-      APP_ENV: ${APP_ENV:-development}
-      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-app_user}:${MYSQL_PASSWORD:-app_password}@db:3306/${MYSQL_DATABASE:-deployments}
+      CONTROL_PLANE_ENV: ${CONTROL_PLANE_ENV:-development}
+      CONTROL_PLANE_DATABASE_URL: mysql+pymysql://${CONTROL_PLANE_MYSQL_USER:-control_plane_user}:${CONTROL_PLANE_MYSQL_PASSWORD:-control_plane_password}@db:3306/${CONTROL_PLANE_MYSQL_DATABASE:-control_plane}
       FLASK_APP: wsgi.py
       PORT: ${PORT:-5000}
     ports:
-      - "${APP_PORT:-5000}:${PORT:-5000}"
+      - "${CONTROL_PLANE_APP_PORT:-5000}:${PORT:-5000}"
 
   db:
     image: mysql:8.4
     env_file:
       - .env
     environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-deployments}
-      MYSQL_USER: ${MYSQL_USER:-app_user}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-app_password}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_password}
+      MYSQL_DATABASE: ${CONTROL_PLANE_MYSQL_DATABASE:-control_plane}
+      MYSQL_USER: ${CONTROL_PLANE_MYSQL_USER:-control_plane_user}
+      MYSQL_PASSWORD: ${CONTROL_PLANE_MYSQL_PASSWORD:-control_plane_password}
+      MYSQL_ROOT_PASSWORD: ${CONTROL_PLANE_MYSQL_ROOT_PASSWORD:-root_password}
     healthcheck:
       test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} || exit 1"]
       interval: 5s
@@ -31,9 +31,9 @@ services:
       retries: 20
       start_period: 20s
     ports:
-      - "${MYSQL_PORT:-3306}:3306"
+      - "${CONTROL_PLANE_MYSQL_PORT:-3306}:3306"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - control_plane_mysql_data:/var/lib/mysql
 
 volumes:
-  mysql_data:
+  control_plane_mysql_data:

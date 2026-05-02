@@ -1,8 +1,13 @@
+from datetime import datetime, timezone
+from collections import deque
+from pathlib import Path
+
 from sqlalchemy.exc import IntegrityError
-from flask import Blueprint, abort, jsonify, request
+from flask import Blueprint, abort, current_app, jsonify, request
 
 from backend.extensions import db
 from backend.models import Build, DeploymentEvent, PlatformDeployment, Project
+from worker.executor import WorkerExecutionError, create_executor_for_deployment
 
 
 projects_bp = Blueprint("projects", __name__, url_prefix="/api/projects")
@@ -122,14 +127,104 @@ def validate_deployment_patch_payload(payload, deployment):
     return update_data, None
 
 
-def create_deployment_event(deployment_id, event_type, status, message=None):
+def create_deployment_event(
+    deployment_id,
+    event_type,
+    status,
+    message=None,
+    *,
+    step=None,
+    level="info",
+    metadata_json=None,
+):
     event = DeploymentEvent(
         deployment_id=deployment_id,
         event_type=event_type,
+        step=step,
+        level=level,
         status=status,
         message=message,
+        metadata_json=metadata_json,
     )
     db.session.add(event)
+
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def get_runtime_log_path(deployment):
+    for event in sorted(deployment.events, key=lambda item: item.created_at, reverse=True):
+        metadata = event.metadata_json or {}
+        runtime_log_path = metadata.get("runtime_log_path")
+        if runtime_log_path:
+            return Path(runtime_log_path)
+    return None
+
+
+def is_safe_log_path(path):
+    allowed_roots = [
+        Path(current).resolve()
+        for current in {
+            current_app.config["CONTROL_PLANE_WORKSPACE_ROOT"],
+            current_app.instance_path,
+        }
+    ]
+    resolved = path.resolve()
+    return any(root == resolved or root in resolved.parents for root in allowed_roots)
+
+
+def read_log_tail(path, *, tail_lines):
+    lines = deque(maxlen=tail_lines)
+    total_lines = 0
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            total_lines += 1
+            lines.append(line.rstrip("\n"))
+    return {
+        "content": "\n".join(lines),
+        "line_count": total_lines,
+        "truncated": total_lines > tail_lines,
+    }
+
+
+def stop_deployment_runtime(deployment, *, message=None):
+    executor = create_executor_for_deployment(deployment)
+    create_deployment_event(
+        deployment.id,
+        "deployment.stop_started",
+        "stopped",
+        message or "Stopping deployment runtime",
+        step="deploy.stop",
+    )
+    stop_result = executor.stop(deployment)
+    deployment.status = "stopped"
+    deployment.service_url = None
+    deployment.finished_at = now_utc()
+    if stop_result.deploy_target:
+        deployment.deploy_target = stop_result.deploy_target
+    if stop_result.container_name:
+        deployment.container_name = stop_result.container_name
+    if stop_result.container_id:
+        deployment.container_id = stop_result.container_id
+    if stop_result.host_port is not None:
+        deployment.host_port = stop_result.host_port
+    if stop_result.healthcheck_url:
+        deployment.healthcheck_url = stop_result.healthcheck_url
+    create_deployment_event(
+        deployment.id,
+        "deployment.stopped",
+        "stopped",
+        stop_result.message,
+        step="deploy.stop",
+        metadata_json=stop_result.metadata
+        | {
+            "log_path": stop_result.log_path,
+            "summary": stop_result.message,
+            "container_name": deployment.container_name,
+            "container_id": deployment.container_id,
+        },
+    )
 
 
 @projects_bp.get("")
@@ -270,6 +365,7 @@ def create_project_deployment(project_id):
         "deployment.created",
         deployment.status,
         payload.get("message", "Deployment record created"),
+        step="deployment",
     )
 
     if build.status != "pending":
@@ -278,6 +374,7 @@ def create_project_deployment(project_id):
             "build.status_reported",
             build.status,
             f"Build recorded in status '{build.status}'",
+            step="build",
         )
 
     db.session.commit()
@@ -306,6 +403,32 @@ def get_project_deployment(project_id, deployment_id):
     )
 
 
+@projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/runtime-log")
+def get_project_deployment_runtime_log(project_id, deployment_id):
+    deployment = get_project_deployment_or_404(project_id, deployment_id)
+    runtime_log_path = get_runtime_log_path(deployment)
+    if runtime_log_path is None:
+        return jsonify({"error": "No runtime log is available for this deployment"}), 404
+    if not is_safe_log_path(runtime_log_path):
+        return jsonify({"error": "Runtime log path is outside allowed log roots"}), 409
+    if not runtime_log_path.is_file():
+        return jsonify({"error": "Runtime log file does not exist", "path": str(runtime_log_path)}), 404
+
+    tail_lines = request.args.get("tail_lines", default=200, type=int)
+    if tail_lines is None or tail_lines < 1 or tail_lines > 2000:
+        return jsonify({"error": "tail_lines must be an integer between 1 and 2000"}), 400
+
+    payload = read_log_tail(runtime_log_path, tail_lines=tail_lines)
+    return jsonify(
+        {
+            "deployment_id": deployment.id,
+            "path": str(runtime_log_path),
+            "tail_lines": tail_lines,
+            **payload,
+        }
+    )
+
+
 @projects_bp.patch("/<int:project_id>/deployments/<int:deployment_id>")
 def update_project_deployment(project_id, deployment_id):
     deployment = get_project_deployment_or_404(project_id, deployment_id)
@@ -316,13 +439,29 @@ def update_project_deployment(project_id, deployment_id):
 
     message = update_data.get("message")
 
-    if "status" in update_data:
+    if update_data.get("status") == "stopped":
+        try:
+            stop_deployment_runtime(deployment, message=message)
+        except WorkerExecutionError as exc:
+            db.session.rollback()
+            return (
+                jsonify(
+                    {
+                        "error": exc.message,
+                        "step": exc.step,
+                        "metadata": exc.metadata,
+                    }
+                ),
+                409,
+            )
+    elif "status" in update_data:
         deployment.status = update_data["status"]
         create_deployment_event(
             deployment.id,
             "deployment.status_updated",
             deployment.status,
             message or f"Deployment status updated to '{deployment.status}'",
+            step="deployment",
         )
 
     if "service_url" in update_data:
@@ -332,6 +471,7 @@ def update_project_deployment(project_id, deployment_id):
             "deployment.service_url_updated",
             deployment.status,
             message or f"Service URL updated to '{deployment.service_url}'",
+            step="deploy",
         )
 
     if "build_status" in update_data:
@@ -341,6 +481,7 @@ def update_project_deployment(project_id, deployment_id):
             "build.status_updated",
             deployment.build.status,
             message or f"Build status updated to '{deployment.build.status}'",
+            step="build",
         )
 
     db.session.commit()

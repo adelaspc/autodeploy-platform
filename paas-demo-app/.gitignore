@@ -14,12 +14,7 @@ htmlcov/
 .coverage
 .coverage.*
 
-# Frontend dependencies and build output
-frontend/node_modules/
-frontend/dist/
-
 # Local app data
 instance/
 
-# Local handoff/context notes
-current-state.md
+context.txt 
