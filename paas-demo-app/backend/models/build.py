@@ -6,6 +6,7 @@ from backend.extensions import db
 class Build(db.Model):
     __tablename__ = "builds"
     VALID_STATUSES = ("pending", "cloning", "building", "testing", "pushing_image", "succeeded", "failed")
+    VALID_REGISTRY_PUSH_STATUSES = ("skipped", "succeeded", "failed")
 
     id = db.Column(db.Integer, primary_key=True)
     project_id = db.Column(db.Integer, db.ForeignKey("projects.id"), nullable=False, index=True)
@@ -15,6 +16,7 @@ class Build(db.Model):
     image_tag = db.Column(db.String(255), nullable=True)
     image_ref = db.Column(db.String(512), nullable=True)
     status = db.Column(db.String(32), nullable=False, default="pending")
+    registry_push_status = db.Column(db.String(32), nullable=True)
     test_command = db.Column(db.String(255), nullable=True)
     workspace_path = db.Column(db.String(1024), nullable=True)
     log_path = db.Column(db.String(1024), nullable=True)
@@ -42,6 +44,7 @@ class Build(db.Model):
             "image_tag": self.image_tag,
             "image_ref": self.image_ref,
             "status": self.status,
+            "registry_push_status": self.registry_push_status,
             "test_command": self.test_command,
             "workspace_path": self.workspace_path,
             "log_path": self.log_path,

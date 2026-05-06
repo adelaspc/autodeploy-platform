@@ -16,6 +16,67 @@ BUILD_STATUS_BY_DEPLOYMENT_STATUS = {
 }
 
 
+def push_error_hint(message, metadata=None):
+    haystack = " ".join(
+        str(part)
+        for part in [
+            message or "",
+            (metadata or {}).get("summary") or "",
+            " ".join((metadata or {}).get("output_tail") or []),
+        ]
+        if part
+    ).lower()
+    if "denied: requested access to the resource is denied" in haystack:
+        return {
+            "possible_causes": [
+                "registry authentication or token scope issue",
+                "repository permission or namespace access issue",
+                "registry plan or private repository limit",
+            ]
+        }
+    if "denied:" in haystack:
+        return {
+            "possible_causes": [
+                "registry authentication or token scope issue",
+                "repository permission or namespace access issue",
+                "registry plan or private repository limit",
+            ]
+        }
+    if "unauthorized" in haystack or "insufficient scopes" in haystack:
+        return {
+            "possible_causes": [
+                "registry authentication failed",
+                "registry token does not have push permission",
+            ]
+        }
+    if "repository does not exist" in haystack:
+        return {
+            "possible_causes": [
+                "target repository does not exist",
+                "authenticated user does not have permission to create or push to the repository",
+            ]
+        }
+    return {}
+
+
+def push_event_metadata(result, message, *, status):
+    metadata = result.metadata | {
+        "step": "image.push",
+        "success": status == "succeeded",
+        "push_log_available": bool(result.log_path),
+        "push_log_path": result.log_path,
+        "push_output_tail": result.metadata.get("output_tail"),
+        "push_summary": result.metadata.get("summary") or message,
+        "push_duration": result.metadata.get("duration_seconds"),
+        "push_attempts": result.metadata.get("attempt"),
+        "push_total_attempts": result.metadata.get("total_attempts"),
+    }
+    if status == "failed":
+        metadata["error_message"] = message
+        metadata |= push_error_hint(message, metadata)
+    return metadata
+
+
 class ClaimLostError(Exception):
     def __init__(self, deployment_id, worker_id, current_claimed_by, current_claimed_at, status):
         super().__init__("Deployment claim was lost before worker completed processing")
@@ -219,6 +280,12 @@ def attach_claim_heartbeat(executor, deployment, *, expected_worker_id=None):
 
 def mark_failed(deployment, step, message, *, metadata=None):
     metadata = {"summary": message, **(metadata or {})}
+    if step == "image.push":
+        metadata = push_event_metadata(
+            type("PushFailureResult", (), {"metadata": metadata, "log_path": deployment.build.log_path})(),
+            message,
+            status="failed",
+        )
     ensure_claim_owned(deployment)
     refresh_claim(deployment)
     deployment.status = "failed"
@@ -352,6 +419,7 @@ def process_deployment(deployment, executor=None):
     attach_claim_heartbeat(executor, deployment, expected_worker_id=worker_id())
     deployment.last_error = None
     deployment.build.last_error = None
+    deployment.build.registry_push_status = None
 
     try:
         begin_step(
@@ -451,6 +519,7 @@ def process_deployment(deployment, executor=None):
         push_result = executor.push_image(deployment)
         ensure_claim_owned(deployment)
         apply_execution_result(deployment, push_result)
+        deployment.build.registry_push_status = "skipped" if push_result.metadata.get("skipped") else "succeeded"
         deployment.build.status = "succeeded"
         deployment.build.finished_at = now_utc()
         commit_step_result(
@@ -459,7 +528,8 @@ def process_deployment(deployment, executor=None):
             status="succeeded",
             message=push_result.message,
             step="image.push",
-            metadata=push_result.metadata | {"log_path": push_result.log_path, "summary": push_result.message},
+            metadata=push_event_metadata(push_result, push_result.message, status="succeeded")
+            | {"log_path": push_result.log_path, "summary": push_result.message},
         )
 
         begin_step(
@@ -516,6 +586,8 @@ def process_deployment(deployment, executor=None):
     except WorkerExecutionError as exc:
         if exc.log_path:
             deployment.build.log_path = exc.log_path
+        if exc.step == "image.push":
+            deployment.build.registry_push_status = "failed"
         try:
             return mark_failed(deployment, exc.step, exc.message, metadata=exc.metadata)
         except ClaimLostError as claim_exc:
