@@ -7,11 +7,14 @@ class Project(db.Model):
     __tablename__ = "projects"
     VALID_TRIGGERS = ("manual", "github_push")
     VALID_RUNTIMES = ("dockerfile",)
+    VALID_GIT_AUTH_TYPES = ("none", "token")
 
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False, unique=True)
     repo_url = db.Column(db.String(255), nullable=False)
     branch = db.Column(db.String(120), nullable=False, default="main")
+    git_auth_type = db.Column(db.String(32), nullable=False, default="none")
+    git_secret_ref = db.Column(db.String(120), nullable=True)
     dockerfile_path = db.Column(db.String(255), nullable=False, default="Dockerfile")
     build_context = db.Column(db.String(255), nullable=False, default=".")
     port = db.Column(db.Integer, nullable=False)
@@ -39,6 +42,8 @@ class Project(db.Model):
             "name": self.name,
             "repo_url": self.repo_url,
             "branch": self.branch,
+            "git_auth_type": self.git_auth_type,
+            "git_secret_ref": self.git_secret_ref,
             "dockerfile_path": self.dockerfile_path,
             "build_context": self.build_context,
             "port": self.port,

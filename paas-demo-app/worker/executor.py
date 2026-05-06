@@ -5,6 +5,8 @@ import shutil
 import socket
 import subprocess
 import time
+import os
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,18 +183,22 @@ class LocalDockerExecutor(DeploymentExecutor):
         if repo_dir.exists():
             shutil.rmtree(repo_dir)
 
+        clone_args = [
+            "git",
+            "clone",
+            "--branch",
+            deployment.project.branch,
+            "--single-branch",
+            deployment.project.repo_url,
+            str(repo_dir),
+        ]
+        clone_env, redacted_values = self._git_clone_environment(deployment)
         result = self._run_command(
             "repository.clone",
-            [
-                "git",
-                "clone",
-                "--branch",
-                deployment.project.branch,
-                "--single-branch",
-                deployment.project.repo_url,
-                str(repo_dir),
-            ],
+            clone_args,
             log_path=log_path,
+            env=clone_env,
+            redacted_values=redacted_values,
         )
         result.workspace_path = str(workspace_dir)
         return result
@@ -227,7 +233,7 @@ class LocalDockerExecutor(DeploymentExecutor):
                 "docker",
                 "build",
                 "--tag",
-                image_ref,
+                image_tag,
                 "--file",
                 str(dockerfile_path),
                 str(build_context_path),
@@ -605,17 +611,18 @@ class LocalDockerExecutor(DeploymentExecutor):
             args.extend(["--env", f"{name}={value}"])
         return args
 
-    def _run_command(self, step, args, *, log_path, stdin_input=None):
+    def _run_command(self, step, args, *, log_path, stdin_input=None, env=None, redacted_values=None):
         log_path.parent.mkdir(parents=True, exist_ok=True)
         total_attempts = 1 + self.retry_count if step in self.retryable_steps else 1
         last_error = None
+        redacted_values = tuple(value for value in (redacted_values or []) if value)
 
         for attempt in range(1, total_attempts + 1):
             started_at = datetime.now(timezone.utc)
             try:
-                completed = self._execute_command(args, stdin_input=stdin_input)
+                completed = self._execute_command(args, stdin_input=stdin_input, env=env)
             except subprocess.TimeoutExpired as exc:
-                output = (exc.stdout or "") + (exc.stderr or "")
+                output = self._sanitize_text((exc.stdout or "") + (exc.stderr or ""), redacted_values=redacted_values)
                 metadata = self._build_command_metadata(
                     args=args,
                     output=output,
@@ -624,8 +631,9 @@ class LocalDockerExecutor(DeploymentExecutor):
                     attempt=attempt,
                     total_attempts=total_attempts,
                     timed_out=True,
+                    redacted_values=redacted_values,
                 )
-                self._write_log(log_path, args, output, metadata=metadata, append=attempt > 1)
+                self._write_log(log_path, args, output, metadata=metadata, append=attempt > 1, redacted_values=redacted_values)
                 last_error = WorkerExecutionError(
                     step,
                     f"Command timed out after {self.command_timeout} seconds",
@@ -633,15 +641,17 @@ class LocalDockerExecutor(DeploymentExecutor):
                     log_path=str(log_path),
                 )
             except OSError as exc:
+                output = self._sanitize_text(str(exc), redacted_values=redacted_values)
                 metadata = self._build_command_metadata(
                     args=args,
-                    output=str(exc),
+                    output=output,
                     started_at=started_at,
                     returncode=None,
                     attempt=attempt,
                     total_attempts=total_attempts,
+                    redacted_values=redacted_values,
                 )
-                self._write_log(log_path, args, str(exc), metadata=metadata, append=attempt > 1)
+                self._write_log(log_path, args, output, metadata=metadata, append=attempt > 1, redacted_values=redacted_values)
                 last_error = WorkerExecutionError(
                     step,
                     f"Command execution failed: {exc}",
@@ -649,7 +659,10 @@ class LocalDockerExecutor(DeploymentExecutor):
                     log_path=str(log_path),
                 )
             else:
-                combined_output = (completed.stdout or "") + (completed.stderr or "")
+                combined_output = self._sanitize_text(
+                    (completed.stdout or "") + (completed.stderr or ""),
+                    redacted_values=redacted_values,
+                )
                 metadata = self._build_command_metadata(
                     args=args,
                     output=combined_output,
@@ -657,8 +670,16 @@ class LocalDockerExecutor(DeploymentExecutor):
                     returncode=completed.returncode,
                     attempt=attempt,
                     total_attempts=total_attempts,
+                    redacted_values=redacted_values,
                 )
-                self._write_log(log_path, args, combined_output, metadata=metadata, append=attempt > 1)
+                self._write_log(
+                    log_path,
+                    args,
+                    combined_output,
+                    metadata=metadata,
+                    append=attempt > 1,
+                    redacted_values=redacted_values,
+                )
                 if completed.returncode == 0:
                     message = self._summarize_output(combined_output) or f"{step} completed successfully"
                     return ExecutionResult(message, metadata=metadata, log_path=str(log_path))
@@ -675,7 +696,7 @@ class LocalDockerExecutor(DeploymentExecutor):
 
         raise last_error
 
-    def _execute_command(self, args, *, allow_heartbeat=True, stdin_input=None):
+    def _execute_command(self, args, *, allow_heartbeat=True, stdin_input=None, env=None):
         heartbeat_cb = self.heartbeat if allow_heartbeat else None
         if self.runner is not None:
             try:
@@ -686,6 +707,7 @@ class LocalDockerExecutor(DeploymentExecutor):
                     timeout=self.command_timeout,
                     check=False,
                     input=stdin_input,
+                    env=env,
                     heartbeat_cb=heartbeat_cb,
                     heartbeat_interval_seconds=self.heartbeat_interval,
                 )
@@ -698,15 +720,53 @@ class LocalDockerExecutor(DeploymentExecutor):
                         timeout=self.command_timeout,
                         check=False,
                         input=stdin_input,
+                        env=env,
                     )
                 except TypeError:
+                    pass
+                try:
                     return self.runner(
                         args,
                         capture_output=True,
                         text=True,
                         timeout=self.command_timeout,
                         check=False,
+                        input=stdin_input,
+                        heartbeat_cb=heartbeat_cb,
+                        heartbeat_interval_seconds=self.heartbeat_interval,
                     )
+                except TypeError:
+                    pass
+                try:
+                    return self.runner(
+                        args,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.command_timeout,
+                        check=False,
+                        input=stdin_input,
+                    )
+                except TypeError:
+                    pass
+                try:
+                    return self.runner(
+                        args,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.command_timeout,
+                        check=False,
+                        heartbeat_cb=heartbeat_cb,
+                        heartbeat_interval_seconds=self.heartbeat_interval,
+                    )
+                except TypeError:
+                    pass
+                return self.runner(
+                    args,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.command_timeout,
+                    check=False,
+                )
 
         if stdin_input is not None:
             return subprocess.run(
@@ -716,6 +776,7 @@ class LocalDockerExecutor(DeploymentExecutor):
                 timeout=self.command_timeout,
                 check=False,
                 input=stdin_input,
+                env=env,
             )
 
         process = subprocess.Popen(
@@ -723,6 +784,7 @@ class LocalDockerExecutor(DeploymentExecutor):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env=env,
         )
         deadline = time.monotonic() + self.command_timeout
         last_heartbeat = time.monotonic()
@@ -772,10 +834,21 @@ class LocalDockerExecutor(DeploymentExecutor):
         lines = [line.strip() for line in output.splitlines() if line.strip()]
         return [line[:line_width] for line in lines[-limit:]]
 
-    def _build_command_metadata(self, *, args, output, started_at, returncode, attempt, total_attempts, timed_out=False):
+    def _build_command_metadata(
+        self,
+        *,
+        args,
+        output,
+        started_at,
+        returncode,
+        attempt,
+        total_attempts,
+        timed_out=False,
+        redacted_values=None,
+    ):
         finished_at = datetime.now(timezone.utc)
         return {
-            "command": args,
+            "command": self._sanitize_args(args, redacted_values=redacted_values),
             "returncode": returncode,
             "attempt": attempt,
             "total_attempts": total_attempts,
@@ -787,9 +860,9 @@ class LocalDockerExecutor(DeploymentExecutor):
             "output_tail": self._tail_lines(output),
         }
 
-    @staticmethod
-    def _write_log(log_path, args, output, *, metadata=None, append=False):
-        rendered = ["Command:", " ".join(shlex.quote(part) for part in args)]
+    def _write_log(self, log_path, args, output, *, metadata=None, append=False, redacted_values=None):
+        sanitized_args = self._sanitize_args(args, redacted_values=redacted_values)
+        rendered = ["Command:", " ".join(shlex.quote(part) for part in sanitized_args)]
         if metadata:
             rendered.extend(
                 [
@@ -808,6 +881,55 @@ class LocalDockerExecutor(DeploymentExecutor):
             if append:
                 handle.write("\n==== retry ====\n")
             handle.write(payload)
+
+    @staticmethod
+    def _sanitize_text(text, *, redacted_values=None):
+        sanitized = text
+        for value in redacted_values or ():
+            if value:
+                sanitized = sanitized.replace(value, "***")
+        return sanitized
+
+    def _sanitize_args(self, args, *, redacted_values=None):
+        return [self._sanitize_text(str(part), redacted_values=redacted_values) for part in args]
+
+    def _git_clone_environment(self, deployment):
+        git_auth_type = (getattr(deployment.project, "git_auth_type", None) or "none").strip().lower()
+        if git_auth_type == "none":
+            return None, ()
+        if git_auth_type != "token":
+            raise WorkerExecutionError("repository.clone", f"Unsupported git auth type '{git_auth_type}'")
+
+        secret_ref = (getattr(deployment.project, "git_secret_ref", None) or "").strip()
+        if not secret_ref:
+            raise WorkerExecutionError("repository.clone", "git_secret_ref is required when git_auth_type is 'token'")
+
+        token_env_name = f"CONTROL_PLANE_GIT_TOKEN_{secret_ref}"
+        token = os.getenv(token_env_name)
+        if not token:
+            raise WorkerExecutionError(
+                "repository.clone",
+                f"Git token environment variable '{token_env_name}' is not set",
+            )
+
+        repo_url = deployment.project.repo_url or ""
+        if not repo_url.startswith("https://github.com/"):
+            raise WorkerExecutionError(
+                "repository.clone",
+                "Token-based git auth currently supports only https://github.com/ repository URLs",
+            )
+
+        auth_header = "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+        env = os.environ.copy()
+        env.update(
+            {
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.extraheader",
+                "GIT_CONFIG_VALUE_0": auth_header,
+            }
+        )
+        return env, (token, auth_header)
 
 
 def create_executor():

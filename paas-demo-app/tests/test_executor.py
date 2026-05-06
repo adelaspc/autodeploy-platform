@@ -1,5 +1,7 @@
 from pathlib import Path
 import subprocess
+import base64
+import pytest
 
 from worker.executor import LocalDockerExecutor
 from worker.service import process_next_pending_deployment
@@ -146,6 +148,8 @@ def test_local_docker_executor_pushes_registry_image_when_enabled(tmp_path):
     assert build_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
     assert tag_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
     assert push_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
+    build_call = next(item for item in commands if item["args"][:2] == ["docker", "build"])
+    assert build_call["args"][3] == "demo-app:abc123def456"
     assert any(item["args"][:2] == ["docker", "tag"] for item in commands)
     assert any(item["args"][:2] == ["docker", "push"] for item in commands)
     login_call = next(item for item in commands if item["args"][:2] == ["docker", "login"])
@@ -209,3 +213,123 @@ def test_local_docker_executor_retries_retryable_steps(tmp_path):
     assert result.metadata["total_attempts"] == 2
     log_contents = (tmp_path / "project-2" / "deployment-1" / "logs" / "clone.log").read_text(encoding="utf-8")
     assert "==== retry ====" in log_contents
+
+
+def test_local_docker_executor_clones_private_github_repo_with_token_env(tmp_path, monkeypatch):
+    commands = []
+
+    def runner(args, capture_output, text, timeout, check, input=None, env=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
+        commands.append({"args": args, "env": env})
+        repo_dir = Path(args[-1])
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="clone ok\n", stderr="")
+
+    monkeypatch.setenv("CONTROL_PLANE_GIT_TOKEN_DEMO_APP", "ghp_secret_token")
+
+    executor = LocalDockerExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=runner,
+    )
+    deployment = type(
+        "DeploymentStub",
+        (),
+        {
+            "id": 1,
+            "project_id": 2,
+            "project": type(
+                "ProjectStub",
+                (),
+                {
+                    "branch": "main",
+                    "repo_url": "https://github.com/example/private-repo",
+                    "git_auth_type": "token",
+                    "git_secret_ref": "DEMO_APP",
+                },
+            )(),
+        },
+    )()
+
+    result = executor.clone_repo(deployment)
+
+    assert result.workspace_path.startswith(str(tmp_path))
+    clone_call = commands[0]
+    assert clone_call["args"][:2] == ["git", "clone"]
+    assert clone_call["args"][5] == "https://github.com/example/private-repo"
+    assert clone_call["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert clone_call["env"]["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    assert clone_call["env"]["GIT_CONFIG_VALUE_0"].startswith("AUTHORIZATION: basic ")
+    encoded = clone_call["env"]["GIT_CONFIG_VALUE_0"].split("basic ", 1)[1]
+    assert base64.b64decode(encoded).decode("utf-8") == "x-access-token:ghp_secret_token"
+
+
+def test_local_docker_executor_clone_fails_when_git_token_env_is_missing(tmp_path):
+    executor = LocalDockerExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=lambda *args, **kwargs: subprocess.CompletedProcess(args=kwargs.get("args", []), returncode=0, stdout="", stderr=""),
+    )
+    deployment = type(
+        "DeploymentStub",
+        (),
+        {
+            "id": 1,
+            "project_id": 2,
+            "project": type(
+                "ProjectStub",
+                (),
+                {
+                    "branch": "main",
+                    "repo_url": "https://github.com/example/private-repo",
+                    "git_auth_type": "token",
+                    "git_secret_ref": "MISSING_APP",
+                },
+            )(),
+        },
+    )()
+
+    with pytest.raises(Exception) as exc_info:
+        executor.clone_repo(deployment)
+
+    assert "CONTROL_PLANE_GIT_TOKEN_MISSING_APP" in str(exc_info.value)
+
+
+def test_local_docker_executor_redacts_git_token_from_clone_logs(tmp_path, monkeypatch):
+    token = "ghp_secret_token"
+
+    def runner(args, capture_output, text, timeout, check, input=None, env=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr=f"auth failed for {token}\n")
+
+    monkeypatch.setenv("CONTROL_PLANE_GIT_TOKEN_DEMO_APP", token)
+
+    executor = LocalDockerExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=runner,
+        retry_count=0,
+    )
+    deployment = type(
+        "DeploymentStub",
+        (),
+        {
+            "id": 1,
+            "project_id": 2,
+            "project": type(
+                "ProjectStub",
+                (),
+                {
+                    "branch": "main",
+                    "repo_url": "https://github.com/example/private-repo",
+                    "git_auth_type": "token",
+                    "git_secret_ref": "DEMO_APP",
+                },
+            )(),
+        },
+    )()
+
+    with pytest.raises(Exception):
+        executor.clone_repo(deployment)
+
+    log_contents = (tmp_path / "project-2" / "deployment-1" / "logs" / "clone.log").read_text(encoding="utf-8")
+    assert token not in log_contents
+    assert "***" in log_contents

@@ -227,6 +227,7 @@ def test_process_next_pending_deployment_runs_to_completion(client):
     assert processed.claimed_by is None
     assert processed.build.started_at is not None
     assert processed.build.finished_at is not None
+    assert processed.build.registry_push_status == "skipped"
     assert executor.calls == ["clone_repo", "build_image", "run_tests", "tag_image", "push_image", "deploy"]
 
     deployment_response = client.get(f"/api/projects/{processed.project_id}/deployments/{processed.id}")
@@ -243,6 +244,10 @@ def test_process_next_pending_deployment_runs_to_completion(client):
     assert "claim_cleared" in event_types
     assert all(event["level"] in {"info", "error"} for event in deployment["events"])
     assert any(event["metadata_json"] for event in deployment["events"])
+    push_event = next(event for event in deployment["events"] if event["event_type"] == "image.push_succeeded")
+    assert push_event["metadata_json"]["step"] == "image.push"
+    assert push_event["metadata_json"]["push_log_available"] is True
+    assert push_event["metadata_json"]["push_summary"] == "Push skipped"
 
 
 def test_process_next_pending_deployment_skips_testing_when_no_test_command(client):
@@ -299,6 +304,7 @@ def test_process_next_pending_deployment_stops_after_push_failure(client):
     assert processed.id == pending["id"]
     assert processed.status == "failed"
     assert processed.build.status == "failed"
+    assert processed.build.registry_push_status == "failed"
     assert processed.last_error == "Registry push failed"
     assert processed.build.log_path == "/tmp/test-workspaces/push.log"
 
@@ -308,6 +314,15 @@ def test_process_next_pending_deployment_stops_after_push_failure(client):
     assert "image.tag_succeeded" in event_types
     assert "image.push.failed" in event_types
     assert "deployment.apply_started" not in event_types
+    failed_event = next(event for event in deployment["events"] if event["event_type"] == "image.push.failed")
+    assert failed_event["metadata_json"]["step"] == "image.push"
+    assert failed_event["metadata_json"]["success"] is False
+    assert failed_event["metadata_json"]["push_summary"] == "Registry push failed"
+    assert failed_event["metadata_json"]["possible_causes"] == [
+        "registry authentication or token scope issue",
+        "repository permission or namespace access issue",
+        "registry plan or private repository limit",
+    ]
 
 
 def test_run_worker_loop_polls_until_stopped():
