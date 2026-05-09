@@ -14,6 +14,7 @@ class TestConfig:
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     CONTROL_PLANE_REGISTRY_ENABLED = False
+    CONTROL_PLANE_GITHUB_WEBHOOK_SECRET = "test-github-webhook-secret"
     CONTROL_PLANE_REGISTRY_URL = "registry.example.com"
     CONTROL_PLANE_REGISTRY_NAMESPACE = "paas"
     CONTROL_PLANE_REGISTRY_USERNAME = None

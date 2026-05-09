@@ -148,6 +148,19 @@ def record_event(deployment, event_type, status, message, *, step=None, level="i
     )
 
 
+def record_auxiliary_events(deployment, events):
+    for event in events or ():
+        record_event(
+            deployment,
+            event["event_type"],
+            event["status"],
+            event["message"],
+            step=event.get("step"),
+            level=event.get("level", "info"),
+            metadata=event.get("metadata_json"),
+        )
+
+
 def write_claim_event(deployment, event_type, message, *, level="info", metadata=None):
     record_event(
         deployment,
@@ -400,9 +413,10 @@ def begin_step(deployment, status, *, event_type, message):
     db.session.commit()
 
 
-def commit_step_result(deployment, *, event_type, status, message, step, metadata):
+def commit_step_result(deployment, *, event_type, status, message, step, metadata, extra_events=None):
     ensure_claim_owned(deployment)
     refresh_claim(deployment)
+    record_auxiliary_events(deployment, extra_events)
     record_event(
         deployment,
         event_type,
@@ -438,6 +452,7 @@ def process_deployment(deployment, executor=None):
             message=clone_result.message,
             step="repository.clone",
             metadata=clone_result.metadata | {"log_path": clone_result.log_path, "summary": clone_result.message},
+            extra_events=clone_result.events,
         )
 
         begin_step(
@@ -463,6 +478,7 @@ def process_deployment(deployment, executor=None):
                 "image_ref": build_result.image_ref,
                 "summary": build_result.message,
             },
+            extra_events=build_result.events,
         )
 
         if deployment.build.test_command:
@@ -482,6 +498,7 @@ def process_deployment(deployment, executor=None):
                 message=test_result.message,
                 step="tests",
                 metadata=test_result.metadata | {"log_path": test_result.log_path, "summary": test_result.message},
+                extra_events=test_result.events,
             )
 
         begin_step(
@@ -514,6 +531,7 @@ def process_deployment(deployment, executor=None):
                 "image_ref": tag_result.image_ref,
                 "summary": tag_result.message,
             },
+            extra_events=tag_result.events,
         )
 
         push_result = executor.push_image(deployment)
@@ -530,6 +548,7 @@ def process_deployment(deployment, executor=None):
             step="image.push",
             metadata=push_event_metadata(push_result, push_result.message, status="succeeded")
             | {"log_path": push_result.log_path, "summary": push_result.message},
+            extra_events=push_result.events,
         )
 
         begin_step(
@@ -554,6 +573,7 @@ def process_deployment(deployment, executor=None):
                 "deploy_target": deploy_result.deploy_target,
                 "summary": deploy_result.message,
             },
+            extra_events=deploy_result.events,
         )
 
         ensure_claim_owned(deployment)
@@ -589,6 +609,7 @@ def process_deployment(deployment, executor=None):
         if exc.step == "image.push":
             deployment.build.registry_push_status = "failed"
         try:
+            record_auxiliary_events(deployment, exc.events)
             return mark_failed(deployment, exc.step, exc.message, metadata=exc.metadata)
         except ClaimLostError as claim_exc:
             return persist_claim_loss(deployment.id, claim_exc)
