@@ -13,6 +13,8 @@ from worker.executor import WorkerExecutionError, create_executor_for_deployment
 
 projects_bp = Blueprint("projects", __name__, url_prefix="/api/projects")
 
+VALID_ENV_VALUE_SOURCES = {"literal", "configmap_key_ref", "secret_key_ref"}
+
 
 def get_project_or_404(project_id):
     project = db.session.get(Project, project_id)
@@ -57,8 +59,9 @@ def validate_project_payload(payload):
         return "Invalid port. Expected an integer between 1 and 65535"
 
     env_vars = payload.get("env_vars", [])
-    if not isinstance(env_vars, list):
-        return "Invalid env_vars. Expected a list of environment variable definitions"
+    env_vars_error = validate_project_env_vars(env_vars)
+    if env_vars_error:
+        return env_vars_error
 
     return None
 
@@ -108,10 +111,72 @@ def validate_project_patch_payload(payload, project):
         if not isinstance(port, int) or port < 1 or port > 65535:
             return None, "Invalid port. Expected an integer between 1 and 65535"
 
-    if "env_vars" in update_data and not isinstance(update_data["env_vars"], list):
-        return None, "Invalid env_vars. Expected a list of environment variable definitions"
+    if "env_vars" in update_data:
+        env_vars_error = validate_project_env_vars(update_data["env_vars"])
+        if env_vars_error:
+            return None, env_vars_error
 
     return update_data, None
+
+
+def validate_project_env_vars(env_vars):
+    if not isinstance(env_vars, list):
+        return "Invalid env_vars. Expected a list of environment variable definitions"
+
+    for index, item in enumerate(env_vars):
+        if not isinstance(item, dict):
+            return f"Invalid env_vars[{index}]. Expected an object"
+
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return f"Invalid env_vars[{index}]. 'name' is required"
+
+        value_source = item.get("value_source")
+        if value_source is None:
+            value_source = "literal" if item.get("value") is not None else None
+
+        source_name = item.get("source_name")
+        source_key = item.get("source_key")
+        value = item.get("value")
+        configmap_ref = item.get("configmap_ref")
+        secret_ref = item.get("secret_ref")
+
+        if configmap_ref is not None or secret_ref is not None:
+            return (
+                f"Invalid env_vars[{index}]. Use 'source_name' and 'source_key' for Kubernetes references; "
+                "'configmap_ref' and 'secret_ref' are not supported field names"
+            )
+
+        # Preserve the original v1 app-spec shape where env vars can be declared
+        # as metadata only, for example {"name": "DATABASE_URL", "required": true}.
+        if value_source is None and value is None and source_name is None and source_key is None:
+            continue
+
+        if value_source is None:
+            return (
+                f"Invalid env_vars[{index}]. Provide either a literal 'value', a supported "
+                "'value_source', or a metadata-only env var definition"
+            )
+        if value_source not in VALID_ENV_VALUE_SOURCES:
+            return (
+                f"Invalid env_vars[{index}]. 'value_source' must be one of: "
+                + ", ".join(sorted(VALID_ENV_VALUE_SOURCES))
+            )
+
+        if value_source == "literal":
+            if value is None:
+                return f"Invalid env_vars[{index}]. 'value' is required when value_source is 'literal'"
+            if source_name is not None or source_key is not None:
+                return f"Invalid env_vars[{index}]. Literal env vars cannot include 'source_name' or 'source_key'"
+        else:
+            if value is not None:
+                return f"Invalid env_vars[{index}]. Referenced env vars cannot include a literal 'value'"
+            if not isinstance(source_name, str) or not source_name.strip():
+                return f"Invalid env_vars[{index}]. 'source_name' is required for referenced env vars"
+            if not isinstance(source_key, str) or not source_key.strip():
+                return f"Invalid env_vars[{index}]. 'source_key' is required for referenced env vars"
+
+    return None
 
 
 def validate_deployment_request_payload(payload):
@@ -310,14 +375,45 @@ def get_deployment_branch(deployment):
 
 def create_user_facing_deployment(project, *, branch, test_command, message_prefix):
     commit_sha = resolve_project_commit_sha(project, branch)
+    return create_requested_deployment(
+        project,
+        branch=branch,
+        test_command=test_command,
+        commit_sha=commit_sha,
+        message_prefix=message_prefix,
+    )
+
+
+def create_requested_deployment(
+    project,
+    *,
+    branch,
+    test_command,
+    commit_sha,
+    message_prefix,
+    deployment_metadata=None,
+    extra_events=None,
+    commit=True,
+):
     build, deployment = create_build_and_deployment_records(
         project,
         commit_sha=commit_sha,
         test_command=test_command,
         deployment_message=f"{message_prefix} for branch '{branch}' at commit '{commit_sha[:12]}'",
-        deployment_metadata={"branch": branch, "commit_sha": commit_sha},
+        deployment_metadata={"branch": branch, "commit_sha": commit_sha} | (deployment_metadata or {}),
     )
-    db.session.commit()
+    for event in extra_events or ():
+        create_deployment_event(
+            deployment.id,
+            event["event_type"],
+            event.get("status", deployment.status),
+            event.get("message"),
+            step=event.get("step"),
+            level=event.get("level", "info"),
+            metadata_json=event.get("metadata_json"),
+        )
+    if commit:
+        db.session.commit()
     return build, deployment, commit_sha
 
 
@@ -330,7 +426,7 @@ def get_latest_project_deployment_record(project_id):
 
 
 def get_runtime_log_path(deployment):
-    for event in sorted(deployment.events, key=lambda item: item.created_at, reverse=True):
+    for event in sorted(deployment.events, key=lambda item: (item.created_at, item.id or 0), reverse=True):
         metadata = event.metadata_json or {}
         runtime_log_path = metadata.get("runtime_log_path")
         if runtime_log_path:
@@ -346,13 +442,13 @@ def get_build_log_path(deployment):
 
 
 def recent_deployment_events(deployment, *, limit=5):
-    events = sorted(deployment.events, key=lambda item: item.created_at, reverse=True)
+    events = sorted(deployment.events, key=lambda item: (item.created_at, item.id or 0), reverse=True)
     return events[:limit]
 
 
 def latest_meaningful_event(deployment):
     ignored_prefixes = ("claim_", "reconcile.")
-    for event in sorted(deployment.events, key=lambda item: item.created_at, reverse=True):
+    for event in sorted(deployment.events, key=lambda item: (item.created_at, item.id or 0), reverse=True):
         if event.event_type.startswith(ignored_prefixes):
             continue
         return event
@@ -370,10 +466,199 @@ def runtime_log_available(deployment):
 
 
 def latest_push_event(deployment):
-    for event in sorted(deployment.events, key=lambda item: item.created_at, reverse=True):
+    for event in sorted(deployment.events, key=lambda item: (item.created_at, item.id or 0), reverse=True):
         if event.event_type in {"image.push_succeeded", "image.push.failed"}:
             return event
     return None
+
+
+def latest_kubernetes_event(deployment, event_types):
+    for event in sorted(deployment.events, key=lambda item: (item.created_at, item.id or 0), reverse=True):
+        if event.event_type in event_types:
+            return event
+    return None
+
+
+def kubernetes_summary_fields(deployment):
+    if deployment.deploy_target != "kubernetes":
+        return {
+            "kubernetes_namespace": None,
+            "kubernetes_deployment_name": None,
+            "kubernetes_service_name": None,
+            "last_kubernetes_failure_stage": None,
+            "last_kubernetes_failure_summary": None,
+            "last_kubernetes_failure_missing_resources": None,
+        }
+
+    apply_event = latest_kubernetes_event(
+        deployment,
+        {"deployment.apply_succeeded", "kubernetes.healthcheck_succeeded", "kubernetes.healthcheck_failed"},
+    )
+    failure_event = latest_kubernetes_event(
+        deployment,
+        {
+            "kubernetes.preflight_failed",
+            "kubernetes.manifest_apply_failed",
+            "kubernetes.rollout_failed",
+            "kubernetes.healthcheck_failed",
+        },
+    )
+    source_event = failure_event or apply_event
+    metadata = source_event.metadata_json if source_event and source_event.metadata_json else {}
+
+    failure_stage = None
+    failure_summary = None
+    failure_missing_resources = None
+    if failure_event is not None:
+        if failure_event.event_type == "kubernetes.preflight_failed":
+            failure_stage = "preflight"
+            failure_missing_resources = metadata.get("missing_resources")
+            failure_summary = (
+                ", ".join(
+                    f"{item.get('kind')}/{item.get('name')}"
+                    for item in failure_missing_resources or []
+                    if item.get("kind") and item.get("name")
+                )
+                or failure_event.message
+            )
+        elif failure_event.event_type == "kubernetes.manifest_apply_failed":
+            failure_stage = "manifest_apply"
+            failure_summary = (
+                metadata.get("apply_pod_logs_summary")
+                or metadata.get("apply_pod_describe_summary")
+                or metadata.get("apply_services_summary")
+                or metadata.get("apply_pods_summary")
+                or failure_event.message
+            )
+        elif failure_event.event_type == "kubernetes.rollout_failed":
+            failure_stage = "rollout"
+            failure_summary = (
+                metadata.get("rollout_pod_logs_summary")
+                or metadata.get("rollout_pod_describe_summary")
+                or metadata.get("rollout_describe_summary")
+                or metadata.get("rollout_pods_summary")
+                or failure_event.message
+            )
+        elif failure_event.event_type == "kubernetes.healthcheck_failed":
+            failure_stage = "healthcheck"
+            failure_summary = (
+                metadata.get("healthcheck_pod_logs_summary")
+                or metadata.get("healthcheck_pod_describe_summary")
+                or metadata.get("healthcheck_service_summary")
+                or metadata.get("healthcheck_deployment_summary")
+                or metadata.get("healthcheck_pods_summary")
+                or failure_event.message
+            )
+
+    return {
+        "kubernetes_namespace": metadata.get("namespace"),
+        "kubernetes_deployment_name": metadata.get("deployment_name"),
+        "kubernetes_service_name": metadata.get("service_name"),
+        "last_kubernetes_failure_stage": failure_stage,
+        "last_kubernetes_failure_summary": failure_summary,
+        "last_kubernetes_failure_missing_resources": failure_missing_resources,
+    }
+
+
+def latest_kubernetes_failure_event(deployment):
+    return latest_kubernetes_event(
+        deployment,
+        {
+            "kubernetes.preflight_failed",
+            "kubernetes.manifest_apply_failed",
+            "kubernetes.rollout_failed",
+            "kubernetes.healthcheck_failed",
+        },
+    )
+
+
+def kubernetes_failure_stage_and_summary(failure_event):
+    if failure_event is None:
+        return None, None
+
+    metadata = failure_event.metadata_json or {}
+    if failure_event.event_type == "kubernetes.preflight_failed":
+        missing_resources = metadata.get("missing_resources") or []
+        summary = (
+            ", ".join(
+                f"{item.get('kind')}/{item.get('name')}"
+                for item in missing_resources
+                if item.get("kind") and item.get("name")
+            )
+            or failure_event.message
+        )
+        return "preflight", summary
+    if failure_event.event_type == "kubernetes.manifest_apply_failed":
+        summary = (
+            metadata.get("apply_pod_logs_summary")
+            or metadata.get("apply_pod_describe_summary")
+            or metadata.get("apply_services_summary")
+            or metadata.get("apply_pods_summary")
+            or failure_event.message
+        )
+        return "manifest_apply", summary
+    if failure_event.event_type == "kubernetes.rollout_failed":
+        summary = (
+            metadata.get("rollout_pod_logs_summary")
+            or metadata.get("rollout_pod_describe_summary")
+            or metadata.get("rollout_describe_summary")
+            or metadata.get("rollout_pods_summary")
+            or failure_event.message
+        )
+        return "rollout", summary
+    if failure_event.event_type == "kubernetes.healthcheck_failed":
+        summary = (
+            metadata.get("healthcheck_pod_logs_summary")
+            or metadata.get("healthcheck_pod_describe_summary")
+            or metadata.get("healthcheck_service_summary")
+            or metadata.get("healthcheck_deployment_summary")
+            or metadata.get("healthcheck_pods_summary")
+            or failure_event.message
+        )
+        return "healthcheck", summary
+    return None, None
+
+
+def serialize_kubernetes_diagnostics(deployment):
+    if deployment.deploy_target != "kubernetes":
+        return None
+
+    failure_event = latest_kubernetes_failure_event(deployment)
+    failure_stage, failure_summary = kubernetes_failure_stage_and_summary(failure_event)
+    metadata = failure_event.metadata_json if failure_event and failure_event.metadata_json else {}
+
+    return {
+        "deployment_id": deployment.id,
+        "deploy_target": deployment.deploy_target,
+        "namespace": metadata.get("namespace"),
+        "deployment_name": metadata.get("deployment_name"),
+        "service_name": metadata.get("service_name"),
+        "failure_stage": failure_stage,
+        "failure_summary": failure_summary,
+        "failure_event_type": failure_event.event_type if failure_event else None,
+        "failure_event_at": failure_event.created_at.isoformat() if failure_event and failure_event.created_at else None,
+        "missing_resources": metadata.get("missing_resources"),
+        "checked_resources": metadata.get("checked_resources"),
+        "configmap_refs_used": metadata.get("configmap_refs_used"),
+        "secret_refs_used": metadata.get("secret_refs_used"),
+        "image_pull_secret": metadata.get("image_pull_secret"),
+        "pod_names": (
+            metadata.get(f"{failure_stage}_pod_names")
+            if failure_stage in {"manifest_apply", "rollout", "healthcheck"}
+            else None
+        ),
+        "pod_describe_summary": (
+            metadata.get(f"{failure_stage}_pod_describe_summary")
+            if failure_stage in {"manifest_apply", "rollout", "healthcheck"}
+            else None
+        ),
+        "pod_logs_summary": (
+            metadata.get(f"{failure_stage}_pod_logs_summary")
+            if failure_stage in {"manifest_apply", "rollout", "healthcheck"}
+            else None
+        ),
+        "diagnostics": metadata,
+    }
 
 
 def serialize_deployment_summary(deployment):
@@ -418,7 +703,7 @@ def serialize_deployment_summary(deployment):
         "created_at": deployment.created_at.isoformat() if deployment.created_at else None,
         "updated_at": deployment.updated_at.isoformat() if deployment.updated_at else None,
         "events": [event.to_dict() for event in reversed(recent_deployment_events(deployment))],
-    }
+    } | kubernetes_summary_fields(deployment)
 
 
 def is_safe_log_path(path):
@@ -470,6 +755,16 @@ def stop_deployment_runtime(deployment, *, message=None):
         deployment.host_port = stop_result.host_port
     if stop_result.healthcheck_url:
         deployment.healthcheck_url = stop_result.healthcheck_url
+    for event in stop_result.events or ():
+        create_deployment_event(
+            deployment.id,
+            event["event_type"],
+            event["status"],
+            event.get("message"),
+            step=event.get("step"),
+            level=event.get("level", "info"),
+            metadata_json=event.get("metadata_json"),
+        )
     create_deployment_event(
         deployment.id,
         "deployment.stopped",
@@ -786,6 +1081,15 @@ def get_project_deployment(project_id, deployment_id):
 def get_project_deployment_summary(project_id, deployment_id):
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     return jsonify(serialize_deployment_summary(deployment))
+
+
+@projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/kubernetes-diagnostics")
+def get_project_deployment_kubernetes_diagnostics(project_id, deployment_id):
+    deployment = get_project_deployment_or_404(project_id, deployment_id)
+    diagnostics = serialize_kubernetes_diagnostics(deployment)
+    if diagnostics is None:
+        return jsonify({"error": "Deployment does not use the Kubernetes target"}), 404
+    return jsonify(diagnostics)
 
 
 @projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/runtime-log")

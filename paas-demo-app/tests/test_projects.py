@@ -124,6 +124,48 @@ def test_create_project_rejects_token_auth_without_secret_ref(client):
     assert response.get_json() == {"error": "git_secret_ref is required when git_auth_type is 'token'"}
 
 
+def test_create_project_accepts_kubernetes_env_var_references(client):
+    response = create_project(
+        client,
+        name="k8s-env-project",
+        env_vars=[
+            {"name": "APP_ENV", "value_source": "configmap_key_ref", "source_name": "my-app-config", "source_key": "app-env"},
+            {"name": "DATABASE_URL", "value_source": "secret_key_ref", "source_name": "my-app-secret", "source_key": "database-url"},
+        ],
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["env_vars"][0]["value_source"] == "configmap_key_ref"
+    assert payload["env_vars"][1]["value_source"] == "secret_key_ref"
+
+
+def test_create_project_rejects_invalid_kubernetes_env_var_reference_shape(client):
+    response = create_project(
+        client,
+        name="invalid-k8s-env-project",
+        env_vars=[
+            {"name": "DATABASE_URL", "value_source": "secret_key_ref", "source_name": "my-app-secret"},
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "source_key" in response.get_json()["error"]
+
+
+def test_create_project_rejects_unsupported_env_ref_field_names(client):
+    response = create_project(
+        client,
+        name="invalid-ref-fields-project",
+        env_vars=[
+            {"name": "DATABASE_URL", "secret_ref": "my-app-secret", "source_name": "my-app-secret", "source_key": "database-url"},
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "configmap_ref" in response.get_json()["error"]
+
+
 def test_delete_project(client):
     project_response = create_project(client, name="temporary-project")
     project_id = project_response.get_json()["id"]
@@ -916,3 +958,289 @@ def test_get_deployment_summary_does_not_expose_other_project_deployment(client)
     response = client.get(f"/api/projects/{second_project_id}/deployments/{deployment_id}/summary")
 
     assert response.status_code == 404
+
+
+def test_get_deployment_summary_includes_kubernetes_runtime_metadata(client, app):
+    project_response = create_project(client, name="k8s-summary-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.service_url = "http://paas-k8s-summary-app-1-svc.default.svc.cluster.local:5000"
+        deployment.build.registry_push_status = "succeeded"
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="kubernetes.healthcheck_succeeded",
+                step="deploy.kubernetes.healthcheck",
+                level="info",
+                status="deploying",
+                message="Kubernetes Service passed healthcheck",
+                metadata_json={
+                    "namespace": "default",
+                    "deployment_name": "paas-k8s-summary-app-1",
+                    "service_name": "paas-k8s-summary-app-1-svc",
+                    "service_url": deployment.service_url,
+                    "healthcheck_url": f"{deployment.service_url}/health",
+                },
+            )
+        )
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="deployment.running",
+                step="deployment",
+                level="info",
+                status="running",
+                message="Deployment is now running",
+                metadata_json={"service_url": deployment.service_url, "deploy_target": "kubernetes"},
+            )
+        )
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/summary")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["deploy_target"] == "kubernetes"
+    assert payload["kubernetes_namespace"] == "default"
+    assert payload["kubernetes_deployment_name"] == "paas-k8s-summary-app-1"
+    assert payload["kubernetes_service_name"] == "paas-k8s-summary-app-1-svc"
+    assert payload["last_kubernetes_failure_stage"] is None
+    assert payload["last_kubernetes_failure_summary"] is None
+
+
+def test_get_deployment_summary_includes_last_kubernetes_failure_context(client, app):
+    project_response = create_project(client, name="k8s-summary-failure-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.last_error = "Healthcheck did not succeed within 30 seconds"
+        deployment.build.last_error = deployment.last_error
+        deployment.build.registry_push_status = "succeeded"
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="kubernetes.healthcheck_failed",
+                step="deploy.kubernetes.healthcheck",
+                level="error",
+                status="failed",
+                message="Healthcheck did not succeed within 30 seconds",
+                metadata_json={
+                    "namespace": "default",
+                    "deployment_name": "paas-k8s-summary-failure-app-1",
+                    "service_name": "paas-k8s-summary-failure-app-1-svc",
+                    "healthcheck_service_summary": "Endpoints: <none> | Session Affinity: None",
+                    "healthcheck_deployment_summary": "Conditions: | Available  True",
+                },
+            )
+        )
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="deployment.failed",
+                step="deployment",
+                level="error",
+                status="failed",
+                message=deployment.last_error,
+                metadata_json={"deploy_target": "kubernetes"},
+            )
+        )
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/summary")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["deploy_target"] == "kubernetes"
+    assert payload["kubernetes_namespace"] == "default"
+    assert payload["kubernetes_deployment_name"] == "paas-k8s-summary-failure-app-1"
+    assert payload["kubernetes_service_name"] == "paas-k8s-summary-failure-app-1-svc"
+    assert payload["last_kubernetes_failure_stage"] == "healthcheck"
+    assert payload["last_kubernetes_failure_summary"] == "Endpoints: <none> | Session Affinity: None"
+
+
+def test_get_deployment_summary_includes_kubernetes_preflight_failure_context(client, app):
+    project_response = create_project(client, name="k8s-summary-preflight-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.last_error = "Missing Kubernetes referenced resources"
+        deployment.build.last_error = deployment.last_error
+        deployment.build.registry_push_status = "succeeded"
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="kubernetes.preflight_failed",
+                step="deploy.kubernetes.preflight",
+                level="error",
+                status="failed",
+                message="Missing Kubernetes referenced resources: ConfigMap/my-app-config, Secret/dockerhub-pull-secret",
+                metadata_json={
+                    "namespace": "default",
+                    "missing_resources": [
+                        {"kind": "ConfigMap", "name": "my-app-config"},
+                        {"kind": "Secret", "name": "dockerhub-pull-secret", "usage": "image_pull_secret"},
+                    ],
+                },
+            )
+        )
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="deployment.failed",
+                step="deployment",
+                level="error",
+                status="failed",
+                message=deployment.last_error,
+                metadata_json={"deploy_target": "kubernetes"},
+            )
+        )
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/summary")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["deploy_target"] == "kubernetes"
+    assert payload["kubernetes_namespace"] == "default"
+    assert payload["last_kubernetes_failure_stage"] == "preflight"
+    assert payload["last_kubernetes_failure_summary"] == "ConfigMap/my-app-config, Secret/dockerhub-pull-secret"
+    assert payload["last_kubernetes_failure_missing_resources"] == [
+        {"kind": "ConfigMap", "name": "my-app-config"},
+        {"kind": "Secret", "name": "dockerhub-pull-secret", "usage": "image_pull_secret"},
+    ]
+
+
+def test_get_kubernetes_diagnostics_returns_structured_failure_view(client, app):
+    project_response = create_project(client, name="k8s-diagnostics-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.last_error = "Healthcheck did not succeed within 30 seconds"
+        deployment.build.last_error = deployment.last_error
+        deployment.build.registry_push_status = "succeeded"
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="kubernetes.healthcheck_failed",
+                step="deploy.kubernetes.healthcheck",
+                level="error",
+                status="failed",
+                message=deployment.last_error,
+                metadata_json={
+                    "namespace": "default",
+                    "deployment_name": "paas-k8s-diagnostics-app-1",
+                    "service_name": "paas-k8s-diagnostics-app-1-svc",
+                    "healthcheck_service_summary": "Endpoints: <none> | Session Affinity: None",
+                    "healthcheck_pod_names": ["app-123"],
+                    "healthcheck_pod_describe_summary": "app-123: Pod Conditions: | Ready  True",
+                    "healthcheck_pod_logs_summary": "app-123: waiting for upstream dependency",
+                },
+            )
+        )
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["deployment_id"] == deployment_id
+    assert payload["deploy_target"] == "kubernetes"
+    assert payload["namespace"] == "default"
+    assert payload["deployment_name"] == "paas-k8s-diagnostics-app-1"
+    assert payload["service_name"] == "paas-k8s-diagnostics-app-1-svc"
+    assert payload["failure_stage"] == "healthcheck"
+    assert payload["failure_summary"] == "app-123: waiting for upstream dependency"
+    assert payload["pod_names"] == ["app-123"]
+    assert payload["pod_describe_summary"] == "app-123: Pod Conditions: | Ready  True"
+    assert payload["pod_logs_summary"] == "app-123: waiting for upstream dependency"
+    assert payload["diagnostics"]["healthcheck_service_summary"] == "Endpoints: <none> | Session Affinity: None"
+
+
+def test_get_kubernetes_diagnostics_returns_preflight_missing_resources(client, app):
+    project_response = create_project(client, name="k8s-diagnostics-preflight-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.last_error = "Missing Kubernetes referenced resources"
+        deployment.build.last_error = deployment.last_error
+        deployment.build.registry_push_status = "succeeded"
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="kubernetes.preflight_failed",
+                step="deploy.kubernetes.preflight",
+                level="error",
+                status="failed",
+                message="Missing Kubernetes referenced resources: ConfigMap/my-app-config",
+                metadata_json={
+                    "namespace": "default",
+                    "checked_resources": ["configmap/my-app-config"],
+                    "missing_resources": [{"kind": "ConfigMap", "name": "my-app-config"}],
+                    "configmap_refs_used": ["my-app-config"],
+                    "secret_refs_used": [],
+                },
+            )
+        )
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["failure_stage"] == "preflight"
+    assert payload["failure_summary"] == "ConfigMap/my-app-config"
+    assert payload["missing_resources"] == [{"kind": "ConfigMap", "name": "my-app-config"}]
+    assert payload["checked_resources"] == ["configmap/my-app-config"]
+    assert payload["configmap_refs_used"] == ["my-app-config"]
+    assert payload["pod_names"] is None
+
+
+def test_get_kubernetes_diagnostics_returns_404_for_non_kubernetes_deployment(client):
+    project_response = create_project(client, name="non-k8s-diagnostics-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics")
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Deployment does not use the Kubernetes target"}
