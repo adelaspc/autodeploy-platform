@@ -1,3 +1,3 @@
-from worker.cli import run_reconciler, run_worker, run_worker_once
+from worker.cli import run_reconciler, run_reconciler_loop_command, run_worker, run_worker_once
 
-__all__ = ["run_worker", "run_worker_once", "run_reconciler"]
+__all__ = ["run_worker", "run_worker_once", "run_reconciler", "run_reconciler_loop_command"]

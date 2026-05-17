@@ -17,10 +17,73 @@ paas-demo-app/
 └── wsgi.py
 ```
 
+Additional reference:
+
+- [Security Notes](docs/security.md)
+- [Operations Runbook](docs/runbook.md)
+
+## Local Quality Commands
+
+Install runtime and CI/dev dependencies:
+
+```bash
+.venv/bin/python -m pip install -r requirements-dev.txt
+```
+
+Run the full backend test suite:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+Run lint checks:
+
+```bash
+.venv/bin/ruff check backend worker wsgi.py
+```
+
+Run security checks:
+
+```bash
+.venv/bin/bandit -c bandit.yaml -r backend worker wsgi.py
+.venv/bin/pip-audit -r requirements.txt
+```
+
+Validate that migrations apply cleanly:
+
+```bash
+mkdir -p instance
+rm -f instance/ci-control-plane.db
+CONTROL_PLANE_ENV=development \
+CONTROL_PLANE_DATABASE_URL="sqlite:////$(pwd)/instance/ci-control-plane.db" \
+.venv/bin/python -m flask --app wsgi:app db upgrade
+```
+
+Validate the control-plane container build:
+
+```bash
+docker build --tag paas-control-plane:local .
+```
+
+Validate the deployment assets:
+
+```bash
+docker compose config
+helm template ci ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-control-plane/values.ci.yaml > /dev/null
+helm template local ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-control-plane/values.local-microk8s.yaml > /dev/null
+```
+
 ## Scope
 
+- `GET /health`
+- `GET /health/db`
+- `GET /health/platform`
+- `GET /health/activity`
+- `GET /api/audit-events`
 - `GET/POST/PATCH/DELETE /api/projects`
+- `GET /api/projects/<id>/activity`
 - `GET /api/projects/<id>/builds`
+- `GET /api/projects/<id>/deployments`
 - `GET/POST/PATCH /api/projects/<id>/deployments`
 - `GET /api/projects/<id>/deployments/<deployment_id>/summary`
 - `GET /api/projects/<id>/deployments/<deployment_id>/kubernetes-diagnostics`
@@ -30,6 +93,16 @@ paas-demo-app/
 - `python -m flask --app wsgi:app run-worker-once`
 - `python -m flask --app wsgi:app run-worker`
 - `python -m flask --app wsgi:app run-reconciler`
+- `python -m flask --app wsgi:app run-reconciler-loop`
+
+## Deployment Story
+
+The repository now includes two operator-facing deployment paths:
+
+- local Docker Compose for API, worker, reconciler, migrations, and MySQL
+- a minimal Helm chart for production-like Kubernetes deployment of the control plane
+
+Local startup, Kubernetes rollout, migration flow, required config/secrets, health endpoints, and troubleshooting are documented in [docs/runbook.md](docs/runbook.md).
 
 ## Database
 
@@ -39,6 +112,295 @@ The control plane uses its own database configuration:
 - `CONTROL_PLANE_ENV`
 
 For local development, `CONTROL_PLANE_ENV=development` falls back to `sqlite:///instance/control_plane.db`.
+
+`CONTROL_PLANE_ENV` also controls whether project `repo_url` may point at a local filesystem repository:
+
+- `development`: local repository paths are allowed
+- non-development environments: project `repo_url` must be a supported remote Git repository URL
+
+Local repository paths are intended only for:
+
+- local integration testing
+- local development workflows
+
+For production-style remote repositories, the control plane currently supports GitHub HTTPS URLs only. Accepted forms are:
+
+- `https://github.com/<owner>/<repo>`
+- `https://github.com/<owner>/<repo>.git`
+
+Those values are normalized and stored internally as:
+
+- `https://github.com/<owner>/<repo>.git`
+
+Private repositories are supported through GitHub HTTPS plus token auth. SSH Git URLs and non-GitHub remote URLs are not supported yet.
+
+## API Authentication
+
+The control-plane API supports bearer-token authentication with a small role model intended for operator and portfolio use rather than end-user identity management.
+
+Configure any of these environment variables to enable API authentication:
+
+- `CONTROL_PLANE_API_TOKEN_READ_ONLY`
+- `CONTROL_PLANE_API_TOKEN_DEPLOYER`
+- `CONTROL_PLANE_API_TOKEN_ADMIN`
+
+When no API token variables are configured, bearer-token auth is disabled. This is intended only for local development and test workflows.
+
+Use the token as:
+
+```bash
+Authorization: Bearer <token>
+```
+
+Role matrix:
+
+- `read_only`: read/list/show routes, logs, summaries, diagnostics, `/health/db`, `/health/platform`, and `/health/activity`
+- `deployer`: everything in `read_only` plus deploy, retry, and redeploy actions
+- `admin`: everything in `deployer` plus project create/update/delete, manual deployment record creation, and deployment patch/stop operations
+
+Public routes:
+
+- `GET /health`
+
+Webhook security remains separate:
+
+- `POST /api/webhooks/github` uses GitHub signature verification
+- webhook requests do not use bearer API tokens
+
+Authentication responses:
+
+- missing bearer token: `401`
+- invalid bearer token: `401`
+- valid bearer token without sufficient role: `403`
+
+Security notes and tradeoffs:
+
+- tokens are configured through environment variables rather than a user database or OAuth flow
+- the control plane compares bearer tokens with constant-time comparison
+- route logic does not embed raw token values
+- the application does not log raw bearer tokens
+- this is intentionally a small operator-facing security boundary, not a commercial identity system
+
+## Audit Trail
+
+The control plane persists a small audit trail for important mutating API actions. This is intended to demonstrate security awareness and operational visibility rather than full compliance-grade auditing.
+
+Currently audited actions include:
+
+- project created
+- project updated
+- project deleted
+- deploy triggered
+- retry triggered
+- redeploy triggered
+- manual deployment created
+- deployment patched
+- deployment stopped
+- denied mutating API attempts on protected project routes
+
+Audit records include:
+
+- timestamp
+- action
+- actor role
+- resource type and id
+- success or failure status
+- request id when provided through `X-Request-Id`
+- client IP address when available
+- a small redacted metadata object
+
+Audit endpoint:
+
+- `GET /api/audit-events`
+
+This endpoint requires at least `read_only` access when API auth is enabled and supports:
+
+- `limit`
+- `before_id`
+
+Audit tradeoffs:
+
+- the control plane never stores raw bearer tokens
+- audit metadata is intentionally small and redacted
+- secrets, environment variable values, registry credentials, and webhook payload bodies are not persisted in audit records
+- webhook authentication remains separate and webhook payloads are not copied into the audit trail
+
+## Request Correlation
+
+The control plane supports lightweight request correlation through `X-Request-ID`.
+
+Behavior:
+
+- if the client sends a valid `X-Request-ID`, the control plane reuses it
+- if the header is missing, too long, or invalid, the control plane generates a safe request id
+- every HTTP response includes `X-Request-ID`
+- audit events persist the request id
+- request completion logs include the request id
+
+This is intentionally lightweight request correlation for operator workflows. It is not distributed tracing and does not introduce spans, trace propagation, or tracing infrastructure.
+
+## Secret Handling
+
+The control plane now distinguishes normal project configuration from secret-bearing configuration in `env_vars`.
+
+Use these shapes:
+
+- normal literal config:
+  - `{"name":"LOG_LEVEL","value":"info"}`
+- secret literal config for local-style executors:
+  - `{"name":"DATABASE_URL","value":"postgres://...","is_secret":true}`
+- Kubernetes ConfigMap reference:
+  - `{"name":"APP_ENV","value_source":"configmap_key_ref","source_name":"my-app-config","source_key":"app-env"}`
+- Kubernetes Secret reference:
+  - `{"name":"DATABASE_URL","value_source":"secret_key_ref","source_name":"my-app-secret","source_key":"database-url"}`
+
+Current behavior:
+
+- normal config values remain readable in project responses
+- secret literal values are stored for execution but redacted from API responses as `[REDACTED]`
+- Kubernetes `secret_key_ref` entries are treated as secret config by definition
+- when `CONTROL_PLANE_EXECUTOR=kubernetes`, secret env vars must use `secret_key_ref` instead of literal values
+
+Redaction coverage:
+
+- project list/show/create/update responses
+- deployment read models and event payloads
+- deployment summaries and Kubernetes diagnostics
+- build and runtime log API responses
+- audit metadata
+- request/operation error payloads that include deployment metadata
+
+Executor behavior:
+
+- `local-docker` receives literal secret values at runtime, but the worker redacts them from command metadata, deploy logs, runtime-log capture, and healthcheck summaries
+- `kubernetes` uses existing Secret references and does not render literal secret values into generated manifests
+
+Current storage tradeoff:
+
+- secret literal values are still stored in the project record when you use `is_secret: true`
+- they are masked on read rather than encrypted at rest because this project does not yet have key-management infrastructure
+- for a stronger production-oriented posture, move secret delivery to Kubernetes Secrets, Vault, or another external secret manager instead of database-backed literal secrets
+
+## Quality Gates / CI
+
+GitHub Actions now runs a small but meaningful CI suite on pushes to `main` and on pull requests.
+
+Current CI checks:
+
+- `Tests`: runs the Python test suite, including auth, audit, request-correlation, Kubernetes, worker, and secret-redaction coverage
+- `Ruff`: runs lightweight Python linting with a small baseline focused on real code correctness issues
+- `Bandit`: runs a targeted security scan against `backend/`, `worker/`, and `wsgi.py`
+- `Migrations`: applies Alembic/Flask-Migrate migrations against a fresh SQLite database
+- `Docker Build`: verifies that the control-plane Docker image still builds
+- `Dependency Audit`: runs `pip-audit` as an informational check
+
+Why these gates matter:
+
+- tests protect behavior and deployment orchestration confidence
+- lint catches correctness issues early without turning this repo into a formatting exercise
+- security scanning reinforces the portfolio story around safe defaults and review discipline
+- migration checks make schema changes more credible
+- Docker build validation proves the application is still packageable and runnable
+
+Current tradeoffs:
+
+- `pip-audit` is non-blocking because advisory data changes outside the repo and the dependency set is still relatively lightweight
+- `bandit` skips a small set of subprocess and workspace-path heuristics because this control plane intentionally orchestrates external tools such as `git`, `docker`, and `kubectl`, and uses an explicit workspace root under operator control
+- mypy is not enforced yet because the codebase does not have a clean typing baseline, and adding it now would create more noise than signal
+
+Future hardening options:
+
+- add a typed baseline and introduce mypy incrementally
+- pin direct dependencies more tightly to make dependency-audit results more stable
+- split fast PR checks from slower scheduled security checks if CI time grows
+- add image scanning or SBOM generation when the project is ready for a stronger supply-chain story
+
+For a project-scoped operator view, `GET /api/projects/<id>/activity` reports:
+
+- latest deployments for that project
+- current active deployment, if any
+- latest failed deployment with last error
+- recent webhook deliveries relevant to that project
+- compact summary fields such as latest deployment time and recent counts
+
+This endpoint supports:
+
+- `latest_limit`
+- `webhook_limit`
+- `deployment_status`
+- `webhook_status`
+- `active_only`
+- `include_latest_failed`
+- `include_webhooks`
+- `before_deployment_id`
+- `before_webhook_delivery_id`
+
+Each limit must be an integer between `1` and `100`.
+
+The boolean flags accept standard truthy/falsy forms such as `true` / `false`.
+
+For project deployment history, `GET /api/projects/<id>/deployments` now supports:
+
+- `limit`
+- `deployment_status`
+- `before_deployment_id`
+
+and returns an `items` array plus a `pagination` block with the next cursor hint.
+
+For a compact project readiness summary, `GET /api/projects/<id>/status` reports:
+
+- latest deployment summary for the project
+- active deployment summary, if any
+- latest failed deployment summary, if any
+- whether deployment creation is currently ready under the active executor config
+- the current deploy-readiness error when it is not ready
+- compact counts and latest deployment timestamp
+
+For a quick operator-facing config summary, `GET /health/platform` reports:
+
+- active `CONTROL_PLANE_ENV`
+- active `CONTROL_PLANE_EXECUTOR`
+- API auth posture for bearer-token protection
+- whether local repository paths are currently allowed
+- whether deployment creation is currently ready for the selected executor
+- registry config readiness at the config level
+- Kubernetes deployment prereq readiness at the config level
+
+This endpoint is intentionally config-only. It does not perform live Docker, registry, database, or Kubernetes API checks beyond the separate `/health/db` probe.
+
+For a quick operator-facing activity view, `GET /health/activity` reports:
+
+- latest deployments across projects
+- currently pending or running deployments
+- recent failed deployments with last error
+- recent ignored webhook deliveries with reason
+- recent accepted webhook deliveries
+- compact summary fields such as latest deployment time and recent counts
+
+This endpoint is read-only and is built from persisted project/build/deployment records rather than worker logs or raw event streams.
+
+It also supports optional per-section limits:
+
+- `latest_limit`
+- `active_limit`
+- `failed_limit`
+- `ignored_webhook_limit`
+- `accepted_webhook_limit`
+- `before_deployment_id`
+- `before_webhook_delivery_id`
+
+Each limit must be an integer between `1` and `100`.
+
+It also supports optional status filters:
+
+- `deployment_status`
+  Values must come from the deployment state machine, for example `pending`, `running`, `failed`.
+- `webhook_status`
+  Supported values are `accepted` and `ignored`.
+- `project_id`
+  Narrows the platform-wide activity view to one project id.
+
+Both activity endpoints also return compact pagination metadata including the next cursor hints.
 
 ## Worker Execution
 
@@ -59,6 +421,9 @@ Useful settings:
 - `CONTROL_PLANE_REGISTRY_NAMESPACE`
 - `CONTROL_PLANE_REGISTRY_USERNAME`
 - `CONTROL_PLANE_REGISTRY_PASSWORD`
+- `CONTROL_PLANE_API_TOKEN_READ_ONLY`
+- `CONTROL_PLANE_API_TOKEN_DEPLOYER`
+- `CONTROL_PLANE_API_TOKEN_ADMIN`
 - `CONTROL_PLANE_GITHUB_WEBHOOK_SECRET`
 - `CONTROL_PLANE_KUBECONFIG`
 - `CONTROL_PLANE_K8S_NAMESPACE`
@@ -154,7 +519,7 @@ Projects are matched only when all of the following are true:
 - the normalized repository URL matches the webhook repository
 - `project.branch` matches the pushed branch exactly
 
-Webhook-triggered deploys currently reuse the normal deployment-record flow with `test_command=None`, because projects do not yet persist a default deploy-time test command.
+Webhook-triggered deploys reuse the normal deployment-record flow. When a project defines `default_test_command`, webhook-created deployments inherit it; otherwise they proceed without a test command.
 
 ### Delivery Semantics
 
@@ -281,6 +646,8 @@ curl -X POST http://127.0.0.1:5000/api/projects \
   }'
 ```
 
+Local filesystem repository paths like `/tmp/local-docker-app` are accepted only when `CONTROL_PLANE_ENV=development`. In production-like environments, project creation and update requests must use supported remote Git repository URLs instead.
+
 4. Create a pending deployment:
 
 ```bash
@@ -368,6 +735,13 @@ export CONTROL_PLANE_K8S_IMAGE_PULL_SECRET=<existing-kubernetes-secret-name>
 
 `CONTROL_PLANE_EXECUTOR=kubernetes` requires registry push to succeed before deploy. The Kubernetes executor deploys using `build.image_ref`, not the local image tag.
 
+The control plane now rejects deployment creation up front when Kubernetes mode is selected but the required executor settings are incomplete. At minimum, deployment-creation paths require:
+
+- `CONTROL_PLANE_REGISTRY_ENABLED=true`
+- `CONTROL_PLANE_REGISTRY_URL`
+- `CONTROL_PLANE_REGISTRY_NAMESPACE`
+- `CONTROL_PLANE_KUBECONFIG`
+
 If `CONTROL_PLANE_K8S_IMAGE_PULL_SECRET` is set, the Kubernetes executor adds that existing secret name under `imagePullSecrets` in the generated Pod spec. This is a reference only: the control plane does not create or manage the secret in this iteration.
 
 Before `kubectl apply`, the Kubernetes executor now performs a read-only preflight check for:
@@ -412,16 +786,28 @@ If a Kubernetes deployment needs environment variables from existing cluster res
 
 - literal value:
   - `{"name":"LOG_LEVEL","value":"info"}`
+- secret literal value for local executors:
+  - `{"name":"DATABASE_URL","value":"postgres://...","is_secret":true}`
 - ConfigMap key reference:
   - `{"name":"APP_ENV","value_source":"configmap_key_ref","source_name":"my-app-config","source_key":"app-env"}`
 - Secret key reference:
   - `{"name":"DATABASE_URL","value_source":"secret_key_ref","source_name":"my-app-secret","source_key":"database-url"}`
 
+When `CONTROL_PLANE_EXECUTOR=kubernetes`, project create and update validation also enforces the Kubernetes-compatible shape of these definitions:
+
+- env var `name` must be a valid Kubernetes environment variable name
+- referenced `source_name` values must be valid Kubernetes resource names
+- referenced `source_key` values must be non-empty
+- duplicate env var names are rejected
+- secret env vars cannot use literal values; use `secret_key_ref`
+
+These checks are schema-only. They do not contact the cluster or verify that the referenced `ConfigMap` or `Secret` actually exists.
+
 In this iteration, the control plane:
 
 - does not create ConfigMaps
 - does not create Secrets
-- does not store secret values
+- may store secret literal values for local-style execution, but masks them on read
 - assumes referenced Kubernetes resources already exist
 
 ### Trigger a Deployment

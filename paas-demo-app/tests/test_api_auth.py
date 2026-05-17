@@ -1,0 +1,223 @@
+import hashlib
+import hmac
+import json
+
+import backend.api.deployment_orchestration as deployment_orchestration_api
+
+
+def bearer_headers(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def configure_api_tokens(app):
+    app.config["CONTROL_PLANE_API_TOKEN_READ_ONLY"] = "read-token"
+    app.config["CONTROL_PLANE_API_TOKEN_DEPLOYER"] = "deployer-token"
+    app.config["CONTROL_PLANE_API_TOKEN_ADMIN"] = "admin-token"
+    return {
+        "read_only": bearer_headers("read-token"),
+        "deployer": bearer_headers("deployer-token"),
+        "admin": bearer_headers("admin-token"),
+    }
+
+
+def create_project_payload(name="secured-app"):
+    return {
+        "name": name,
+        "repo_url": "https://github.com/example/secured-app",
+        "branch": "main",
+        "dockerfile_path": "Dockerfile",
+        "build_context": ".",
+        "port": 5000,
+        "healthcheck_path": "/health",
+        "env_vars": [],
+        "trigger": "manual",
+        "runtime": "dockerfile",
+    }
+
+
+def github_headers(app, payload, *, event="push", delivery_id="delivery-123"):
+    body = json.dumps(payload).encode("utf-8")
+    secret = app.config["CONTROL_PLANE_GITHUB_WEBHOOK_SECRET"].encode("utf-8")
+    digest = hmac.new(secret, body, hashlib.sha256).hexdigest()
+    return body, {
+        "Content-Type": "application/json",
+        "X-GitHub-Event": event,
+        "X-GitHub-Delivery": delivery_id,
+        "X-Hub-Signature-256": f"sha256={digest}",
+    }
+
+
+def test_public_health_endpoint_remains_open(client, app):
+    configure_api_tokens(app)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "ok"}
+
+
+def test_protected_route_rejects_missing_bearer_token(client, app):
+    configure_api_tokens(app)
+
+    response = client.get("/health/db")
+
+    assert response.status_code == 401
+    payload = response.get_json()
+    assert payload["error"] == "Missing bearer token"
+    assert payload["request_id"] == response.headers["X-Request-ID"]
+
+
+def test_protected_route_rejects_invalid_bearer_token(client, app):
+    configure_api_tokens(app)
+
+    response = client.get("/api/projects", headers=bearer_headers("wrong-token"))
+
+    assert response.status_code == 401
+    payload = response.get_json()
+    assert payload["error"] == "Invalid bearer token"
+    assert payload["request_id"] == response.headers["X-Request-ID"]
+
+
+def test_read_only_token_can_access_protected_read_endpoints(client, app, monkeypatch):
+    headers = configure_api_tokens(app)
+    create_response = client.post("/api/projects", json=create_project_payload(), headers=headers["admin"])
+    project_id = create_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
+    deploy_response = client.post(f"/api/projects/{project_id}/deploy", json={}, headers=headers["deployer"])
+    deployment_id = deploy_response.get_json()["deployment_id"]
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/summary", headers=headers["read_only"])
+    platform_response = client.get("/health/platform", headers=headers["read_only"])
+
+    assert response.status_code == 200
+    assert response.get_json()["deployment_id"] == deployment_id
+    assert platform_response.status_code == 200
+
+
+def test_read_only_token_cannot_mutate_projects(client, app):
+    headers = configure_api_tokens(app)
+
+    response = client.post("/api/projects", json=create_project_payload(), headers=headers["read_only"])
+
+    assert response.status_code == 403
+    payload = response.get_json()
+    assert payload["error"] == "Forbidden"
+    assert payload["request_id"] == response.headers["X-Request-ID"]
+
+
+def test_deployer_token_can_trigger_deploy_retry_and_redeploy_actions(client, app, monkeypatch):
+    headers = configure_api_tokens(app)
+    create_response = client.post("/api/projects", json=create_project_payload(name="deployer-app"), headers=headers["admin"])
+    project_id = create_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
+    deploy_response = client.post(f"/api/projects/{project_id}/deploy", json={}, headers=headers["deployer"])
+    deployment_id = deploy_response.get_json()["deployment_id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
+    retry_response = client.post(
+        f"/api/projects/{project_id}/deployments/{deployment_id}/retry",
+        headers=headers["deployer"],
+    )
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0011223344556677"
+    )
+    redeploy_response = client.post(f"/api/projects/{project_id}/redeploy", headers=headers["deployer"])
+
+    assert deploy_response.status_code == 201
+    assert retry_response.status_code == 201
+    assert redeploy_response.status_code == 201
+
+
+def test_deployer_token_cannot_perform_admin_only_project_update(client, app):
+    headers = configure_api_tokens(app)
+    create_response = client.post(
+        "/api/projects",
+        json=create_project_payload(name="deployer-forbidden-app"),
+        headers=headers["admin"],
+    )
+    project_id = create_response.get_json()["id"]
+
+    forbidden_response = client.patch(
+        f"/api/projects/{project_id}",
+        json={"branch": "release"},
+        headers=headers["deployer"],
+    )
+
+    assert forbidden_response.status_code == 403
+    payload = forbidden_response.get_json()
+    assert payload["error"] == "Forbidden"
+    assert payload["request_id"] == forbidden_response.headers["X-Request-ID"]
+
+
+def test_admin_token_can_manage_projects_and_deployments(client, app):
+    headers = configure_api_tokens(app)
+    create_response = client.post("/api/projects", json=create_project_payload(name="admin-app"), headers=headers["admin"])
+    project_id = create_response.get_json()["id"]
+
+    patch_response = client.patch(
+        f"/api/projects/{project_id}",
+        json={"branch": "release"},
+        headers=headers["admin"],
+    )
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+        headers=headers["admin"],
+    )
+    deployment_id = deployment_response.get_json()["id"]
+    stop_response = client.patch(
+        f"/api/projects/{project_id}/deployments/{deployment_id}",
+        json={"status": "stopped"},
+        headers=headers["admin"],
+    )
+    delete_response = client.delete(f"/api/projects/{project_id}", headers=headers["admin"])
+
+    assert create_response.status_code == 201
+    assert patch_response.status_code == 200
+    assert deployment_response.status_code == 201
+    assert stop_response.status_code == 200
+    assert delete_response.status_code == 200
+
+
+def test_webhook_authentication_remains_separate_from_bearer_tokens(client, app):
+    configure_api_tokens(app)
+    client.post(
+        "/api/projects",
+        json=create_project_payload(name="webhook-app") | {"trigger": "github_push"},
+        headers=bearer_headers("admin-token"),
+    )
+    payload = {
+        "ref": "refs/heads/main",
+        "after": "0123456789abcdef0123456789abcdef01234567",
+        "repository": {
+            "clone_url": "https://github.com/example/secured-app.git",
+        },
+    }
+    body, headers = github_headers(app, payload, delivery_id="push-auth-separate")
+
+    invalid_response = client.post(
+        "/api/webhooks/github",
+        data=json.dumps(payload),
+        headers={
+            "Content-Type": "application/json",
+            "X-GitHub-Event": "push",
+            "X-Hub-Signature-256": "sha256=invalid",
+        },
+    )
+    valid_response = client.post("/api/webhooks/github", data=body, headers=headers)
+
+    assert invalid_response.status_code == 401
+    invalid_payload = invalid_response.get_json()
+    assert invalid_payload["error"] == "Invalid GitHub webhook signature"
+    assert invalid_payload["request_id"] == invalid_response.headers["X-Request-ID"]
+    assert valid_response.status_code == 202
+    assert valid_response.get_json()["status"] == "accepted"

@@ -333,3 +333,61 @@ def test_local_docker_executor_redacts_git_token_from_clone_logs(tmp_path, monke
     log_contents = (tmp_path / "project-2" / "deployment-1" / "logs" / "clone.log").read_text(encoding="utf-8")
     assert token not in log_contents
     assert "***" in log_contents
+
+
+def test_local_docker_executor_injects_secret_env_values_without_logging_them(tmp_path):
+    commands = []
+    secret_value = "postgres://user:super-secret@db/app"
+
+    def runner(args, capture_output, text, timeout, check, input=None, env=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
+        commands.append(args)
+        if args[:3] == ["docker", "rm", "--force"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+        if args[:3] == ["docker", "run", "--detach"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="container123\n", stderr="")
+        if args[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"booted with {secret_value}\n", stderr="")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
+
+    executor = LocalDockerExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=runner,
+        port_allocator=lambda: 18080,
+        health_probe=lambda _url: {"status_code": 200, "summary": secret_value},
+    )
+    deployment = type(
+        "DeploymentStub",
+        (),
+        {
+            "id": 1,
+            "project_id": 2,
+            "build": type("BuildStub", (), {"image_tag": "demo-app:abc123def456"})(),
+            "project": type(
+                "ProjectStub",
+                (),
+                {
+                    "name": "demo-app",
+                    "port": 5000,
+                    "healthcheck_path": "/health",
+                    "env_vars": [
+                        {"name": "APP_ENV", "value": "production"},
+                        {"name": "DATABASE_URL", "value": secret_value, "is_secret": True},
+                    ],
+                },
+            )(),
+        },
+    )()
+
+    result = executor.deploy(deployment)
+
+    run_command = next(command for command in commands if command[:3] == ["docker", "run", "--detach"])
+    assert f"DATABASE_URL={secret_value}" in run_command
+    deploy_log = (tmp_path / "project-2" / "deployment-1" / "logs" / "deploy.log").read_text(encoding="utf-8")
+    runtime_log = (tmp_path / "project-2" / "deployment-1" / "logs" / "runtime.log").read_text(encoding="utf-8")
+    assert secret_value not in deploy_log
+    assert secret_value not in runtime_log
+    assert "***" in deploy_log
+    assert "[REDACTED]" in runtime_log
+    assert result.metadata["runtime_log_summary"] == "booted with [REDACTED]"
+    assert result.metadata["healthcheck_summary"] == "[REDACTED]"

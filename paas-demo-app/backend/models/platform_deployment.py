@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from backend.extensions import db
+from backend.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
 
 
 class PlatformDeployment(db.Model):
@@ -39,6 +40,10 @@ class PlatformDeployment(db.Model):
     host_port = db.Column(db.Integer, nullable=True)
     healthcheck_url = db.Column(db.String(1024), nullable=True)
     service_url = db.Column(db.String(255), nullable=True)
+    preflight_status = db.Column(db.String(32), nullable=True)
+    preflight_summary = db.Column(db.Text, nullable=True)
+    preflight_metadata_json = db.Column(db.JSON, nullable=True)
+    preflight_completed_at = db.Column(db.DateTime, nullable=True)
     last_error = db.Column(db.Text, nullable=True)
     started_at = db.Column(db.DateTime, nullable=True)
     finished_at = db.Column(db.DateTime, nullable=True)
@@ -67,6 +72,7 @@ class PlatformDeployment(db.Model):
         return next_status in self.STATUS_TRANSITIONS.get(self.status, ())
 
     def to_dict(self):
+        secret_values = secret_values_from_env_vars(self.project.env_vars if self.project else [])
         return {
             "id": self.id,
             "project_id": self.project_id,
@@ -80,7 +86,14 @@ class PlatformDeployment(db.Model):
             "host_port": self.host_port,
             "healthcheck_url": self.healthcheck_url,
             "service_url": self.service_url,
-            "last_error": self.last_error,
+            "preflight_status": self.preflight_status,
+            "preflight_summary": self.preflight_summary,
+            "preflight_metadata_json": redact_sensitive_data(
+                self.preflight_metadata_json,
+                secret_values=secret_values,
+            ),
+            "preflight_completed_at": self.preflight_completed_at.isoformat() if self.preflight_completed_at else None,
+            "last_error": redact_text(self.last_error, secret_values=secret_values) if self.last_error else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,

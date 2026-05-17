@@ -8,7 +8,7 @@ Defines the structure and requirements of a deployable application.
 
 ```yaml
 name: my-app
-repo_url: https://github.com/user/project
+repo_url: https://github.com/user/project.git
 branch: main
 dockerfile_path: Dockerfile
 build_context: .
@@ -18,6 +18,10 @@ healthcheck_path: /health
 env_vars:
   - name: DATABASE_URL
     required: true
+  - name: APP_ENV
+    value_source: configmap_key_ref
+    source_name: my-app-config
+    source_key: app-env
 
 migration_command: "flask db upgrade"
 
@@ -32,13 +36,24 @@ runtime: dockerfile
 ## User-Supplied Application Spec Fields
 
 - `name`: unique application identifier
-- `repo_url`: Git repository containing the application source
+- `repo_url`: GitHub HTTPS repository URL containing the application source; accepted without or with `.git`, stored canonically with `.git`
 - `branch`: branch to deploy from
 - `dockerfile_path`: path to the Dockerfile inside the repository
 - `build_context`: directory used as Docker build context
 - `port`: single exposed HTTP port
 - `healthcheck_path`: HTTP endpoint used to verify application health
-- `env_vars`: runtime environment variables
+- `env_vars`: runtime environment variables; in Kubernetes mode, referenced entries use `value_source` of `configmap_key_ref` or `secret_key_ref` plus `source_name` and `source_key`
+
+## Kubernetes Env Var Rules
+
+When the active executor is Kubernetes, project validation applies additional schema checks to `env_vars`:
+
+- each `name` must be a valid Kubernetes environment variable name
+- each referenced `source_name` must be a valid Kubernetes resource name
+- each referenced `source_key` must be non-empty
+- duplicate env var names are rejected
+
+These are API-layer schema checks only. Existence of the referenced `ConfigMap` and `Secret` resources is still validated later during deploy-time Kubernetes preflight.
 - `migration_command`: optional pre-deploy command
 - `cpu`: CPU request
 - `memory`: memory request

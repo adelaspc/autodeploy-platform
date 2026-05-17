@@ -11,10 +11,12 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 from flask import current_app
+
+from backend.security import env_var_is_secret, redact_sensitive_data, redact_text, secret_values_from_env_vars
 
 
 @dataclass
@@ -35,6 +37,44 @@ class ExecutionResult:
     runtime_log_path: str | None = None
 
 
+@dataclass
+class PreflightResult:
+    status: str
+    summary: str
+    metadata: dict = field(default_factory=dict)
+    events: list = field(default_factory=list)
+    log_path: str | None = None
+    deploy_target: str | None = None
+
+
+@dataclass(frozen=True)
+class ExecutorContract:
+    name: str
+    deploy_target: str
+    runtime: str
+    healthcheck_strategy: str
+    requires_registry_push: bool = False
+    supports_runtime_logs: bool = False
+    supports_runtime_reconciliation: bool = False
+    managed_resources: tuple[str, ...] = ()
+    required_config: tuple[str, ...] = ()
+    optional_config: tuple[str, ...] = ()
+
+    def as_dict(self):
+        return {
+            "name": self.name,
+            "deploy_target": self.deploy_target,
+            "runtime": self.runtime,
+            "healthcheck_strategy": self.healthcheck_strategy,
+            "requires_registry_push": self.requires_registry_push,
+            "supports_runtime_logs": self.supports_runtime_logs,
+            "supports_runtime_reconciliation": self.supports_runtime_reconciliation,
+            "managed_resources": list(self.managed_resources),
+            "required_config": list(self.required_config),
+            "optional_config": list(self.optional_config),
+        }
+
+
 class WorkerExecutionError(Exception):
     def __init__(self, step, message, *, metadata=None, log_path=None, events=None):
         super().__init__(message)
@@ -47,6 +87,16 @@ class WorkerExecutionError(Exception):
 
 class DeploymentExecutor:
     deploy_target = "unknown"
+    contract = ExecutorContract(
+        name="unknown",
+        deploy_target="unknown",
+        runtime="unknown",
+        healthcheck_strategy="unknown",
+    )
+
+    @classmethod
+    def contract_spec(cls):
+        return cls.contract
 
     def set_heartbeat(self, heartbeat):
         self.heartbeat = heartbeat
@@ -65,6 +115,14 @@ class DeploymentExecutor:
 
     def push_image(self, deployment):
         raise NotImplementedError
+
+    def preflight_deploy(self, deployment):
+        return PreflightResult(
+            status="skipped",
+            summary="Deployment preflight is not required for this executor",
+            metadata={"executor": self.deploy_target, "skipped": True},
+            deploy_target=self.deploy_target,
+        )
 
     def deploy(self, deployment):
         raise NotImplementedError
@@ -87,6 +145,12 @@ class DeploymentExecutor:
 
 class FakeDeploymentExecutor(DeploymentExecutor):
     deploy_target = "fake"
+    contract = ExecutorContract(
+        name="fake",
+        deploy_target="fake",
+        runtime="simulated",
+        healthcheck_strategy="simulated",
+    )
 
     def clone_repo(self, deployment):
         return ExecutionResult(
@@ -123,6 +187,14 @@ class FakeDeploymentExecutor(DeploymentExecutor):
             metadata={"executor": self.deploy_target, "skipped": True},
         )
 
+    def preflight_deploy(self, deployment):
+        return PreflightResult(
+            status="skipped",
+            summary="Deployment preflight skipped for fake executor",
+            metadata={"executor": self.deploy_target, "skipped": True},
+            deploy_target=self.deploy_target,
+        )
+
     def deploy(self, deployment):
         return ExecutionResult(
             "Deployment marked as running",
@@ -146,6 +218,26 @@ class FakeDeploymentExecutor(DeploymentExecutor):
 
 class LocalDockerExecutor(DeploymentExecutor):
     deploy_target = "local-docker"
+    contract = ExecutorContract(
+        name="local-docker",
+        deploy_target="local-docker",
+        runtime="container",
+        healthcheck_strategy="direct-http",
+        supports_runtime_logs=True,
+        supports_runtime_reconciliation=True,
+        managed_resources=("docker-image", "docker-container"),
+        optional_config=(
+            "CONTROL_PLANE_REGISTRY_ENABLED",
+            "CONTROL_PLANE_REGISTRY_URL",
+            "CONTROL_PLANE_REGISTRY_NAMESPACE",
+            "CONTROL_PLANE_REGISTRY_USERNAME",
+            "CONTROL_PLANE_REGISTRY_PASSWORD",
+            "CONTROL_PLANE_DEPLOY_HOST",
+            "CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS",
+            "CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS",
+            "CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS",
+        ),
+    )
     retryable_steps = frozenset({"repository.clone", "image.build", "tests", "image.push"})
 
     def __init__(
@@ -340,6 +432,14 @@ class LocalDockerExecutor(DeploymentExecutor):
         push_result.metadata |= login_metadata
         return push_result
 
+    def preflight_deploy(self, deployment):
+        return PreflightResult(
+            status="skipped",
+            summary="Deployment preflight skipped for local-docker executor",
+            metadata={"executor": self.deploy_target, "skipped": True},
+            deploy_target=self.deploy_target,
+        )
+
     def deploy(self, deployment):
         _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
         log_path = logs_dir / "deploy.log"
@@ -349,6 +449,7 @@ class LocalDockerExecutor(DeploymentExecutor):
         published_port = f"{self.deploy_host}:{host_port}:{deployment.project.port}"
         service_url = f"http://{self.deploy_host}:{host_port}"
         healthcheck_url = f"{service_url}{deployment.project.healthcheck_path}"
+        env_args, secret_values = self._env_args_with_redaction(deployment)
 
         self._remove_container_if_exists(container_name)
         run_result = self._run_command(
@@ -361,17 +462,19 @@ class LocalDockerExecutor(DeploymentExecutor):
                 container_name,
                 "--publish",
                 published_port,
-                *self._env_args(deployment),
+                *env_args,
                 deployment.build.image_tag,
             ],
             log_path=log_path,
+            redacted_values=secret_values,
         )
         container_id = (run_result.metadata.get("output_tail") or [run_result.message])[-1]
 
         try:
-            health_metadata = self._wait_for_healthcheck(healthcheck_url, log_path)
+            health_metadata = self._wait_for_healthcheck(healthcheck_url, log_path, redacted_values=secret_values)
         except WorkerExecutionError as exc:
             runtime_metadata = self._capture_container_logs(
+                deployment,
                 container_name,
                 runtime_log_path,
                 step="deploy.container_logs",
@@ -397,6 +500,7 @@ class LocalDockerExecutor(DeploymentExecutor):
             ) from exc
 
         runtime_metadata = self._capture_container_logs(
+            deployment,
             container_name,
             runtime_log_path,
             step="deploy.container_logs",
@@ -431,6 +535,7 @@ class LocalDockerExecutor(DeploymentExecutor):
         runtime_log_path = logs_dir / "runtime.log"
         container_name = deployment.container_name or self._container_name(deployment)
         runtime_metadata = self._capture_container_logs(
+            deployment,
             container_name,
             runtime_log_path,
             step="deploy.container_logs",
@@ -491,7 +596,7 @@ class LocalDockerExecutor(DeploymentExecutor):
             "removed_paths": removed_paths,
         }
 
-    def _wait_for_healthcheck(self, healthcheck_url, log_path):
+    def _wait_for_healthcheck(self, healthcheck_url, log_path, *, redacted_values=()):
         deadline = time.monotonic() + self.healthcheck_timeout
         attempts = 0
         last_error = None
@@ -504,29 +609,30 @@ class LocalDockerExecutor(DeploymentExecutor):
             try:
                 probe_result = self.health_probe(healthcheck_url)
             except Exception as exc:
-                last_error = str(exc)
+                last_error = redact_text(str(exc), secret_values=redacted_values)
                 with log_path.open("a", encoding="utf-8") as handle:
                     handle.write(f"Healthcheck attempt {attempts} failed: {last_error}\n")
                 self.sleep_fn(self.healthcheck_interval)
                 continue
 
+            summary = redact_text(probe_result["summary"], secret_values=redacted_values)
             metadata = {
                 "healthcheck_attempts": attempts,
                 "healthcheck_status_code": probe_result["status_code"],
-                "healthcheck_summary": probe_result["summary"],
+                "healthcheck_summary": summary,
             }
             if 200 <= probe_result["status_code"] < 400:
                 with log_path.open("a", encoding="utf-8") as handle:
                     handle.write(
-                        f"Healthcheck attempt {attempts} succeeded: {probe_result['status_code']} {probe_result['summary']}\n"
+                        f"Healthcheck attempt {attempts} succeeded: {probe_result['status_code']} {summary}\n"
                     )
                 return metadata
 
             last_error = f"HTTP {probe_result['status_code']}"
-            last_summary = probe_result["summary"]
+            last_summary = summary
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write(
-                    f"Healthcheck attempt {attempts} failed: {probe_result['status_code']} {probe_result['summary']}\n"
+                    f"Healthcheck attempt {attempts} failed: {probe_result['status_code']} {summary}\n"
                 )
             self.sleep_fn(self.healthcheck_interval)
 
@@ -563,7 +669,7 @@ class LocalDockerExecutor(DeploymentExecutor):
     @staticmethod
     def _default_health_probe(url):
         try:
-            with urlopen(url, timeout=5) as response:
+            with urlopen(url, timeout=5) as response:  # nosec B310
                 body = response.read(512).decode("utf-8", errors="replace")
                 return {
                     "status_code": response.status,
@@ -598,9 +704,12 @@ class LocalDockerExecutor(DeploymentExecutor):
         namespace = f"{self.registry_namespace}/" if self.registry_namespace else ""
         return f"{self.registry_url}/{namespace}{image_name}:{tag_suffix}"
 
-    def _capture_container_logs(self, container_name, log_path, *, step, missing_ok):
+    def _capture_container_logs(self, deployment, container_name, log_path, *, step, missing_ok):
         result = self._execute_command(["docker", "logs", container_name], allow_heartbeat=False)
-        combined_output = (result.stdout or "") + (result.stderr or "")
+        combined_output = redact_text(
+            (result.stdout or "") + (result.stderr or ""),
+            secret_values=secret_values_from_env_vars(deployment.project.env_vars if deployment.project else []),
+        )
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(combined_output, encoding="utf-8")
 
@@ -631,8 +740,9 @@ class LocalDockerExecutor(DeploymentExecutor):
         self._execute_command(["docker", "rm", "--force", container_name], allow_heartbeat=False)
 
     @staticmethod
-    def _env_args(deployment):
+    def _env_args_with_redaction(deployment):
         args = []
+        redacted_values = []
         for item in deployment.project.env_vars or []:
             if not isinstance(item, dict):
                 continue
@@ -641,7 +751,9 @@ class LocalDockerExecutor(DeploymentExecutor):
             if not name or value is None:
                 continue
             args.extend(["--env", f"{name}={value}"])
-        return args
+            if env_var_is_secret(item):
+                redacted_values.append(str(value))
+        return args, tuple(redacted_values)
 
     def _run_command(self, step, args, *, log_path, stdin_input=None, env=None, redacted_values=None):
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -933,7 +1045,7 @@ class LocalDockerExecutor(DeploymentExecutor):
             "message": message,
             "step": step,
             "level": level,
-            "metadata_json": metadata,
+            "metadata_json": redact_sensitive_data(metadata),
         }
 
     def _git_clone_environment(self, deployment):
@@ -977,6 +1089,31 @@ class LocalDockerExecutor(DeploymentExecutor):
 
 class KubernetesExecutor(LocalDockerExecutor):
     deploy_target = "kubernetes"
+    contract = ExecutorContract(
+        name="kubernetes",
+        deploy_target="kubernetes",
+        runtime="kubernetes",
+        healthcheck_strategy="service-port-forward",
+        requires_registry_push=True,
+        supports_runtime_logs=True,
+        supports_runtime_reconciliation=True,
+        managed_resources=("docker-image", "kubernetes-deployment", "kubernetes-service"),
+        required_config=(
+            "CONTROL_PLANE_REGISTRY_ENABLED=true",
+            "CONTROL_PLANE_REGISTRY_URL",
+            "CONTROL_PLANE_REGISTRY_NAMESPACE",
+            "CONTROL_PLANE_KUBECONFIG",
+        ),
+        optional_config=(
+            "CONTROL_PLANE_K8S_NAMESPACE",
+            "CONTROL_PLANE_K8S_IMAGE_PULL_SECRET",
+            "CONTROL_PLANE_REGISTRY_USERNAME",
+            "CONTROL_PLANE_REGISTRY_PASSWORD",
+            "CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS",
+            "CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS",
+            "CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS",
+        ),
+    )
 
     def __init__(
         self,
@@ -1027,10 +1164,8 @@ class KubernetesExecutor(LocalDockerExecutor):
         self.image_pull_secret = (image_pull_secret or "").strip() or None
 
     def deploy(self, deployment):
-        self._ensure_registry_ready(deployment)
         _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
         manifest_path = logs_dir / "kubernetes-manifest.json"
-        preflight_log_path = logs_dir / "kubernetes-preflight.log"
         apply_log_path = logs_dir / "kubernetes-apply.log"
         rollout_log_path = logs_dir / "kubernetes-rollout.log"
         port_forward_log_path = logs_dir / "kubernetes-port-forward.log"
@@ -1043,43 +1178,13 @@ class KubernetesExecutor(LocalDockerExecutor):
 
         events = [
             self._event(
-                "kubernetes.preflight_started",
-                "deploying",
-                "Checking Kubernetes referenced resources before apply",
-                step="deploy.kubernetes.preflight",
-                metadata={"namespace": self.namespace},
-            )
-        ]
-
-        try:
-            preflight_result = self._preflight_referenced_resources(
-                deployment,
-                log_path=preflight_log_path,
-                existing_events=events,
-            )
-        except WorkerExecutionError as exc:
-            raise WorkerExecutionError(
-                exc.step,
-                exc.message,
-                metadata=exc.metadata | {"manifest_path": str(manifest_path), "namespace": self.namespace},
-                log_path=exc.log_path,
-                events=exc.events,
-            ) from exc
-
-        events.extend(
-            [
-                preflight_result.events[-1],
-            ]
-        )
-        events.append(
-            self._event(
                 "kubernetes.manifest_apply_started",
                 "deploying",
                 "Applying Kubernetes Deployment and Service manifests",
                 step="deploy.kubernetes.apply",
                 metadata={"manifest_path": str(manifest_path), "namespace": self.namespace},
             )
-        )
+        ]
 
         try:
             apply_result = self._run_kubectl_with_events(
@@ -1270,6 +1375,26 @@ class KubernetesExecutor(LocalDockerExecutor):
             service_url=service_url,
             deploy_target=self.deploy_target,
             healthcheck_url=healthcheck_url,
+        )
+
+    def preflight_deploy(self, deployment):
+        self._ensure_registry_ready(deployment)
+        _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
+        log_path = logs_dir / "kubernetes-preflight.log"
+        events = [
+            self._event(
+                "kubernetes.preflight_started",
+                "deploying",
+                "Checking Kubernetes referenced resources before apply",
+                step="deploy.kubernetes.preflight",
+                metadata={"namespace": self.namespace},
+            )
+        ]
+
+        return self._preflight_referenced_resources(
+            deployment,
+            log_path=log_path,
+            existing_events=events,
         )
 
     def stop(self, deployment):
@@ -1477,11 +1602,13 @@ class KubernetesExecutor(LocalDockerExecutor):
             step="deploy.kubernetes.preflight",
             metadata=metadata,
         )
-        return ExecutionResult(
-            "Kubernetes referenced resources are available",
+        return PreflightResult(
+            status="succeeded",
+            summary="Kubernetes referenced resources are available",
             metadata=metadata,
             events=existing_events + [success_event],
             log_path=str(log_path),
+            deploy_target=self.deploy_target,
         )
 
     def _manifest(self, deployment, *, deployment_name, service_name):
@@ -1490,6 +1617,17 @@ class KubernetesExecutor(LocalDockerExecutor):
             "app.kubernetes.io/managed-by": "paas-control-plane",
             "app.kubernetes.io/instance": deployment_name,
         }
+        literal_secret_names = [
+            item.get("name")
+            for item in deployment.project.env_vars or []
+            if isinstance(item, dict) and env_var_is_secret(item) and item.get("value") is not None
+        ]
+        if literal_secret_names:
+            raise WorkerExecutionError(
+                "deploy.kubernetes.manifest",
+                "Kubernetes deployments require secret_key_ref for secret env vars",
+                metadata={"secret_env_var_names": sorted(str(name) for name in literal_secret_names if name)},
+            )
         env = self._kubernetes_env_vars(deployment.project.env_vars)
 
         pod_spec = {
@@ -1853,41 +1991,61 @@ class KubernetesExecutor(LocalDockerExecutor):
         return result.returncode == 0
 
 
+def executor_contract_for_name(executor_name):
+    normalized = (executor_name or "fake").strip().lower()
+    contracts = {
+        "fake": FakeDeploymentExecutor.contract_spec(),
+        "local-docker": LocalDockerExecutor.contract_spec(),
+        "kubernetes": KubernetesExecutor.contract_spec(),
+    }
+    if normalized not in contracts:
+        raise RuntimeError(f"Unsupported executor '{normalized}'")
+    return contracts[normalized]
+
+
+def _build_local_docker_executor():
+    return LocalDockerExecutor(
+        workspace_root=current_app.config.get("CONTROL_PLANE_WORKSPACE_ROOT", "/tmp/paas-workspaces"),
+        command_timeout=current_app.config.get("CONTROL_PLANE_COMMAND_TIMEOUT_SECONDS", 600),
+        retry_count=current_app.config.get("CONTROL_PLANE_COMMAND_RETRY_COUNT", 1),
+        registry_enabled=current_app.config.get("CONTROL_PLANE_REGISTRY_ENABLED", False),
+        registry_url=current_app.config.get("CONTROL_PLANE_REGISTRY_URL"),
+        registry_namespace=current_app.config.get("CONTROL_PLANE_REGISTRY_NAMESPACE"),
+        registry_username=current_app.config.get("CONTROL_PLANE_REGISTRY_USERNAME"),
+        registry_password=current_app.config.get("CONTROL_PLANE_REGISTRY_PASSWORD"),
+        deploy_host=current_app.config.get("CONTROL_PLANE_DEPLOY_HOST", "127.0.0.1"),
+        healthcheck_timeout=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS", 30),
+        healthcheck_interval=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS", 1),
+        heartbeat_interval=current_app.config.get("CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS", 30),
+    )
+
+
+def _build_kubernetes_executor():
+    return KubernetesExecutor(
+        workspace_root=current_app.config.get("CONTROL_PLANE_WORKSPACE_ROOT", "/tmp/paas-workspaces"),
+        command_timeout=current_app.config.get("CONTROL_PLANE_COMMAND_TIMEOUT_SECONDS", 600),
+        retry_count=current_app.config.get("CONTROL_PLANE_COMMAND_RETRY_COUNT", 1),
+        registry_enabled=current_app.config.get("CONTROL_PLANE_REGISTRY_ENABLED", False),
+        registry_url=current_app.config.get("CONTROL_PLANE_REGISTRY_URL"),
+        registry_namespace=current_app.config.get("CONTROL_PLANE_REGISTRY_NAMESPACE"),
+        registry_username=current_app.config.get("CONTROL_PLANE_REGISTRY_USERNAME"),
+        registry_password=current_app.config.get("CONTROL_PLANE_REGISTRY_PASSWORD"),
+        deploy_host=current_app.config.get("CONTROL_PLANE_DEPLOY_HOST", "127.0.0.1"),
+        healthcheck_timeout=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS", 30),
+        healthcheck_interval=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS", 1),
+        heartbeat_interval=current_app.config.get("CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS", 30),
+        kubeconfig=current_app.config.get("CONTROL_PLANE_KUBECONFIG"),
+        namespace=current_app.config.get("CONTROL_PLANE_K8S_NAMESPACE", "default"),
+        image_pull_secret=current_app.config.get("CONTROL_PLANE_K8S_IMAGE_PULL_SECRET"),
+    )
+
+
 def create_executor():
     executor_name = current_app.config.get("CONTROL_PLANE_EXECUTOR", "fake").strip().lower()
     if executor_name == "local-docker":
-        return LocalDockerExecutor(
-            workspace_root=current_app.config.get("CONTROL_PLANE_WORKSPACE_ROOT", "/tmp/paas-workspaces"),
-            command_timeout=current_app.config.get("CONTROL_PLANE_COMMAND_TIMEOUT_SECONDS", 600),
-            retry_count=current_app.config.get("CONTROL_PLANE_COMMAND_RETRY_COUNT", 1),
-            registry_enabled=current_app.config.get("CONTROL_PLANE_REGISTRY_ENABLED", False),
-            registry_url=current_app.config.get("CONTROL_PLANE_REGISTRY_URL"),
-            registry_namespace=current_app.config.get("CONTROL_PLANE_REGISTRY_NAMESPACE"),
-            registry_username=current_app.config.get("CONTROL_PLANE_REGISTRY_USERNAME"),
-            registry_password=current_app.config.get("CONTROL_PLANE_REGISTRY_PASSWORD"),
-            deploy_host=current_app.config.get("CONTROL_PLANE_DEPLOY_HOST", "127.0.0.1"),
-            healthcheck_timeout=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS", 30),
-            healthcheck_interval=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS", 1),
-            heartbeat_interval=current_app.config.get("CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS", 30),
-        )
+        return _build_local_docker_executor()
     if executor_name == "kubernetes":
-        return KubernetesExecutor(
-            workspace_root=current_app.config.get("CONTROL_PLANE_WORKSPACE_ROOT", "/tmp/paas-workspaces"),
-            command_timeout=current_app.config.get("CONTROL_PLANE_COMMAND_TIMEOUT_SECONDS", 600),
-            retry_count=current_app.config.get("CONTROL_PLANE_COMMAND_RETRY_COUNT", 1),
-            registry_enabled=current_app.config.get("CONTROL_PLANE_REGISTRY_ENABLED", False),
-            registry_url=current_app.config.get("CONTROL_PLANE_REGISTRY_URL"),
-            registry_namespace=current_app.config.get("CONTROL_PLANE_REGISTRY_NAMESPACE"),
-            registry_username=current_app.config.get("CONTROL_PLANE_REGISTRY_USERNAME"),
-            registry_password=current_app.config.get("CONTROL_PLANE_REGISTRY_PASSWORD"),
-            deploy_host=current_app.config.get("CONTROL_PLANE_DEPLOY_HOST", "127.0.0.1"),
-            healthcheck_timeout=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS", 30),
-            healthcheck_interval=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS", 1),
-            heartbeat_interval=current_app.config.get("CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS", 30),
-            kubeconfig=current_app.config.get("CONTROL_PLANE_KUBECONFIG"),
-            namespace=current_app.config.get("CONTROL_PLANE_K8S_NAMESPACE", "default"),
-            image_pull_secret=current_app.config.get("CONTROL_PLANE_K8S_IMAGE_PULL_SECRET"),
-        )
+        return _build_kubernetes_executor()
     if executor_name == "fake":
         return FakeDeploymentExecutor()
 
@@ -1897,38 +2055,9 @@ def create_executor():
 def create_executor_for_deployment(deployment):
     executor_name = (deployment.deploy_target or current_app.config.get("CONTROL_PLANE_EXECUTOR", "fake")).strip().lower()
     if executor_name == "local-docker":
-        return LocalDockerExecutor(
-            workspace_root=current_app.config.get("CONTROL_PLANE_WORKSPACE_ROOT", "/tmp/paas-workspaces"),
-            command_timeout=current_app.config.get("CONTROL_PLANE_COMMAND_TIMEOUT_SECONDS", 600),
-            retry_count=current_app.config.get("CONTROL_PLANE_COMMAND_RETRY_COUNT", 1),
-            registry_enabled=current_app.config.get("CONTROL_PLANE_REGISTRY_ENABLED", False),
-            registry_url=current_app.config.get("CONTROL_PLANE_REGISTRY_URL"),
-            registry_namespace=current_app.config.get("CONTROL_PLANE_REGISTRY_NAMESPACE"),
-            registry_username=current_app.config.get("CONTROL_PLANE_REGISTRY_USERNAME"),
-            registry_password=current_app.config.get("CONTROL_PLANE_REGISTRY_PASSWORD"),
-            deploy_host=current_app.config.get("CONTROL_PLANE_DEPLOY_HOST", "127.0.0.1"),
-            healthcheck_timeout=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS", 30),
-            healthcheck_interval=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS", 1),
-            heartbeat_interval=current_app.config.get("CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS", 30),
-        )
+        return _build_local_docker_executor()
     if executor_name == "kubernetes":
-        return KubernetesExecutor(
-            workspace_root=current_app.config.get("CONTROL_PLANE_WORKSPACE_ROOT", "/tmp/paas-workspaces"),
-            command_timeout=current_app.config.get("CONTROL_PLANE_COMMAND_TIMEOUT_SECONDS", 600),
-            retry_count=current_app.config.get("CONTROL_PLANE_COMMAND_RETRY_COUNT", 1),
-            registry_enabled=current_app.config.get("CONTROL_PLANE_REGISTRY_ENABLED", False),
-            registry_url=current_app.config.get("CONTROL_PLANE_REGISTRY_URL"),
-            registry_namespace=current_app.config.get("CONTROL_PLANE_REGISTRY_NAMESPACE"),
-            registry_username=current_app.config.get("CONTROL_PLANE_REGISTRY_USERNAME"),
-            registry_password=current_app.config.get("CONTROL_PLANE_REGISTRY_PASSWORD"),
-            deploy_host=current_app.config.get("CONTROL_PLANE_DEPLOY_HOST", "127.0.0.1"),
-            healthcheck_timeout=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS", 30),
-            healthcheck_interval=current_app.config.get("CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS", 1),
-            heartbeat_interval=current_app.config.get("CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS", 30),
-            kubeconfig=current_app.config.get("CONTROL_PLANE_KUBECONFIG"),
-            namespace=current_app.config.get("CONTROL_PLANE_K8S_NAMESPACE", "default"),
-            image_pull_secret=current_app.config.get("CONTROL_PLANE_K8S_IMAGE_PULL_SECRET"),
-        )
+        return _build_kubernetes_executor()
     if executor_name == "fake":
         return FakeDeploymentExecutor()
 

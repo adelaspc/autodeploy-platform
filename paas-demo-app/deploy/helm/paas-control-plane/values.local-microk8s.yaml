@@ -1,0 +1,21 @@
+image:
+  repository: localhost:32000/paas-control-plane
+  tag: dev
+  pullPolicy: Always
+
+config:
+  CONTROL_PLANE_ENV: development
+  CONTROL_PLANE_EXECUTOR: fake
+  CONTROL_PLANE_WORKSPACE_ROOT: /tmp/paas-workspaces
+
+secrets:
+  CONTROL_PLANE_DATABASE_URL: sqlite:////tmp/paas-workspaces/control_plane.db
+
+workspace:
+  type: hostPath
+  hostPath: /var/tmp/paas-control-plane-workspace
+  initPermissions:
+    enabled: true
+
+dockerSocket:
+  enabled: false

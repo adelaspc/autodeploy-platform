@@ -5,6 +5,7 @@ from sqlalchemy import and_, or_, select, update
 
 from backend.extensions import db
 from backend.models import DeploymentEvent, PlatformDeployment
+from backend.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
 from worker.executor import WorkerExecutionError, create_executor
 
 
@@ -99,6 +100,10 @@ def now_utc():
     return datetime.now(timezone.utc)
 
 
+def deployment_secret_values(deployment):
+    return secret_values_from_env_vars(deployment.project.env_vars if deployment and deployment.project else [])
+
+
 def worker_id():
     return current_app.config.get("CONTROL_PLANE_WORKER_ID", "worker")
 
@@ -134,7 +139,52 @@ def apply_execution_result(deployment, result):
         deployment.service_url = result.service_url
 
 
+def clear_preflight_state(deployment):
+    deployment.preflight_status = None
+    deployment.preflight_summary = None
+    deployment.preflight_metadata_json = None
+    deployment.preflight_completed_at = None
+
+
+def persist_preflight_result(deployment, result):
+    if result is None:
+        return
+    secret_values = deployment_secret_values(deployment)
+    deployment.preflight_status = result.status
+    deployment.preflight_summary = redact_text(result.summary, secret_values=secret_values)
+    deployment.preflight_metadata_json = redact_sensitive_data(
+        {
+        **(result.metadata or {}),
+        "log_path": result.log_path,
+        "deploy_target": result.deploy_target,
+        "summary": result.summary,
+        "status": result.status,
+        },
+        secret_values=secret_values,
+    )
+    deployment.preflight_completed_at = now_utc()
+
+
+def persist_preflight_failure(deployment, error):
+    if "preflight" not in (error.step or ""):
+        return
+    secret_values = deployment_secret_values(deployment)
+    deployment.preflight_status = "failed"
+    deployment.preflight_summary = redact_text(error.message, secret_values=secret_values)
+    deployment.preflight_metadata_json = redact_sensitive_data(
+        {
+        **(error.metadata or {}),
+        "log_path": error.log_path,
+        "summary": error.message,
+        "status": "failed",
+        },
+        secret_values=secret_values,
+    )
+    deployment.preflight_completed_at = now_utc()
+
+
 def record_event(deployment, event_type, status, message, *, step=None, level="info", metadata=None):
+    secret_values = deployment_secret_values(deployment)
     db.session.add(
         DeploymentEvent(
             deployment_id=deployment.id,
@@ -142,8 +192,8 @@ def record_event(deployment, event_type, status, message, *, step=None, level="i
             step=step,
             level=level,
             status=status,
-            message=message,
-            metadata_json=metadata,
+            message=redact_text(message, secret_values=secret_values) if message else None,
+            metadata_json=redact_sensitive_data(metadata, secret_values=secret_values),
         )
     )
 
@@ -283,7 +333,9 @@ def claim_heartbeat(deployment, *, expected_worker_id=None):
 
 
 def attach_claim_heartbeat(executor, deployment, *, expected_worker_id=None):
-    heartbeat = lambda: claim_heartbeat(deployment, expected_worker_id=expected_worker_id)
+    def heartbeat():
+        claim_heartbeat(deployment, expected_worker_id=expected_worker_id)
+
     setter = getattr(executor, "set_heartbeat", None)
     if callable(setter):
         setter(heartbeat)
@@ -301,29 +353,32 @@ def mark_failed(deployment, step, message, *, metadata=None):
         )
     ensure_claim_owned(deployment)
     refresh_claim(deployment)
+    secret_values = deployment_secret_values(deployment)
+    sanitized_message = redact_text(message, secret_values=secret_values)
+    sanitized_metadata = redact_sensitive_data(metadata, secret_values=secret_values)
     deployment.status = "failed"
     deployment.finished_at = now_utc()
-    deployment.last_error = message
+    deployment.last_error = sanitized_message
     deployment.build.status = "failed"
     deployment.build.finished_at = now_utc()
-    deployment.build.last_error = message
+    deployment.build.last_error = sanitized_message
     record_event(
         deployment,
         f"{step}.failed",
         "failed",
-        message,
+        sanitized_message,
         step=step,
         level="error",
-        metadata={"log_path": deployment.build.log_path, **metadata},
+        metadata={"log_path": deployment.build.log_path, **sanitized_metadata},
     )
     record_event(
         deployment,
         "deployment.failed",
         "failed",
-        message,
+        sanitized_message,
         step="deployment",
         level="error",
-        metadata={"log_path": deployment.build.log_path, **metadata},
+        metadata={"log_path": deployment.build.log_path, **sanitized_metadata},
     )
     write_claim_event(
         deployment,
@@ -434,6 +489,7 @@ def process_deployment(deployment, executor=None):
     deployment.last_error = None
     deployment.build.last_error = None
     deployment.build.registry_push_status = None
+    clear_preflight_state(deployment)
 
     try:
         begin_step(
@@ -557,6 +613,27 @@ def process_deployment(deployment, executor=None):
             event_type="deployment.apply_started",
             message="Worker started deployment apply step",
         )
+        preflight_fn = getattr(executor, "preflight_deploy", None)
+        if callable(preflight_fn):
+            preflight_result = preflight_fn(deployment)
+            ensure_claim_owned(deployment)
+            persist_preflight_result(deployment, preflight_result)
+            if preflight_result is not None:
+                commit_step_result(
+                    deployment,
+                    event_type="deployment.preflight_succeeded",
+                    status="deploying",
+                    message=preflight_result.summary,
+                    step="deploy.preflight",
+                    metadata=preflight_result.metadata
+                    | {
+                        "log_path": preflight_result.log_path,
+                        "deploy_target": preflight_result.deploy_target,
+                        "summary": preflight_result.summary,
+                        "status": preflight_result.status,
+                    },
+                    extra_events=preflight_result.events,
+                )
         deploy_result = executor.deploy(deployment)
         ensure_claim_owned(deployment)
         apply_execution_result(deployment, deploy_result)
@@ -608,6 +685,7 @@ def process_deployment(deployment, executor=None):
             deployment.build.log_path = exc.log_path
         if exc.step == "image.push":
             deployment.build.registry_push_status = "failed"
+        persist_preflight_failure(deployment, exc)
         try:
             record_auxiliary_events(deployment, exc.events)
             return mark_failed(deployment, exc.step, exc.message, metadata=exc.metadata)

@@ -12,6 +12,21 @@ A deployable user application must:
 - use environment variables for runtime configuration
 - store persistent data externally
 
+## Development-Only Exception
+
+For local development and integration testing, the control plane may accept a local filesystem repository path as `repo_url` when `CONTROL_PLANE_ENV=development`.
+
+Outside development, project create and update requests must use supported remote Git repository URLs. Local filesystem paths are rejected in production-like environments.
+
+At this stage, supported remote Git repositories are limited to canonical GitHub HTTPS URLs:
+
+- `https://github.com/<owner>/<repo>`
+- `https://github.com/<owner>/<repo>.git`
+
+The control plane normalizes accepted GitHub repository URLs to `https://github.com/<owner>/<repo>.git` for storage and matching.
+
+Private repositories are supported via GitHub HTTPS plus token auth. SSH Git authentication is not supported yet.
+
 ## Platform-Owned Workers
 
 The platform is allowed and expected to run its own internal workers.

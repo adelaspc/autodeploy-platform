@@ -1,7 +1,13 @@
 import subprocess
 from pathlib import Path
+import pytest
 
-from worker.executor import KubernetesExecutor, WorkerExecutionError, create_executor
+from worker.executor import (
+    KubernetesExecutor,
+    WorkerExecutionError,
+    create_executor,
+    executor_contract_for_name,
+)
 from worker.service import process_next_pending_deployment
 
 from tests.test_projects import create_project
@@ -250,6 +256,26 @@ def test_create_executor_returns_kubernetes_executor(app):
     assert executor.namespace == "microk8s"
 
 
+def test_executor_contract_for_kubernetes_is_explicit():
+    contract = executor_contract_for_name("kubernetes")
+
+    assert contract.deploy_target == "kubernetes"
+    assert contract.runtime == "kubernetes"
+    assert contract.requires_registry_push is True
+    assert contract.healthcheck_strategy == "service-port-forward"
+    assert contract.managed_resources == (
+        "docker-image",
+        "kubernetes-deployment",
+        "kubernetes-service",
+    )
+    assert contract.required_config == (
+        "CONTROL_PLANE_REGISTRY_ENABLED=true",
+        "CONTROL_PLANE_REGISTRY_URL",
+        "CONTROL_PLANE_REGISTRY_NAMESPACE",
+        "CONTROL_PLANE_KUBECONFIG",
+    )
+
+
 def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, tmp_path):
     _project_id, pending = create_pending_deployment(client, name="k8s-success", test_command=None)
     commands = []
@@ -366,7 +392,7 @@ def test_kubernetes_executor_preflight_fails_when_referenced_resources_are_missi
     )()
 
     try:
-        executor.deploy(deployment)
+        executor.preflight_deploy(deployment)
         raise AssertionError("Expected deploy to fail")
     except WorkerExecutionError as exc:
         assert exc.step == "deploy.kubernetes.preflight"
@@ -383,6 +409,53 @@ def test_kubernetes_executor_preflight_fails_when_referenced_resources_are_missi
     assert any("secret/my-app-secret" in command for command in commands if command and command[0] == "kubectl")
     assert any("secret/dockerhub-pull-secret" in command for command in commands if command and command[0] == "kubectl")
     assert not any("apply" in command for command in commands if command and command[0] == "kubectl")
+
+
+def test_kubernetes_executor_rejects_literal_secret_env_values_in_manifest(tmp_path):
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=lambda *args, **kwargs: subprocess.CompletedProcess(args=kwargs.get("args", []), returncode=0, stdout="ok\n", stderr=""),
+        registry_enabled=True,
+        registry_url="docker.io",
+        registry_namespace="example",
+        popen_factory=DummyPopen,
+    )
+    deployment = type(
+        "DeploymentStub",
+        (),
+        {
+            "id": 12,
+            "project_id": 3,
+            "build": type(
+                "BuildStub",
+                (),
+                {
+                    "image_ref": "docker.io/example/demo:abc123",
+                    "image_tag": "demo:abc123",
+                    "registry_push_status": "succeeded",
+                },
+            )(),
+            "project": type(
+                "ProjectStub",
+                (),
+                {
+                    "name": "demo",
+                    "port": 5000,
+                    "healthcheck_path": "/health",
+                    "env_vars": [
+                        {"name": "DATABASE_URL", "value": "postgres://secret", "is_secret": True},
+                    ],
+                },
+            )(),
+        },
+    )()
+
+    with pytest.raises(WorkerExecutionError) as exc_info:
+        executor.deploy(deployment)
+
+    assert exc_info.value.step == "deploy.kubernetes.manifest"
+    assert "secret_key_ref" in exc_info.value.message
 
 
 def test_kubernetes_executor_fails_when_rollout_fails(tmp_path):

@@ -1,5 +1,10 @@
 from pathlib import Path
+import hashlib
+import hmac
+import json
 
+from backend.api import deployment_services as deployment_services_api
+from backend.api import deployment_orchestration as deployment_orchestration_api
 from backend.api import projects as projects_api
 from backend.extensions import db
 from backend.models import DeploymentEvent, PlatformDeployment
@@ -16,6 +21,7 @@ def create_project(client, **overrides):
         "port": 5000,
         "healthcheck_path": "/health",
         "env_vars": [{"name": "DATABASE_URL", "required": True}],
+        "default_test_command": "pytest -q",
         "migration_command": "flask db upgrade",
         "cpu": "250m",
         "memory": "512Mi",
@@ -26,13 +32,25 @@ def create_project(client, **overrides):
     return client.post("/api/projects", json=payload)
 
 
+def github_headers(app, payload, *, event="push", delivery_id="delivery-123"):
+    body = json.dumps(payload).encode("utf-8")
+    secret = app.config["CONTROL_PLANE_GITHUB_WEBHOOK_SECRET"].encode("utf-8")
+    digest = hmac.new(secret, body, hashlib.sha256).hexdigest()
+    return body, {
+        "Content-Type": "application/json",
+        "X-GitHub-Event": event,
+        "X-GitHub-Delivery": delivery_id,
+        "X-Hub-Signature-256": f"sha256={digest}",
+    }
+
+
 def test_create_and_list_projects(client):
     create_response = create_project(client)
 
     assert create_response.status_code == 201
     created = create_response.get_json()
     assert created["name"] == "paas-control-plane"
-    assert created["repo_url"] == "https://github.com/example/paas-control-plane"
+    assert created["repo_url"] == "https://github.com/example/paas-control-plane.git"
 
     list_response = client.get("/api/projects")
     assert list_response.status_code == 200
@@ -54,6 +72,8 @@ def test_create_project_with_git_token_config_returns_only_secret_ref(client):
     payload = response.get_json()
     assert payload["git_auth_type"] == "token"
     assert payload["git_secret_ref"] == "DEMO_APP"
+    assert payload["repo_url"] == "https://github.com/example/private-repo.git"
+    assert payload["default_test_command"] == "pytest -q"
     assert "ghp_" not in str(payload)
 
 
@@ -62,6 +82,126 @@ def test_create_project_rejects_invalid_trigger(client):
 
     assert response.status_code == 400
     assert "Invalid trigger" in response.get_json()["error"]
+
+
+def test_create_project_rejects_non_github_repo_url_that_does_not_exist(client):
+    response = create_project(client, name="invalid-repo-url-app", repo_url="git@github.com:example/private-repo.git")
+
+    assert response.status_code == 400
+    assert "Invalid repo_url" in response.get_json()["error"]
+
+
+def test_create_project_accepts_existing_local_repo_path(client, tmp_path):
+    local_repo = tmp_path / "local-repo"
+    local_repo.mkdir()
+
+    response = create_project(client, name="local-repo-app", repo_url=str(local_repo))
+
+    assert response.status_code == 201
+    assert response.get_json()["repo_url"] == str(local_repo)
+
+
+def test_create_project_normalizes_github_repo_url_without_git_suffix(client):
+    response = create_project(client, name="normalized-github-url-app", repo_url="https://github.com/Example/My-App")
+
+    assert response.status_code == 201
+    assert response.get_json()["repo_url"] == "https://github.com/example/my-app.git"
+
+
+def test_create_project_accepts_github_repo_url_with_git_suffix(client):
+    response = create_project(
+        client,
+        name="git-suffix-github-url-app",
+        repo_url="https://github.com/Example/My-App.git",
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["repo_url"] == "https://github.com/example/my-app.git"
+
+
+def test_create_project_rejects_existing_local_repo_path_outside_development(client, app, tmp_path):
+    local_repo = tmp_path / "prod-local-repo"
+    local_repo.mkdir()
+    app.config["CONTROL_PLANE_ENV"] = "production"
+
+    response = create_project(client, name="prod-local-repo-app", repo_url=str(local_repo))
+
+    assert response.status_code == 400
+    assert "allowed only when CONTROL_PLANE_ENV=development" in response.get_json()["error"]
+
+
+def test_create_project_accepts_github_repo_url_outside_development(client, app):
+    app.config["CONTROL_PLANE_ENV"] = "production"
+
+    response = create_project(
+        client,
+        name="prod-github-repo-app",
+        repo_url="https://github.com/example/paas-control-plane",
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["repo_url"] == "https://github.com/example/paas-control-plane.git"
+
+
+def test_create_project_rejects_malformed_github_repo_root_url(client):
+    response = create_project(client, name="invalid-github-root-app", repo_url="https://github.com/")
+
+    assert response.status_code == 400
+    assert "canonical GitHub HTTPS repository URL" in response.get_json()["error"]
+
+
+def test_create_project_rejects_github_repo_url_with_extra_path_segments(client):
+    response = create_project(
+        client,
+        name="invalid-github-extra-path-app",
+        repo_url="https://github.com/example/repo/extra/path",
+    )
+
+    assert response.status_code == 400
+    assert "canonical GitHub HTTPS repository URL" in response.get_json()["error"]
+
+
+def test_create_project_rejects_non_github_https_repo_url(client):
+    response = create_project(
+        client,
+        name="non-github-remote-app",
+        repo_url="https://gitlab.com/example/repo.git",
+    )
+
+    assert response.status_code == 400
+    assert "canonical GitHub HTTPS repository URL" in response.get_json()["error"]
+
+
+def test_create_project_rejects_ssh_github_repo_url(client):
+    response = create_project(
+        client,
+        name="ssh-github-url-app",
+        repo_url="git@github.com:example/private-repo.git",
+    )
+
+    assert response.status_code == 400
+    assert "canonical GitHub HTTPS repository URL" in response.get_json()["error"]
+
+
+def test_create_project_rejects_absolute_dockerfile_path(client):
+    response = create_project(client, name="absolute-dockerfile-app", dockerfile_path="/Dockerfile")
+
+    assert response.status_code == 400
+    assert "repository-relative path" in response.get_json()["error"]
+
+
+def test_create_project_rejects_build_context_parent_traversal(client):
+    response = create_project(client, name="parent-build-context-app", build_context="../app")
+
+    assert response.status_code == 400
+    assert "Parent directory traversal" in response.get_json()["error"]
+
+
+def test_create_project_rejects_healthcheck_path_without_leading_slash(client):
+    response = create_project(client, name="invalid-healthcheck-app", healthcheck_path="health")
+
+    assert response.status_code == 400
+    assert "healthcheck_path" in response.get_json()["error"]
 
 
 def test_create_project_requires_unique_name(client):
@@ -83,6 +223,7 @@ def test_update_project(client):
             "branch": "develop",
             "port": 8080,
             "trigger": "github_push",
+            "default_test_command": "ruff check .",
         },
     )
 
@@ -91,6 +232,514 @@ def test_update_project(client):
     assert updated["branch"] == "develop"
     assert updated["port"] == 8080
     assert updated["trigger"] == "github_push"
+    assert updated["default_test_command"] == "ruff check ."
+
+
+def test_get_project_activity_returns_empty_state(client):
+    project_response = create_project(client, name="activity-empty-project")
+    project_id = project_response.get_json()["id"]
+
+    response = client.get(f"/api/projects/{project_id}/activity")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "ok",
+        "project": {
+            "id": project_id,
+            "name": "activity-empty-project",
+            "branch": "main",
+            "trigger": "manual",
+            "repo_url": "https://github.com/example/paas-control-plane.git",
+        },
+        "latest_deployment_at": None,
+        "active_deployment_count": 0,
+        "failed_deployment_count": 0,
+        "recent_webhook_delivery_count": 0,
+        "next_before_deployment_id": None,
+        "next_before_webhook_delivery_id": None,
+        "pagination": {
+            "latest_limit": 10,
+            "webhook_limit": 10,
+            "next_before_deployment_id": None,
+            "next_before_webhook_delivery_id": None,
+        },
+        "latest_deployments": [],
+        "active_deployment": None,
+        "latest_failed_deployment": None,
+        "recent_webhook_deliveries": [],
+    }
+
+
+def test_get_project_activity_reports_deployments_and_webhooks(client, app):
+    project_response = create_project(
+        client,
+        name="activity-project",
+        repo_url="https://github.com/example/activity-project",
+        trigger="github_push",
+    )
+    project_id = project_response.get_json()["id"]
+    other_project_id = create_project(client, name="other-activity-project").get_json()["id"]
+
+    first_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "1111111111111111"},
+    )
+    second_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "2222222222222222"},
+    )
+    client.post(
+        f"/api/projects/{other_project_id}/deployments",
+        json={"commit_sha": "3333333333333333"},
+    )
+
+    with app.app_context():
+        running_deployment = db.session.get(PlatformDeployment, second_response.get_json()["id"])
+        running_deployment.status = "running"
+        failed_deployment = db.session.get(PlatformDeployment, first_response.get_json()["id"])
+        failed_deployment.status = "failed"
+        failed_deployment.last_error = "Project-specific failure"
+        failed_deployment.build.status = "failed"
+        db.session.commit()
+
+    accepted_payload = {
+        "ref": "refs/heads/main",
+        "after": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repository": {
+            "clone_url": "https://github.com/example/activity-project.git",
+        },
+    }
+    accepted_body, accepted_headers = github_headers(app, accepted_payload, delivery_id="project-accepted")
+    accepted_response = client.post("/api/webhooks/github", data=accepted_body, headers=accepted_headers)
+
+    ignored_payload = {
+        "ref": "refs/heads/release",
+        "after": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "repository": {
+            "clone_url": "https://github.com/example/activity-project.git",
+        },
+    }
+    ignored_body, ignored_headers = github_headers(app, ignored_payload, delivery_id="project-ignored")
+    ignored_response = client.post("/api/webhooks/github", data=ignored_body, headers=ignored_headers)
+
+    unrelated_payload = {
+        "ref": "refs/heads/main",
+        "after": "cccccccccccccccccccccccccccccccccccccccc",
+        "repository": {
+            "clone_url": "https://github.com/example/unrelated-project.git",
+        },
+    }
+    unrelated_body, unrelated_headers = github_headers(app, unrelated_payload, delivery_id="project-unrelated")
+    client.post("/api/webhooks/github", data=unrelated_body, headers=unrelated_headers)
+
+    response = client.get(f"/api/projects/{project_id}/activity")
+    payload = response.get_json()
+
+    assert accepted_response.status_code == 202
+    assert ignored_response.status_code == 202
+    assert response.status_code == 200
+    assert [item["deployment_id"] for item in payload["latest_deployments"][:2]] == [
+        accepted_response.get_json()["deployments"][0]["deployment_id"],
+        second_response.get_json()["id"],
+    ]
+    assert payload["active_deployment"]["deployment_id"] == accepted_response.get_json()["deployments"][0]["deployment_id"]
+    assert payload["latest_failed_deployment"]["deployment_id"] == first_response.get_json()["id"]
+    assert payload["latest_failed_deployment"]["last_error"] == "Project-specific failure"
+    assert payload["latest_deployment_at"] is not None
+    assert payload["active_deployment_count"] == 1
+    assert payload["failed_deployment_count"] == 1
+    assert payload["recent_webhook_delivery_count"] == 2
+    assert payload["next_before_deployment_id"] is not None
+    assert payload["next_before_webhook_delivery_id"] is not None
+    assert payload["pagination"]["latest_limit"] == 10
+    assert [item["delivery_id"] for item in payload["recent_webhook_deliveries"]] == [
+        "project-ignored",
+        "project-accepted",
+    ]
+    assert [item["reason"] for item in payload["recent_webhook_deliveries"]] == [
+        "branch_mismatch",
+        None,
+    ]
+
+
+def test_get_project_activity_supports_limits_and_rejects_invalid_values(client, app):
+    project_response = create_project(
+        client,
+        name="activity-limited-project",
+        repo_url="https://github.com/example/activity-limited-project",
+        trigger="github_push",
+    )
+    project_id = project_response.get_json()["id"]
+
+    first_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "4444444444444444"},
+    )
+    second_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "5555555555555555"},
+    )
+
+    with app.app_context():
+        first_deployment = db.session.get(PlatformDeployment, first_response.get_json()["id"])
+        first_deployment.status = "failed"
+        first_deployment.last_error = "older failure"
+        second_deployment = db.session.get(PlatformDeployment, second_response.get_json()["id"])
+        second_deployment.status = "running"
+        db.session.commit()
+
+    accepted_payload = {
+        "ref": "refs/heads/main",
+        "after": "dddddddddddddddddddddddddddddddddddddddd",
+        "repository": {
+            "clone_url": "https://github.com/example/activity-limited-project.git",
+        },
+    }
+    accepted_body, accepted_headers = github_headers(app, accepted_payload, delivery_id="limited-accepted")
+    client.post("/api/webhooks/github", data=accepted_body, headers=accepted_headers)
+
+    ignored_payload = {
+        "ref": "refs/heads/release",
+        "after": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "repository": {
+            "clone_url": "https://github.com/example/activity-limited-project.git",
+        },
+    }
+    ignored_body, ignored_headers = github_headers(app, ignored_payload, delivery_id="limited-ignored")
+    client.post("/api/webhooks/github", data=ignored_body, headers=ignored_headers)
+
+    limited_response = client.get(f"/api/projects/{project_id}/activity?latest_limit=1&webhook_limit=1")
+    limited_payload = limited_response.get_json()
+
+    assert limited_response.status_code == 200
+    assert len(limited_payload["latest_deployments"]) == 1
+    assert len(limited_payload["recent_webhook_deliveries"]) == 1
+    assert limited_payload["pagination"]["latest_limit"] == 1
+    assert limited_payload["recent_webhook_deliveries"][0]["delivery_id"] == "limited-ignored"
+
+    invalid_response = client.get(f"/api/projects/{project_id}/activity?latest_limit=0")
+    assert invalid_response.status_code == 400
+    assert invalid_response.get_json() == {"error": "latest_limit must be an integer between 1 and 100"}
+
+
+def test_get_project_activity_supports_status_filters(client, app):
+    project_response = create_project(
+        client,
+        name="activity-status-project",
+        repo_url="https://github.com/example/activity-status-project",
+        trigger="github_push",
+    )
+    project_id = project_response.get_json()["id"]
+
+    failed_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "6666666666666666"},
+    )
+    running_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "7777777777777777"},
+    )
+
+    with app.app_context():
+        failed_deployment = db.session.get(PlatformDeployment, failed_response.get_json()["id"])
+        failed_deployment.status = "failed"
+        failed_deployment.last_error = "project filter failure"
+        running_deployment = db.session.get(PlatformDeployment, running_response.get_json()["id"])
+        running_deployment.status = "running"
+        db.session.commit()
+
+    accepted_payload = {
+        "ref": "refs/heads/main",
+        "after": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "repository": {
+            "clone_url": "https://github.com/example/activity-status-project.git",
+        },
+    }
+    accepted_body, accepted_headers = github_headers(app, accepted_payload, delivery_id="project-status-accepted")
+    client.post("/api/webhooks/github", data=accepted_body, headers=accepted_headers)
+
+    ignored_payload = {
+        "ref": "refs/heads/release",
+        "after": "ffffffffffffffffffffffffffffffffffffffff",
+        "repository": {
+            "clone_url": "https://github.com/example/activity-status-project.git",
+        },
+    }
+    ignored_body, ignored_headers = github_headers(app, ignored_payload, delivery_id="project-status-ignored")
+    client.post("/api/webhooks/github", data=ignored_body, headers=ignored_headers)
+
+    response = client.get(
+        f"/api/projects/{project_id}/activity?deployment_status=running,failed&webhook_status=ignored"
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert [item["status"] for item in payload["latest_deployments"]] == ["running", "failed"]
+    assert payload["active_deployment"]["status"] == "running"
+    assert payload["latest_failed_deployment"]["status"] == "failed"
+    assert [item["delivery_id"] for item in payload["recent_webhook_deliveries"]] == ["project-status-ignored"]
+
+
+def test_get_project_activity_supports_active_only_and_include_flags(client, app):
+    project_response = create_project(
+        client,
+        name="activity-flags-project",
+        repo_url="https://github.com/example/activity-flags-project",
+        trigger="github_push",
+    )
+    project_id = project_response.get_json()["id"]
+
+    failed_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "8888888888888888"},
+    )
+    running_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "9999999999999999"},
+    )
+
+    with app.app_context():
+        failed_deployment = db.session.get(PlatformDeployment, failed_response.get_json()["id"])
+        failed_deployment.status = "failed"
+        failed_deployment.last_error = "hidden failure"
+        running_deployment = db.session.get(PlatformDeployment, running_response.get_json()["id"])
+        running_deployment.status = "running"
+        db.session.commit()
+
+    accepted_payload = {
+        "ref": "refs/heads/main",
+        "after": "1212121212121212121212121212121212121212",
+        "repository": {
+            "clone_url": "https://github.com/example/activity-flags-project.git",
+        },
+    }
+    accepted_body, accepted_headers = github_headers(app, accepted_payload, delivery_id="project-flags-accepted")
+    client.post("/api/webhooks/github", data=accepted_body, headers=accepted_headers)
+
+    response = client.get(
+        f"/api/projects/{project_id}/activity?active_only=true&include_latest_failed=false&include_webhooks=false"
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert [item["status"] for item in payload["latest_deployments"]] == ["pending", "running"]
+    assert payload["latest_failed_deployment"] is None
+    assert payload["recent_webhook_deliveries"] == []
+
+
+def test_get_project_activity_supports_before_id_pagination(client):
+    project_response = create_project(client, name="activity-before-project")
+    project_id = project_response.get_json()["id"]
+
+    first = client.post(f"/api/projects/{project_id}/deployments", json={"commit_sha": "1414141414141414"})
+    second = client.post(f"/api/projects/{project_id}/deployments", json={"commit_sha": "1515151515151515"})
+    third = client.post(f"/api/projects/{project_id}/deployments", json={"commit_sha": "1616161616161616"})
+
+    response = client.get(
+        f"/api/projects/{project_id}/activity?latest_limit=2&before_deployment_id={third.get_json()['id']}"
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert [item["deployment_id"] for item in payload["latest_deployments"]] == [
+        second.get_json()["id"],
+        first.get_json()["id"],
+    ]
+    assert payload["pagination"]["next_before_deployment_id"] == first.get_json()["id"]
+
+
+def test_get_project_activity_rejects_invalid_status_filters(client):
+    project_response = create_project(client, name="invalid-activity-filter-project")
+    project_id = project_response.get_json()["id"]
+
+    response = client.get(f"/api/projects/{project_id}/activity?deployment_status=wat")
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": (
+            "deployment_status contains invalid values: wat. Allowed: "
+            "building, cloning, deploying, failed, pending, pushing_image, running, stopped, testing"
+        )
+    }
+
+
+def test_get_project_activity_rejects_invalid_boolean_flags(client):
+    project_response = create_project(client, name="invalid-activity-boolean-project")
+    project_id = project_response.get_json()["id"]
+
+    response = client.get(f"/api/projects/{project_id}/activity?active_only=maybe")
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "active_only must be a boolean"}
+
+
+def test_get_project_status_reports_latest_active_failed_and_readiness(client, app):
+    project_response = create_project(client, name="status-summary-project")
+    project_id = project_response.get_json()["id"]
+
+    failed_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abababababababab"},
+    )
+    running_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "cdcdcdcdcdcdcdcd"},
+    )
+
+    with app.app_context():
+        failed_deployment = db.session.get(PlatformDeployment, failed_response.get_json()["id"])
+        failed_deployment.status = "failed"
+        failed_deployment.last_error = "status summary failure"
+        running_deployment = db.session.get(PlatformDeployment, running_response.get_json()["id"])
+        running_deployment.status = "running"
+        db.session.commit()
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+        app.config["CONTROL_PLANE_REGISTRY_ENABLED"] = True
+        app.config["CONTROL_PLANE_REGISTRY_URL"] = "docker.io"
+        app.config["CONTROL_PLANE_REGISTRY_NAMESPACE"] = None
+        app.config["CONTROL_PLANE_KUBECONFIG"] = "/tmp/kubeconfig"
+
+    response = client.get(f"/api/projects/{project_id}/status")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["project"]["id"] == project_id
+    assert payload["deployment_creation_ready"] is False
+    assert "CONTROL_PLANE_REGISTRY_NAMESPACE" in payload["deployment_creation_error"]
+    assert payload["latest_deployment_at"] is not None
+    assert payload["active_deployment_count"] == 1
+    assert payload["failed_deployment_count"] == 1
+    assert payload["latest_deployment"]["deployment_id"] == running_response.get_json()["id"]
+    assert payload["active_deployment"]["deployment_id"] == running_response.get_json()["id"]
+    assert payload["latest_failed_deployment"]["deployment_id"] == failed_response.get_json()["id"]
+
+
+def test_get_project_status_reports_empty_state(client):
+    project_response = create_project(client, name="empty-status-project")
+    project_id = project_response.get_json()["id"]
+
+    response = client.get(f"/api/projects/{project_id}/status")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "ok",
+        "project": {
+            "id": project_id,
+            "name": "empty-status-project",
+            "branch": "main",
+            "trigger": "manual",
+            "repo_url": "https://github.com/example/paas-control-plane.git",
+        },
+        "deployment_creation_ready": True,
+        "deployment_creation_error": None,
+        "latest_deployment_at": None,
+        "active_deployment_count": 0,
+        "failed_deployment_count": 0,
+        "latest_deployment": None,
+        "active_deployment": None,
+        "latest_failed_deployment": None,
+    }
+
+
+def test_list_project_deployments_supports_filters_and_pagination(client, app):
+    project_response = create_project(client, name="list-deployments-project")
+    project_id = project_response.get_json()["id"]
+
+    first = client.post(f"/api/projects/{project_id}/deployments", json={"commit_sha": "2121212121212121"})
+    second = client.post(f"/api/projects/{project_id}/deployments", json={"commit_sha": "2222222222222222"})
+    third = client.post(f"/api/projects/{project_id}/deployments", json={"commit_sha": "2323232323232323"})
+
+    with app.app_context():
+        first_deployment = db.session.get(PlatformDeployment, first.get_json()["id"])
+        first_deployment.status = "failed"
+        second_deployment = db.session.get(PlatformDeployment, second.get_json()["id"])
+        second_deployment.status = "running"
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments?limit=2&deployment_status=running,failed")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert [item["id"] for item in payload["items"]] == [second.get_json()["id"], first.get_json()["id"]]
+    assert payload["pagination"] == {
+        "limit": 2,
+        "count": 2,
+        "next_before_deployment_id": first.get_json()["id"],
+    }
+
+    paged_response = client.get(
+        f"/api/projects/{project_id}/deployments?limit=2&before_deployment_id={third.get_json()['id']}"
+    )
+    paged_payload = paged_response.get_json()
+    assert paged_response.status_code == 200
+    assert [item["id"] for item in paged_payload["items"]] == [second.get_json()["id"], first.get_json()["id"]]
+
+
+def test_list_project_deployments_rejects_invalid_filters(client):
+    project_response = create_project(client, name="invalid-list-deployments-project")
+    project_id = project_response.get_json()["id"]
+
+    response = client.get(f"/api/projects/{project_id}/deployments?deployment_status=wat")
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": (
+            "deployment_status contains invalid values: wat. Allowed: "
+            "building, cloning, deploying, failed, pending, pushing_image, running, stopped, testing"
+        )
+    }
+
+
+def test_failed_activity_order_uses_updated_at_desc(client, app):
+    first_project_id = create_project(client, name="updated-order-first").get_json()["id"]
+    first = client.post(f"/api/projects/{first_project_id}/deployments", json={"commit_sha": "3131313131313131"})
+    second = client.post(f"/api/projects/{first_project_id}/deployments", json={"commit_sha": "3232323232323232"})
+
+    with app.app_context():
+        first_deployment = db.session.get(PlatformDeployment, first.get_json()["id"])
+        second_deployment = db.session.get(PlatformDeployment, second.get_json()["id"])
+        first_deployment.status = "failed"
+        second_deployment.status = "failed"
+        db.session.flush()
+        original_second_updated_at = second_deployment.updated_at
+        first_deployment.updated_at = original_second_updated_at.replace(microsecond=max(original_second_updated_at.microsecond - 1, 0))
+        second_deployment.updated_at = original_second_updated_at
+        db.session.commit()
+
+    response = client.get("/health/activity?deployment_status=failed")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert [item["deployment_id"] for item in payload["failed_deployments"][:2]] == [
+        second.get_json()["id"],
+        first.get_json()["id"],
+    ]
+
+
+def test_update_project_normalizes_github_repo_url(client):
+    project_response = create_project(client, name="editable-normalized-repo-project")
+    project_id = project_response.get_json()["id"]
+
+    update_response = client.patch(
+        f"/api/projects/{project_id}",
+        json={"repo_url": "https://github.com/Example/Updated-Repo"},
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.get_json()["repo_url"] == "https://github.com/example/updated-repo.git"
+
+
+def test_update_project_allows_clearing_default_test_command(client):
+    project_response = create_project(client, name="clear-default-test-command-project")
+    project_id = project_response.get_json()["id"]
+
+    update_response = client.patch(
+        f"/api/projects/{project_id}",
+        json={"default_test_command": None},
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.get_json()["default_test_command"] is None
 
 
 def test_update_project_allows_git_token_configuration(client):
@@ -109,6 +758,48 @@ def test_update_project_allows_git_token_configuration(client):
     updated = update_response.get_json()
     assert updated["git_auth_type"] == "token"
     assert updated["git_secret_ref"] == "PRIVATE_APP"
+
+
+def test_update_project_rejects_invalid_healthcheck_path(client):
+    project_response = create_project(client, name="editable-healthcheck-project")
+    project_id = project_response.get_json()["id"]
+
+    update_response = client.patch(
+        f"/api/projects/{project_id}",
+        json={"healthcheck_path": "ready"},
+    )
+
+    assert update_response.status_code == 400
+    assert "healthcheck_path" in update_response.get_json()["error"]
+
+
+def test_update_project_rejects_absolute_build_context(client):
+    project_response = create_project(client, name="editable-build-context-project")
+    project_id = project_response.get_json()["id"]
+
+    update_response = client.patch(
+        f"/api/projects/{project_id}",
+        json={"build_context": "/workspace"},
+    )
+
+    assert update_response.status_code == 400
+    assert "repository-relative path" in update_response.get_json()["error"]
+
+
+def test_update_project_rejects_local_repo_path_outside_development(client, app, tmp_path):
+    project_response = create_project(client, name="editable-repo-url-project")
+    project_id = project_response.get_json()["id"]
+    local_repo = tmp_path / "editable-local-repo"
+    local_repo.mkdir()
+    app.config["CONTROL_PLANE_ENV"] = "production"
+
+    update_response = client.patch(
+        f"/api/projects/{project_id}",
+        json={"repo_url": str(local_repo)},
+    )
+
+    assert update_response.status_code == 400
+    assert "allowed only when CONTROL_PLANE_ENV=development" in update_response.get_json()["error"]
 
 
 def test_create_project_rejects_token_auth_without_secret_ref(client):
@@ -138,6 +829,30 @@ def test_create_project_accepts_kubernetes_env_var_references(client):
     payload = response.get_json()
     assert payload["env_vars"][0]["value_source"] == "configmap_key_ref"
     assert payload["env_vars"][1]["value_source"] == "secret_key_ref"
+    assert payload["env_vars"][1]["is_secret"] is True
+
+
+def test_create_project_redacts_literal_secret_env_values_in_api_payloads(client):
+    response = create_project(
+        client,
+        name="literal-secret-project",
+        env_vars=[
+            {"name": "APP_ENV", "value": "production"},
+            {"name": "DATABASE_URL", "value": "postgres://user:super-secret@db/app", "is_secret": True},
+        ],
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload["env_vars"][0]["value"] == "production"
+    assert payload["env_vars"][1]["value"] == "[REDACTED]"
+    assert payload["env_vars"][1]["is_secret"] is True
+
+    project_id = payload["id"]
+    fetched = client.get(f"/api/projects/{project_id}").get_json()
+    assert fetched["env_vars"][1]["value"] == "[REDACTED]"
+    listed = client.get("/api/projects").get_json()
+    assert listed[0]["env_vars"][1]["value"] == "[REDACTED]"
 
 
 def test_create_project_rejects_invalid_kubernetes_env_var_reference_shape(client):
@@ -151,6 +866,136 @@ def test_create_project_rejects_invalid_kubernetes_env_var_reference_shape(clien
 
     assert response.status_code == 400
     assert "source_key" in response.get_json()["error"]
+
+
+def test_create_project_rejects_invalid_kubernetes_env_var_name_in_kubernetes_mode(client, app):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+
+    response = create_project(
+        client,
+        name="invalid-k8s-env-name-project",
+        env_vars=[
+            {"name": "APP-NAME", "value_source": "configmap_key_ref", "source_name": "my-app-config", "source_key": "app-env"},
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "valid Kubernetes environment variable name" in response.get_json()["error"]
+
+
+def test_create_project_rejects_invalid_kubernetes_source_type_in_kubernetes_mode(client, app):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+
+    response = create_project(
+        client,
+        name="invalid-k8s-source-type-project",
+        env_vars=[
+            {"name": "APP_ENV", "value_source": "configmap_ref", "source_name": "my-app-config", "source_key": "app-env"},
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "value_source" in response.get_json()["error"]
+
+
+def test_create_project_rejects_invalid_kubernetes_resource_name_in_kubernetes_mode(client, app):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+
+    response = create_project(
+        client,
+        name="invalid-k8s-resource-name-project",
+        env_vars=[
+            {"name": "APP_ENV", "value_source": "configmap_key_ref", "source_name": "My_Config", "source_key": "app-env"},
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "valid Kubernetes resource name" in response.get_json()["error"]
+
+
+def test_create_project_rejects_empty_kubernetes_source_key_in_kubernetes_mode(client, app):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+
+    response = create_project(
+        client,
+        name="invalid-k8s-source-key-project",
+        env_vars=[
+            {"name": "APP_ENV", "value_source": "configmap_key_ref", "source_name": "my-app-config", "source_key": ""},
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "source_key" in response.get_json()["error"]
+
+
+def test_create_project_rejects_duplicate_kubernetes_env_var_names_in_kubernetes_mode(client, app):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+
+    response = create_project(
+        client,
+        name="duplicate-k8s-env-name-project",
+        env_vars=[
+            {"name": "APP_ENV", "value_source": "configmap_key_ref", "source_name": "my-app-config", "source_key": "app-env"},
+            {"name": "APP_ENV", "value_source": "secret_key_ref", "source_name": "my-app-secret", "source_key": "database-url"},
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "Duplicate env var name 'APP_ENV'" in response.get_json()["error"]
+
+
+def test_create_project_accepts_valid_kubernetes_env_refs_in_kubernetes_mode(client, app):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+
+    response = create_project(
+        client,
+        name="valid-k8s-env-ref-project",
+        env_vars=[
+            {"name": "APP_ENV", "value_source": "configmap_key_ref", "source_name": "my-app-config", "source_key": "app-env"},
+            {"name": "DATABASE_URL", "value_source": "secret_key_ref", "source_name": "my-app-secret", "source_key": "database-url"},
+        ],
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["env_vars"][0]["source_name"] == "my-app-config"
+
+
+def test_create_project_rejects_literal_secret_env_values_in_kubernetes_mode(client, app):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+
+    response = create_project(
+        client,
+        name="invalid-k8s-literal-secret-project",
+        env_vars=[
+            {"name": "DATABASE_URL", "value": "postgres://secret", "is_secret": True},
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "secret_key_ref" in response.get_json()["error"]
+
+
+def test_create_project_allows_duplicate_env_var_names_outside_kubernetes_mode(client, app):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "fake"
+
+    response = create_project(
+        client,
+        name="duplicate-nonk8s-env-name-project",
+        env_vars=[
+            {"name": "APP_ENV", "value": "dev"},
+            {"name": "APP_ENV", "value": "prod"},
+        ],
+    )
+
+    assert response.status_code == 201
 
 
 def test_create_project_rejects_unsupported_env_ref_field_names(client):
@@ -208,8 +1053,9 @@ def test_trigger_deployment_creates_build_and_event_history(client):
     deployments_response = client.get(f"/api/projects/{project_id}/deployments")
     assert deployments_response.status_code == 200
     deployments = deployments_response.get_json()
-    assert len(deployments) == 1
-    assert deployments[0]["build"]["image_tag"] == "abc123def456"
+    assert len(deployments["items"]) == 1
+    assert deployments["pagination"] == {"limit": 20, "count": 1, "next_before_deployment_id": deployment["id"]}
+    assert deployments["items"][0]["build"]["image_tag"] == "abc123def456"
 
     builds_response = client.get(f"/api/projects/{project_id}/builds")
     assert builds_response.status_code == 200
@@ -288,11 +1134,35 @@ def test_trigger_deployment_rejects_missing_commit_sha(client):
     assert response.get_json() == {"error": "Missing required field: commit_sha"}
 
 
+def test_create_project_deployment_rejects_kubernetes_executor_without_required_settings(client, app):
+    project_response = create_project(client, name="k8s-prereq-build-app")
+    project_id = project_response.get_json()["id"]
+
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+        app.config["CONTROL_PLANE_REGISTRY_ENABLED"] = False
+        app.config["CONTROL_PLANE_REGISTRY_URL"] = None
+        app.config["CONTROL_PLANE_REGISTRY_NAMESPACE"] = None
+        app.config["CONTROL_PLANE_KUBECONFIG"] = None
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "pending"},
+    )
+
+    assert response.status_code == 409
+    assert "Kubernetes executor is not ready for deployments" in response.get_json()["error"]
+    assert "CONTROL_PLANE_REGISTRY_ENABLED=true" in response.get_json()["error"]
+    assert "CONTROL_PLANE_KUBECONFIG" in response.get_json()["error"]
+
+
 def test_deploy_project_creates_pending_records_from_minimal_input(client, app, monkeypatch):
     project_response = create_project(client, name="deploy-now-app")
     project_id = project_response.get_json()["id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
 
     response = client.post(
         f"/api/projects/{project_id}/deploy",
@@ -330,7 +1200,9 @@ def test_deploy_project_uses_branch_override_and_registry_config(client, app, mo
     project_response = create_project(client, name="registry-deploy-app")
     project_id = project_response.get_json()["id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
 
     response = client.post(
         f"/api/projects/{project_id}/deploy",
@@ -343,12 +1215,50 @@ def test_deploy_project_uses_branch_override_and_registry_config(client, app, mo
     assert payload["image_ref"] == "docker.io/example/registry-deploy-app:fedcba987654"
 
 
+def test_deploy_project_allows_explicit_test_command_override(client, monkeypatch):
+    project_response = create_project(client, name="override-test-command-app", default_test_command="pytest -q")
+    project_id = project_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
+
+    response = client.post(
+        f"/api/projects/{project_id}/deploy",
+        json={"test_command": "ruff check ."},
+    )
+
+    assert response.status_code == 201
+    deployment_id = response.get_json()["deployment_id"]
+    deployment = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}").get_json()
+    assert deployment["build"]["test_command"] == "ruff check ."
+
+
+def test_deploy_project_allows_explicit_null_test_command_override(client, monkeypatch):
+    project_response = create_project(client, name="disable-default-test-command-app", default_test_command="pytest -q")
+    project_id = project_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
+
+    response = client.post(
+        f"/api/projects/{project_id}/deploy",
+        json={"test_command": None},
+    )
+
+    assert response.status_code == 201
+    deployment_id = response.get_json()["deployment_id"]
+    deployment = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}").get_json()
+    assert deployment["build"]["test_command"] is None
+
+
 def test_deploy_project_returns_conflict_when_commit_resolution_fails(client, monkeypatch):
     project_response = create_project(client, name="broken-deploy-app")
     project_id = project_response.get_json()["id"]
 
     monkeypatch.setattr(
-        projects_api,
+        deployment_orchestration_api,
         "resolve_project_commit_sha",
         lambda project, branch: (_ for _ in ()).throw(ValueError("Unable to resolve commit for branch 'main': boom")),
     )
@@ -357,6 +1267,23 @@ def test_deploy_project_returns_conflict_when_commit_resolution_fails(client, mo
 
     assert response.status_code == 409
     assert response.get_json() == {"error": "Unable to resolve commit for branch 'main': boom"}
+
+
+def test_deploy_project_rejects_kubernetes_executor_without_required_settings(client, app):
+    project_response = create_project(client, name="k8s-prereq-deploy-app")
+    project_id = project_response.get_json()["id"]
+
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+        app.config["CONTROL_PLANE_REGISTRY_ENABLED"] = True
+        app.config["CONTROL_PLANE_REGISTRY_URL"] = "docker.io"
+        app.config["CONTROL_PLANE_REGISTRY_NAMESPACE"] = "example"
+        app.config["CONTROL_PLANE_KUBECONFIG"] = None
+
+    response = client.post(f"/api/projects/{project_id}/deploy", json={})
+
+    assert response.status_code == 409
+    assert "CONTROL_PLANE_KUBECONFIG" in response.get_json()["error"]
 
 
 def test_get_latest_deployment_returns_404_when_project_has_no_deployments(client):
@@ -373,11 +1300,15 @@ def test_get_latest_deployment_returns_most_recent_deployment(client, monkeypatc
     project_response = create_project(client, name="latest-deploy-app")
     project_id = project_response.get_json()["id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
     first_response = client.post(f"/api/projects/{project_id}/deploy", json={})
     first_deployment_id = first_response.get_json()["deployment_id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
     second_response = client.post(
         f"/api/projects/{project_id}/deploy",
         json={"branch": "release", "test_command": "pytest -q"},
@@ -396,6 +1327,9 @@ def test_get_latest_deployment_returns_most_recent_deployment(client, monkeypatc
     assert payload["commit_sha"] == "fedcba9876543210"
     assert payload["image_tag"] == "fedcba987654"
     assert payload["image_ref"] == "latest-deploy-app:fedcba987654"
+    assert payload["preflight_status"] is None
+    assert payload["preflight_summary"] is None
+    assert payload["preflight_completed_at"] is None
     assert payload["service_url"] is None
     assert payload["created_at"] is not None
     assert payload["updated_at"] is not None
@@ -405,14 +1339,18 @@ def test_retry_deployment_creates_new_pending_deployment_from_original_settings(
     project_response = create_project(client, name="retry-app")
     project_id = project_response.get_json()["id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
     original_response = client.post(
         f"/api/projects/{project_id}/deploy",
         json={"branch": "release", "test_command": "pytest -q"},
     )
     original_deployment_id = original_response.get_json()["deployment_id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
     retry_response = client.post(f"/api/projects/{project_id}/deployments/{original_deployment_id}/retry")
 
     assert retry_response.status_code == 201
@@ -425,6 +1363,9 @@ def test_retry_deployment_creates_new_pending_deployment_from_original_settings(
     assert payload["commit_sha"] == "fedcba9876543210"
     assert payload["image_tag"] == "fedcba987654"
     assert payload["image_ref"] == "retry-app:fedcba987654"
+    assert payload["preflight_status"] is None
+    assert payload["preflight_summary"] is None
+    assert payload["preflight_completed_at"] is None
 
     deployment_response = client.get(f"/api/projects/{project_id}/deployments/{payload['deployment_id']}")
     deployment = deployment_response.get_json()
@@ -436,12 +1377,14 @@ def test_retry_deployment_returns_conflict_when_commit_resolution_fails(client, 
     project_response = create_project(client, name="broken-retry-app")
     project_id = project_response.get_json()["id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
     original_response = client.post(f"/api/projects/{project_id}/deploy", json={})
     original_deployment_id = original_response.get_json()["deployment_id"]
 
     monkeypatch.setattr(
-        projects_api,
+        deployment_orchestration_api,
         "resolve_project_commit_sha",
         lambda project, branch: (_ for _ in ()).throw(ValueError("Unable to resolve commit for branch 'main': boom")),
     )
@@ -452,13 +1395,38 @@ def test_retry_deployment_returns_conflict_when_commit_resolution_fails(client, 
     assert response.get_json() == {"error": "Unable to resolve commit for branch 'main': boom"}
 
 
+def test_retry_deployment_rejects_kubernetes_executor_without_required_settings(client, app, monkeypatch):
+    project_response = create_project(client, name="k8s-prereq-retry-app")
+    project_id = project_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
+    original_response = client.post(f"/api/projects/{project_id}/deploy", json={})
+    original_deployment_id = original_response.get_json()["deployment_id"]
+
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+        app.config["CONTROL_PLANE_REGISTRY_ENABLED"] = True
+        app.config["CONTROL_PLANE_REGISTRY_URL"] = None
+        app.config["CONTROL_PLANE_REGISTRY_NAMESPACE"] = "example"
+        app.config["CONTROL_PLANE_KUBECONFIG"] = "/tmp/kubeconfig"
+
+    response = client.post(f"/api/projects/{project_id}/deployments/{original_deployment_id}/retry")
+
+    assert response.status_code == 409
+    assert "CONTROL_PLANE_REGISTRY_URL" in response.get_json()["error"]
+
+
 def test_retry_deployment_does_not_expose_other_project_deployment(client, monkeypatch):
     first_project_response = create_project(client, name="retry-owner-app")
     first_project_id = first_project_response.get_json()["id"]
     second_project_response = create_project(client, name="retry-other-app")
     second_project_id = second_project_response.get_json()["id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
     original_response = client.post(f"/api/projects/{first_project_id}/deploy", json={})
     original_deployment_id = original_response.get_json()["deployment_id"]
 
@@ -481,17 +1449,23 @@ def test_redeploy_project_creates_new_pending_deployment_from_latest_settings(cl
     project_response = create_project(client, name="redeploy-app")
     project_id = project_response.get_json()["id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
     client.post(f"/api/projects/{project_id}/deploy", json={"branch": "main"})
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
     latest_response = client.post(
         f"/api/projects/{project_id}/deploy",
         json={"branch": "release", "test_command": "pytest -q"},
     )
     latest_deployment_id = latest_response.get_json()["deployment_id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "0011223344556677")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0011223344556677"
+    )
     redeploy_response = client.post(f"/api/projects/{project_id}/redeploy")
 
     assert redeploy_response.status_code == 201
@@ -504,6 +1478,9 @@ def test_redeploy_project_creates_new_pending_deployment_from_latest_settings(cl
     assert payload["commit_sha"] == "0011223344556677"
     assert payload["image_tag"] == "001122334455"
     assert payload["image_ref"] == "redeploy-app:001122334455"
+    assert payload["preflight_status"] is None
+    assert payload["preflight_summary"] is None
+    assert payload["preflight_completed_at"] is None
 
     deployment_response = client.get(f"/api/projects/{project_id}/deployments/{payload['deployment_id']}")
     deployment = deployment_response.get_json()
@@ -511,15 +1488,97 @@ def test_redeploy_project_creates_new_pending_deployment_from_latest_settings(cl
     assert deployment["events"][0]["message"] == "Project redeploy requested for branch 'release' at commit '001122334455'"
 
 
+def test_get_project_deployment_and_list_include_preflight_fields(client, app):
+    project_response = create_project(client, name="deployment-preflight-fields-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.preflight_status = "failed"
+        deployment.preflight_summary = "Missing Kubernetes referenced resources: ConfigMap/my-app-config"
+        deployment.preflight_metadata_json = {"missing_resources": [{"kind": "ConfigMap", "name": "my-app-config"}]}
+        deployment.preflight_completed_at = deployment.created_at
+        db.session.commit()
+
+    get_response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}")
+    list_response = client.get(f"/api/projects/{project_id}/deployments")
+
+    assert get_response.status_code == 200
+    get_payload = get_response.get_json()
+    assert get_payload["preflight_status"] == "failed"
+    assert get_payload["preflight_summary"] == "Missing Kubernetes referenced resources: ConfigMap/my-app-config"
+    assert get_payload["preflight_completed_at"] is not None
+
+    assert list_response.status_code == 200
+    list_payload = list_response.get_json()
+    assert list_payload["items"][0]["preflight_status"] == "failed"
+    assert list_payload["items"][0]["preflight_summary"] == "Missing Kubernetes referenced resources: ConfigMap/my-app-config"
+    assert list_payload["items"][0]["preflight_completed_at"] is not None
+
+
+def test_retry_deployment_falls_back_to_project_default_test_command(client, app, monkeypatch):
+    project_response = create_project(client, name="retry-default-test-command-app", default_test_command="pytest -q")
+    project_id = project_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
+    original_response = client.post(
+        f"/api/projects/{project_id}/deploy",
+        json={"test_command": None},
+    )
+    original_deployment_id = original_response.get_json()["deployment_id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
+    retry_response = client.post(f"/api/projects/{project_id}/deployments/{original_deployment_id}/retry")
+
+    assert retry_response.status_code == 201
+    deployment_id = retry_response.get_json()["deployment_id"]
+    deployment = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}").get_json()
+    assert deployment["build"]["test_command"] == "pytest -q"
+
+
+def test_redeploy_project_falls_back_to_project_default_test_command(client, monkeypatch):
+    project_response = create_project(client, name="redeploy-default-test-command-app", default_test_command="pytest -q")
+    project_id = project_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
+    client.post(
+        f"/api/projects/{project_id}/deploy",
+        json={"test_command": None},
+    )
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
+    redeploy_response = client.post(f"/api/projects/{project_id}/redeploy")
+
+    assert redeploy_response.status_code == 201
+    deployment_id = redeploy_response.get_json()["deployment_id"]
+    deployment = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}").get_json()
+    assert deployment["build"]["test_command"] == "pytest -q"
+
+
 def test_redeploy_project_returns_conflict_when_commit_resolution_fails(client, monkeypatch):
     project_response = create_project(client, name="broken-redeploy-app")
     project_id = project_response.get_json()["id"]
 
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
     client.post(f"/api/projects/{project_id}/deploy", json={})
 
     monkeypatch.setattr(
-        projects_api,
+        deployment_orchestration_api,
         "resolve_project_commit_sha",
         lambda project, branch: (_ for _ in ()).throw(ValueError("Unable to resolve commit for branch 'main': boom")),
     )
@@ -528,6 +1587,28 @@ def test_redeploy_project_returns_conflict_when_commit_resolution_fails(client, 
 
     assert response.status_code == 409
     assert response.get_json() == {"error": "Unable to resolve commit for branch 'main': boom"}
+
+
+def test_redeploy_project_rejects_kubernetes_executor_without_required_settings(client, app, monkeypatch):
+    project_response = create_project(client, name="k8s-prereq-redeploy-app")
+    project_id = project_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
+    client.post(f"/api/projects/{project_id}/deploy", json={})
+
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+        app.config["CONTROL_PLANE_REGISTRY_ENABLED"] = True
+        app.config["CONTROL_PLANE_REGISTRY_URL"] = "docker.io"
+        app.config["CONTROL_PLANE_REGISTRY_NAMESPACE"] = None
+        app.config["CONTROL_PLANE_KUBECONFIG"] = "/tmp/kubeconfig"
+
+    response = client.post(f"/api/projects/{project_id}/redeploy")
+
+    assert response.status_code == 409
+    assert "CONTROL_PLANE_REGISTRY_NAMESPACE" in response.get_json()["error"]
 
 
 def test_stop_deployment_calls_executor_and_records_events(client, app, monkeypatch):
@@ -569,7 +1650,7 @@ def test_stop_deployment_calls_executor_and_records_events(client, app, monkeypa
                 container_id=deployment.container_id,
             )
 
-    monkeypatch.setattr(projects_api, "create_executor_for_deployment", lambda deployment: StopExecutor())
+    monkeypatch.setattr(deployment_services_api, "create_executor_for_deployment", lambda deployment: StopExecutor())
 
     response = client.patch(
         f"/api/projects/{project_id}/deployments/{deployment_id}",
@@ -615,7 +1696,9 @@ def test_stop_deployment_returns_error_when_cleanup_fails(client, app, monkeypat
                 metadata={"container_name": deployment.container_name},
             )
 
-    monkeypatch.setattr(projects_api, "create_executor_for_deployment", lambda deployment: BrokenStopExecutor())
+    monkeypatch.setattr(
+        deployment_services_api, "create_executor_for_deployment", lambda deployment: BrokenStopExecutor()
+    )
 
     response = client.patch(
         f"/api/projects/{project_id}/deployments/{deployment_id}",
@@ -783,7 +1866,9 @@ def test_get_build_log_rejects_paths_outside_allowed_roots(client, app, tmp_path
 def test_get_deployment_summary_returns_successful_view(client, app, monkeypatch, tmp_path):
     project_response = create_project(client, name="summary-app")
     project_id = project_response.get_json()["id"]
-    monkeypatch.setattr(projects_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef")
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
     deploy_response = client.post(f"/api/projects/{project_id}/deploy", json={"branch": "release"})
     deployment_id = deploy_response.get_json()["deployment_id"]
 
@@ -1185,6 +2270,77 @@ def test_get_kubernetes_diagnostics_returns_structured_failure_view(client, app)
     assert payload["diagnostics"]["healthcheck_service_summary"] == "Endpoints: <none> | Session Affinity: None"
 
 
+def test_secret_values_are_redacted_from_diagnostics_summary_and_logs(client, app, tmp_path):
+    project_response = create_project(
+        client,
+        name="secret-redaction-diagnostics-app",
+        env_vars=[
+            {"name": "DATABASE_URL", "value": "postgres://user:super-secret@db/app", "is_secret": True},
+        ],
+    )
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    build_log_path = tmp_path / "build-secret.log"
+    runtime_log_path = tmp_path / "runtime-secret.log"
+    build_log_path.write_text("DATABASE_URL=postgres://user:super-secret@db/app\n", encoding="utf-8")
+    runtime_log_path.write_text("booting with postgres://user:super-secret@db/app\n", encoding="utf-8")
+
+    with app.app_context():
+        app.config["CONTROL_PLANE_WORKSPACE_ROOT"] = str(tmp_path)
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.last_error = "failed to connect to postgres://user:super-secret@db/app"
+        deployment.build.last_error = deployment.last_error
+        deployment.build.log_path = str(build_log_path)
+        deployment.build.registry_push_status = "succeeded"
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="kubernetes.healthcheck_failed",
+                step="deploy.kubernetes.healthcheck",
+                level="error",
+                status="failed",
+                message=deployment.last_error,
+                metadata_json={
+                    "namespace": "default",
+                    "deployment_name": "paas-secret-redaction-diagnostics-app-1",
+                    "service_name": "paas-secret-redaction-diagnostics-app-1-svc",
+                    "healthcheck_pod_logs_summary": "app-123: postgres://user:super-secret@db/app",
+                    "runtime_log_path": str(runtime_log_path),
+                    "env_vars": deployment.project.env_vars,
+                },
+            )
+        )
+        db.session.commit()
+
+    deployment_payload = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}").get_json()
+    assert "super-secret" not in str(deployment_payload)
+    assert "[REDACTED]" in str(deployment_payload)
+
+    summary_payload = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/summary").get_json()
+    assert "super-secret" not in str(summary_payload)
+    assert "[REDACTED]" in str(summary_payload)
+
+    diagnostics_payload = client.get(
+        f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics"
+    ).get_json()
+    assert "super-secret" not in str(diagnostics_payload)
+    assert "[REDACTED]" in str(diagnostics_payload)
+
+    build_log_payload = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/build-log").get_json()
+    assert "super-secret" not in build_log_payload["content"]
+    assert "[REDACTED]" in build_log_payload["content"]
+
+    runtime_log_payload = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/runtime-log").get_json()
+    assert "super-secret" not in runtime_log_payload["content"]
+    assert "[REDACTED]" in runtime_log_payload["content"]
+
+
 def test_get_kubernetes_diagnostics_returns_preflight_missing_resources(client, app):
     project_response = create_project(client, name="k8s-diagnostics-preflight-app")
     project_id = project_response.get_json()["id"]
@@ -1229,6 +2385,72 @@ def test_get_kubernetes_diagnostics_returns_preflight_missing_resources(client, 
     assert payload["checked_resources"] == ["configmap/my-app-config"]
     assert payload["configmap_refs_used"] == ["my-app-config"]
     assert payload["pod_names"] is None
+
+
+def test_get_deployment_summary_prefers_persisted_preflight_failure_context(client, app):
+    project_response = create_project(client, name="k8s-summary-persisted-preflight-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.preflight_status = "failed"
+        deployment.preflight_summary = "Missing Kubernetes referenced resources: ConfigMap/my-app-config"
+        deployment.preflight_metadata_json = {
+            "namespace": "default",
+            "missing_resources": [{"kind": "ConfigMap", "name": "my-app-config"}],
+        }
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/summary")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["last_kubernetes_failure_stage"] == "preflight"
+    assert payload["last_kubernetes_failure_summary"] == "ConfigMap/my-app-config"
+    assert payload["last_kubernetes_failure_missing_resources"] == [
+        {"kind": "ConfigMap", "name": "my-app-config"}
+    ]
+
+
+def test_get_kubernetes_diagnostics_prefers_persisted_preflight_failure_context(client, app):
+    project_response = create_project(client, name="k8s-diagnostics-persisted-preflight-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.preflight_status = "failed"
+        deployment.preflight_summary = "Missing Kubernetes referenced resources: ConfigMap/my-app-config"
+        deployment.preflight_metadata_json = {
+            "namespace": "default",
+            "checked_resources": ["configmap/my-app-config"],
+            "missing_resources": [{"kind": "ConfigMap", "name": "my-app-config"}],
+            "configmap_refs_used": ["my-app-config"],
+            "secret_refs_used": [],
+        }
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["failure_stage"] == "preflight"
+    assert payload["failure_event_type"] == "deployment.preflight_failed"
+    assert payload["failure_summary"] == "ConfigMap/my-app-config"
+    assert payload["missing_resources"] == [{"kind": "ConfigMap", "name": "my-app-config"}]
+    assert payload["checked_resources"] == ["configmap/my-app-config"]
+    assert payload["configmap_refs_used"] == ["my-app-config"]
 
 
 def test_get_kubernetes_diagnostics_returns_404_for_non_kubernetes_deployment(client):
