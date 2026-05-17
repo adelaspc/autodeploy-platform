@@ -49,7 +49,9 @@ def test_github_webhook_rejects_invalid_signature(client):
     )
 
     assert response.status_code == 401
-    assert response.get_json() == {"error": "Invalid GitHub webhook signature"}
+    payload = response.get_json()
+    assert payload["error"] == "Invalid GitHub webhook signature"
+    assert payload["request_id"] == response.headers["X-Request-ID"]
 
 
 def test_github_webhook_handles_ping_event(client, app):
@@ -89,6 +91,9 @@ def test_github_webhook_triggers_deployment_for_matching_push_event(client, app)
     assert webhook_payload["repository_url"] == "https://github.com/example/webhook-app.git"
     assert len(webhook_payload["deployments"]) == 1
     assert webhook_payload["deployments"][0]["project_id"] == project_id
+    assert webhook_payload["deployments"][0]["preflight_status"] is None
+    assert webhook_payload["deployments"][0]["preflight_summary"] is None
+    assert webhook_payload["deployments"][0]["preflight_completed_at"] is None
 
     deployment_id = webhook_payload["deployments"][0]["deployment_id"]
     deployment_response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}")
@@ -118,6 +123,26 @@ def test_github_webhook_triggers_deployment_for_matching_push_event(client, app)
         assert delivery.branch == "main"
         assert delivery.commit_sha == "0123456789abcdef0123456789abcdef01234567"
         assert delivery.deployment_id == deployment_id
+
+
+def test_github_webhook_uses_project_default_test_command(client, app):
+    project_response = create_project(client, name="push-triggered-default-tests-app", default_test_command="pytest -q")
+    project_id = project_response.get_json()["id"]
+    payload = {
+        "ref": "refs/heads/main",
+        "after": "0123456789abcdef0123456789abcdef01234567",
+        "repository": {
+            "clone_url": "https://github.com/example/webhook-app.git",
+        },
+    }
+    body, headers = github_headers(app, payload, delivery_id="push-default-test-command")
+
+    response = client.post("/api/webhooks/github", data=body, headers=headers)
+
+    assert response.status_code == 202
+    deployment_id = response.get_json()["deployments"][0]["deployment_id"]
+    deployment = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}").get_json()
+    assert deployment["build"]["test_command"] == "pytest -q"
 
 
 def test_github_webhook_ignores_unmatched_repository_safely(client, app):
@@ -181,6 +206,44 @@ def test_github_webhook_ignores_branch_mismatch(client, app):
         assert delivery is not None
         assert delivery.status == "ignored"
         assert delivery.reason == "branch_mismatch"
+
+
+def test_github_webhook_ignores_push_when_kubernetes_executor_is_not_ready(client, app):
+    create_project(client, name="k8s-webhook-prereq-app", default_test_command="pytest -q")
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+        app.config["CONTROL_PLANE_REGISTRY_ENABLED"] = True
+        app.config["CONTROL_PLANE_REGISTRY_URL"] = "docker.io"
+        app.config["CONTROL_PLANE_REGISTRY_NAMESPACE"] = None
+        app.config["CONTROL_PLANE_KUBECONFIG"] = "/tmp/kubeconfig"
+
+    payload = {
+        "ref": "refs/heads/main",
+        "after": "1111111111111111111111111111111111111111",
+        "repository": {
+            "clone_url": "https://github.com/example/webhook-app.git",
+        },
+    }
+    body, headers = github_headers(app, payload, delivery_id="push-k8s-not-ready")
+
+    response = client.post("/api/webhooks/github", data=body, headers=headers)
+
+    assert response.status_code == 202
+    assert response.get_json() == {
+        "status": "ignored",
+        "reason": "platform_not_ready",
+        "event": "push",
+        "delivery_id": "push-k8s-not-ready",
+        "repository_url": "https://github.com/example/webhook-app.git",
+        "branch": "main",
+        "commit_sha": "1111111111111111111111111111111111111111",
+    }
+
+    with app.app_context():
+        delivery = WebhookDelivery.query.filter_by(delivery_id="push-k8s-not-ready").first()
+        assert delivery is not None
+        assert delivery.status == "ignored"
+        assert delivery.reason == "platform_not_ready"
 
 
 def test_github_webhook_ignores_unsupported_event_type(client, app):

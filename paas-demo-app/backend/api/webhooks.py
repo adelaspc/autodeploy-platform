@@ -2,10 +2,13 @@ import hashlib
 import hmac
 from urllib.parse import urlparse
 
+from backend.api.deployment_orchestration import create_requested_deployment
+from backend.api.project_services import serialize_triggered_deployment
+from backend.api.request_context import error_payload
 from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, current_app, jsonify, request
 
-from backend.api.projects import create_requested_deployment
+from backend.api.project_validation import kubernetes_deployment_prereq_error
 from backend.extensions import db
 from backend.models import Project, WebhookDelivery
 
@@ -188,7 +191,7 @@ def github_webhook():
     payload_bytes = request.get_data(cache=True)
     signature_header = request.headers.get("X-Hub-Signature-256")
     if not verify_github_signature(payload_bytes, signature_header):
-        return jsonify({"error": "Invalid GitHub webhook signature"}), 401
+        return jsonify(error_payload("Invalid GitHub webhook signature")), 401
 
     event_type = request.headers.get("X-GitHub-Event", "").strip().lower()
     delivery_id = request.headers.get("X-GitHub-Delivery")
@@ -260,12 +263,27 @@ def github_webhook():
             commit_sha=commit_sha,
         )
 
+    deployment_prereq_error = kubernetes_deployment_prereq_error()
+    if deployment_prereq_error:
+        if delivery is not None:
+            delivery.status = "ignored"
+            delivery.reason = "platform_not_ready"
+            db.session.commit()
+        return ignore_github_event(
+            "platform_not_ready",
+            delivery_id=delivery_id,
+            event_type="push",
+            repository_url=repository_url,
+            branch=branch,
+            commit_sha=commit_sha,
+        )
+
     deployments = []
     for project in branch_matches:
         _build, deployment, _commit_sha = create_requested_deployment(
             project,
             branch=branch,
-            test_command=None,
+            test_command=project.default_test_command,
             commit_sha=commit_sha,
             message_prefix="Deployment requested from GitHub webhook",
             deployment_metadata={
@@ -292,13 +310,10 @@ def github_webhook():
             commit=False,
         )
         deployments.append(
-            {
-                "project_id": project.id,
-                "deployment_id": deployment.id,
-                "status": deployment.status,
-                "branch": branch,
-                "commit_sha": commit_sha,
-            }
+            serialize_triggered_deployment(
+                deployment,
+                branch=branch,
+            )
         )
 
     if delivery is not None:

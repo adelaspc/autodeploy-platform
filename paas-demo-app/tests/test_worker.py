@@ -3,11 +3,11 @@ from types import SimpleNamespace
 
 from backend.extensions import db
 from backend.models import PlatformDeployment
-from worker.cli import run_worker_loop
+from worker.cli import run_reconciler_loop, run_worker_loop
 from pathlib import Path
 import subprocess
 
-from worker.executor import ExecutionResult, LocalDockerExecutor, WorkerExecutionError
+from worker.executor import ExecutionResult, LocalDockerExecutor, PreflightResult, WorkerExecutionError
 import worker.service as worker_service
 from worker.service import claim_next_pending_deployment, now_utc, process_next_pending_deployment, refresh_claim
 
@@ -60,6 +60,16 @@ class OrderedExecutor:
             "Push skipped",
             metadata={"executor": "ordered", "skipped": True},
             log_path="/tmp/test-workspaces/push.log",
+        )
+
+    def preflight_deploy(self, deployment):
+        self.calls.append("preflight_deploy")
+        return PreflightResult(
+            status="succeeded",
+            summary="Preflight simulated",
+            metadata={"executor": "ordered"},
+            log_path="/tmp/test-workspaces/preflight.log",
+            deploy_target="ordered",
         )
 
     def deploy(self, deployment):
@@ -228,7 +238,18 @@ def test_process_next_pending_deployment_runs_to_completion(client):
     assert processed.build.started_at is not None
     assert processed.build.finished_at is not None
     assert processed.build.registry_push_status == "skipped"
-    assert executor.calls == ["clone_repo", "build_image", "run_tests", "tag_image", "push_image", "deploy"]
+    assert processed.preflight_status == "succeeded"
+    assert processed.preflight_summary == "Preflight simulated"
+    assert processed.preflight_metadata_json["status"] == "succeeded"
+    assert executor.calls == [
+        "clone_repo",
+        "build_image",
+        "run_tests",
+        "tag_image",
+        "push_image",
+        "preflight_deploy",
+        "deploy",
+    ]
 
     deployment_response = client.get(f"/api/projects/{processed.project_id}/deployments/{processed.id}")
     deployment = deployment_response.get_json()
@@ -239,6 +260,7 @@ def test_process_next_pending_deployment_runs_to_completion(client):
     assert "tests.succeeded" in event_types
     assert "image.tag_started" in event_types
     assert "image.tag_succeeded" in event_types
+    assert "deployment.preflight_succeeded" in event_types
     assert "deployment.running" in event_types
     assert "claim_acquired" in event_types
     assert "claim_cleared" in event_types
@@ -248,6 +270,54 @@ def test_process_next_pending_deployment_runs_to_completion(client):
     assert push_event["metadata_json"]["step"] == "image.push"
     assert push_event["metadata_json"]["push_log_available"] is True
     assert push_event["metadata_json"]["push_summary"] == "Push skipped"
+
+
+def test_process_next_pending_deployment_persists_preflight_failure_state(client):
+    create_pending_deployment(client, name="worker-preflight-fail")
+
+    class PreflightFailingExecutor:
+        def clone_repo(self, deployment):
+            return ExecutionResult("Repository cloned", workspace_path=f"/tmp/test-workspaces/deployment-{deployment.id}")
+
+        def build_image(self, deployment):
+            return ExecutionResult(
+                "Docker image built",
+                image_tag=f"{deployment.project.name}:abc123def456",
+                image_ref=f"{deployment.project.name}:abc123def456",
+            )
+
+        def run_tests(self, deployment):
+            return ExecutionResult("Tests passed")
+
+        def tag_image(self, deployment):
+            return ExecutionResult("Image tag skipped", image_tag=deployment.build.image_tag, image_ref=deployment.build.image_ref)
+
+        def push_image(self, deployment):
+            return ExecutionResult("Push skipped", metadata={"skipped": True})
+
+        def preflight_deploy(self, deployment):
+            raise WorkerExecutionError(
+                "deploy.kubernetes.preflight",
+                "Missing Kubernetes referenced resources: ConfigMap/demo-config",
+                metadata={
+                    "namespace": "default",
+                    "missing_resources": [{"kind": "ConfigMap", "name": "demo-config"}],
+                    "checked_resources": ["configmap/demo-config"],
+                },
+                log_path="/tmp/test-workspaces/preflight.log",
+            )
+
+        def deploy(self, deployment):
+            raise AssertionError("deploy should not run after preflight failure")
+
+    processed = process_next_pending_deployment(executor=PreflightFailingExecutor())
+
+    assert processed is not None
+    assert processed.status == "failed"
+    assert processed.preflight_status == "failed"
+    assert processed.preflight_summary == "Missing Kubernetes referenced resources: ConfigMap/demo-config"
+    assert processed.preflight_metadata_json["missing_resources"] == [{"kind": "ConfigMap", "name": "demo-config"}]
+    assert processed.preflight_metadata_json["status"] == "failed"
 
 
 def test_process_next_pending_deployment_skips_testing_when_no_test_command(client):
@@ -347,6 +417,33 @@ def test_run_worker_loop_polls_until_stopped():
 
     assert calls["count"] == 2
     assert messages == ["Processed deployment 99 with final status 'running'"]
+
+
+def test_run_reconciler_loop_polls_until_stopped():
+    calls = {"count": 0}
+    messages = []
+
+    def reconciler(*, emitter):
+        calls["count"] += 1
+        emitter("reconciler pass")
+        if calls["count"] >= 2:
+            import worker.cli as worker_cli
+
+            worker_cli._keep_running = False
+        return calls["count"]
+
+    import worker.cli as worker_cli
+
+    worker_cli._keep_running = True
+    run_reconciler_loop(interval=0.01, reconciler=reconciler, sleep_fn=lambda _seconds: None, emitter=messages.append)
+
+    assert calls["count"] == 2
+    assert messages == [
+        "reconciler pass",
+        "Reconciler finished with 1 action(s)",
+        "reconciler pass",
+        "Reconciler finished with 2 action(s)",
+    ]
 
 
 def test_claim_next_pending_deployment_skips_fresh_claims(client, app):

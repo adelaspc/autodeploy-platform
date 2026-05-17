@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from backend.extensions import db
+from backend.security import redact_text, secret_values_from_env_vars
 
 
 class Build(db.Model):
@@ -35,6 +36,7 @@ class Build(db.Model):
     deployments = db.relationship("PlatformDeployment", back_populates="build", cascade="all, delete-orphan")
 
     def to_dict(self):
+        secret_values = secret_values_from_env_vars(self.project.env_vars if self.project else [])
         return {
             "id": self.id,
             "project_id": self.project_id,
@@ -48,7 +50,7 @@ class Build(db.Model):
             "test_command": self.test_command,
             "workspace_path": self.workspace_path,
             "log_path": self.log_path,
-            "last_error": self.last_error,
+            "last_error": redact_text(self.last_error, secret_values=secret_values) if self.last_error else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "created_at": self.created_at.isoformat(),

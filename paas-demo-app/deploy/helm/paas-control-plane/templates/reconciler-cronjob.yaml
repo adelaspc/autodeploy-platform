@@ -1,0 +1,72 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "paas-control-plane.fullname" . }}-reconciler
+  labels:
+    {{- include "paas-control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: reconciler
+spec:
+  schedule: {{ .Values.reconciler.schedule | quote }}
+  successfulJobsHistoryLimit: {{ .Values.reconciler.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.reconciler.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "paas-control-plane.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: reconciler
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: {{ include "paas-control-plane.serviceAccountName" . }}
+          {{- if .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml .Values.imagePullSecrets | nindent 12 }}
+          {{- end }}
+          {{- if .Values.workspace.initPermissions.enabled }}
+          initContainers:
+            {{- include "paas-control-plane.workspaceInitContainer" . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: reconciler
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-m", "flask", "--app", "wsgi:app", "run-reconciler"]
+              envFrom:
+                - configMapRef:
+                    name: {{ include "paas-control-plane.fullname" . }}-config
+                - secretRef:
+                    name: {{ include "paas-control-plane.fullname" . }}-secret
+              {{- if .Values.kubeconfig.existingSecret }}
+              env:
+                - name: CONTROL_PLANE_KUBECONFIG
+                  value: {{ printf "%s/%s" .Values.kubeconfig.mountPath .Values.kubeconfig.fileName | quote }}
+              {{- end }}
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+              volumeMounts:
+                - name: workspace
+                  mountPath: {{ include "paas-control-plane.workspaceMountPath" . }}
+                {{- if .Values.dockerSocket.enabled }}
+                - name: docker-socket
+                  mountPath: /var/run/docker.sock
+                {{- end }}
+                {{- if .Values.kubeconfig.existingSecret }}
+                - name: kubeconfig
+                  mountPath: {{ .Values.kubeconfig.mountPath }}
+                  readOnly: true
+                {{- end }}
+          volumes:
+            - name: workspace
+              {{- include "paas-control-plane.workspaceVolume" . | nindent 14 }}
+            {{- if .Values.dockerSocket.enabled }}
+            - name: docker-socket
+              hostPath:
+                path: {{ .Values.dockerSocket.hostPath }}
+                type: Socket
+            {{- end }}
+            {{- if .Values.kubeconfig.existingSecret }}
+            - name: kubeconfig
+              secret:
+                secretName: {{ .Values.kubeconfig.existingSecret }}
+            {{- end }}

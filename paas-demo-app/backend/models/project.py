@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from backend.extensions import db
+from backend.security import serialized_project_env_vars
 
 
 class Project(db.Model):
@@ -20,6 +21,7 @@ class Project(db.Model):
     port = db.Column(db.Integer, nullable=False)
     healthcheck_path = db.Column(db.String(255), nullable=False)
     env_vars = db.Column(db.JSON, nullable=False, default=list)
+    default_test_command = db.Column(db.String(255), nullable=True)
     migration_command = db.Column(db.String(255), nullable=True)
     cpu = db.Column(db.String(32), nullable=True)
     memory = db.Column(db.String(32), nullable=True)
@@ -48,7 +50,8 @@ class Project(db.Model):
             "build_context": self.build_context,
             "port": self.port,
             "healthcheck_path": self.healthcheck_path,
-            "env_vars": self.env_vars,
+            "env_vars": serialized_project_env_vars(self.env_vars),
+            "default_test_command": self.default_test_command,
             "migration_command": self.migration_command,
             "cpu": self.cpu,
             "memory": self.memory,

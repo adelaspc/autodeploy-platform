@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from backend.extensions import db
+from backend.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
 
 
 class DeploymentEvent(db.Model):
@@ -19,6 +20,9 @@ class DeploymentEvent(db.Model):
     deployment = db.relationship("PlatformDeployment", back_populates="events")
 
     def to_dict(self):
+        secret_values = secret_values_from_env_vars(
+            self.deployment.project.env_vars if self.deployment and self.deployment.project else []
+        )
         return {
             "id": self.id,
             "deployment_id": self.deployment_id,
@@ -26,7 +30,7 @@ class DeploymentEvent(db.Model):
             "step": self.step,
             "level": self.level,
             "status": self.status,
-            "message": self.message,
-            "metadata_json": self.metadata_json,
+            "message": redact_text(self.message, secret_values=secret_values) if self.message else None,
+            "metadata_json": redact_sensitive_data(self.metadata_json, secret_values=secret_values),
             "created_at": self.created_at.isoformat(),
         }

@@ -1,7 +1,13 @@
 FROM python:3.12-slim AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
-RUN adduser --disabled-password --gecos "" appuser
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker.io \
+        git \
+        kubernetes-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && adduser --disabled-password --gecos "" appuser
 
 WORKDIR /app
 

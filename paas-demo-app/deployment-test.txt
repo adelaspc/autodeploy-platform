@@ -1,0 +1,127 @@
+Local MicroK8s Helm Deployment Test
+
+This file captures the exact local Kubernetes deployment test flow that is currently working for this repository.
+
+Prerequisites
+
+- MicroK8s is running.
+- The MicroK8s registry addon is enabled and reachable at `localhost:32000`.
+- The local registry backing PVC/PV is already fixed and bound.
+- Docker can push to `localhost:32000`.
+- Helm can reach the local cluster context.
+
+Relevant local chart settings
+
+- values file: `deploy/helm/paas-control-plane/values.local-microk8s.yaml`
+- image repository: `localhost:32000/paas-control-plane`
+- default image tag in the file: `dev`
+- image pull policy: `Always`
+- executor mode: `fake`
+- workspace hostPath: `/var/tmp/paas-control-plane-workspace`
+- shared SQLite DB path inside pods: `/tmp/paas-workspaces/control_plane.db`
+
+1. Verify the local registry is reachable
+
+```bash
+curl -fsS http://localhost:32000/v2/_catalog
+```
+
+Expected result:
+
+- JSON response, for example `{"repositories":[]}` or a list containing `paas-control-plane`
+
+2. Validate the chart before installing
+
+```bash
+helm lint ./deploy/helm/paas-control-plane
+helm template ci ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-control-plane/values.ci.yaml > /dev/null
+helm template local ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-control-plane/values.local-microk8s.yaml > /dev/null
+```
+
+3. Build and push the control-plane image to the MicroK8s registry
+
+```bash
+docker build -t localhost:32000/paas-control-plane:dev .
+docker push localhost:32000/paas-control-plane:dev
+```
+
+If you want a different tag, replace `dev` in both commands and in the Helm command below.
+
+4. Install or upgrade the local Helm release
+
+```bash
+helm upgrade --install local ./deploy/helm/paas-control-plane \
+  -n paas-local \
+  --create-namespace \
+  -f ./deploy/helm/paas-control-plane/values.local-microk8s.yaml \
+  --set image.tag=dev \
+  --wait \
+  --timeout 240s
+```
+
+Expected result:
+
+- Helm ends with `STATUS: deployed`
+
+5. Verify the release resources
+
+```bash
+microk8s kubectl get all -n paas-local
+microk8s kubectl get pods -n paas-local -o wide
+microk8s kubectl get pods -n paas-local -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{range .spec.containers[*]}{.image}{" "}{end}{"\n"}{end}'
+```
+
+Expected result:
+
+- API pod is `Running` and ready
+- Worker pod is `Running` and ready
+- Reconciler CronJob exists
+- running pods use `localhost:32000/paas-control-plane:dev`
+
+6. Verify the API health endpoint
+
+Start a port-forward:
+
+```bash
+microk8s kubectl port-forward -n paas-local service/local-paas-control-plane 18080:5000
+```
+
+In another shell:
+
+```bash
+curl -fsS http://127.0.0.1:18080/health
+```
+
+Expected result:
+
+```json
+{"status":"ok"}
+```
+
+7. If the install fails, inspect the likely failure points
+
+Migration hook:
+
+```bash
+microk8s kubectl get events -n paas-local --sort-by=.lastTimestamp
+microk8s kubectl logs -n paas-local job/local-paas-control-plane-migrate --all-containers=true --tail=200
+```
+
+API logs:
+
+```bash
+microk8s kubectl logs -n paas-local deployment/local-paas-control-plane-api --tail=100
+```
+
+Worker logs:
+
+```bash
+microk8s kubectl logs -n paas-local deployment/local-paas-control-plane-worker --tail=100
+```
+
+Known local assumptions behind this working flow
+
+- The chart creates hook-time `ConfigMap` and `Secret` resources before the migration Job starts.
+- The chart uses an init container to fix permissions on the shared hostPath workspace before the main container starts.
+- This is a single-node local-development flow. `localhost:32000` is appropriate here, but not for a multi-node cluster.
+- This validates the control plane running on Kubernetes with `CONTROL_PLANE_EXECUTOR=fake`. It does not yet validate the user-app Kubernetes executor path.

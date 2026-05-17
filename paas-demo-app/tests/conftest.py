@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 
 import pytest
+from sqlalchemy.pool import StaticPool
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -13,6 +14,11 @@ class TestConfig:
     TESTING = True
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        "connect_args": {"check_same_thread": False},
+        "poolclass": StaticPool,
+    }
+    CONTROL_PLANE_ENV = "development"
     CONTROL_PLANE_REGISTRY_ENABLED = False
     CONTROL_PLANE_GITHUB_WEBHOOK_SECRET = "test-github-webhook-secret"
     CONTROL_PLANE_REGISTRY_URL = "registry.example.com"
