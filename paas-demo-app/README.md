@@ -71,6 +71,11 @@ Validate the deployment assets:
 docker compose config
 helm template ci ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-control-plane/values.ci.yaml > /dev/null
 helm template local ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-control-plane/values.local-microk8s.yaml > /dev/null
+helm lint ./deploy/helm/generic-web-app
+helm template generic ./deploy/helm/generic-web-app > /dev/null
+helm template generic-minimal ./deploy/helm/generic-web-app -f ./deploy/helm/generic-web-app/examples/minimal.yaml > /dev/null
+helm template generic-node ./deploy/helm/generic-web-app -f ./deploy/helm/generic-web-app/examples/node-express.yaml > /dev/null
+helm template generic-python ./deploy/helm/generic-web-app -f ./deploy/helm/generic-web-app/examples/python-fastapi.yaml > /dev/null
 ```
 
 ## Scope
@@ -100,7 +105,8 @@ helm template local ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-contr
 The repository now includes two operator-facing deployment paths:
 
 - local Docker Compose for API, worker, reconciler, migrations, and MySQL
-- a minimal Helm chart for production-like Kubernetes deployment of the control plane
+- an internal Helm chart for production-like Kubernetes deployment of the control plane
+- a stack-agnostic generic web app Helm chart that documents the intended user workload abstraction
 
 Local startup, Kubernetes rollout, migration flow, required config/secrets, health endpoints, and troubleshooting are documented in [docs/runbook.md](docs/runbook.md).
 

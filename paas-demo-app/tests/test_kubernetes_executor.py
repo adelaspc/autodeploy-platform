@@ -1,7 +1,10 @@
+import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 import pytest
 
+from worker.helm_runner import HelmCommandError, HelmResult
 from worker.executor import (
     KubernetesExecutor,
     WorkerExecutionError,
@@ -33,6 +36,114 @@ class DummyPopen:
 
     def kill(self):
         self._returncode = -9
+
+
+class RecordingHelmRunner:
+    instances = []
+
+    def __init__(self, *, namespace, helm_binary="helm", chart_path=None, helm_timeout="180s"):
+        self.namespace = namespace
+        self.helm_binary = helm_binary
+        self.chart_path = chart_path
+        self.helm_timeout = helm_timeout
+        self.upgrade_install_calls = []
+        RecordingHelmRunner.instances.append(self)
+
+    def upgrade_install(self, release, values_file):
+        self.upgrade_install_calls.append({"release": release, "values_file": values_file})
+        return HelmResult(
+            args=[
+                self.helm_binary,
+                "upgrade",
+                "--install",
+                release,
+                self.chart_path,
+                "-f",
+                values_file,
+            ],
+            returncode=0,
+            stdout="deployed\n",
+            stderr="",
+        )
+
+    def uninstall(self, release):
+        self.uninstall_call = {"release": release}
+        return HelmResult(
+            args=[self.helm_binary, "uninstall", release, "--namespace", self.namespace],
+            returncode=0,
+            stdout="uninstalled\n",
+            stderr="",
+        )
+
+
+class FailingHelmRunner(RecordingHelmRunner):
+    def upgrade_install(self, release, values_file):
+        self.upgrade_install_calls.append({"release": release, "values_file": values_file})
+        result = HelmResult(
+            args=["helm", "upgrade", "--install", release, self.chart_path, "-f", values_file],
+            returncode=1,
+            stdout="",
+            stderr="helm failed\n",
+        )
+        raise HelmCommandError(result)
+
+
+class FailingHelmUninstallRunner(RecordingHelmRunner):
+    def uninstall(self, release):
+        self.uninstall_call = {"release": release}
+        result = HelmResult(
+            args=["helm", "uninstall", release, "--namespace", self.namespace],
+            returncode=1,
+            stdout="",
+            stderr="uninstall failed\n",
+        )
+        raise HelmCommandError(result)
+
+
+class MissingHelmReleaseRunner(RecordingHelmRunner):
+    def uninstall(self, release):
+        self.uninstall_call = {"release": release}
+        result = HelmResult(
+            args=["helm", "uninstall", release, "--namespace", self.namespace],
+            returncode=1,
+            stdout="",
+            stderr=f"Error: uninstall: Release not loaded: {release}: release: not found\n",
+        )
+        raise HelmCommandError(result)
+
+
+def make_kubernetes_deployment_stub(*, deployment_id=7, project_id=3, name="helm-app", environment="production"):
+    return type(
+        "DeploymentStub",
+        (),
+        {
+            "id": deployment_id,
+            "project_id": project_id,
+            "environment": environment,
+            "build": type(
+                "BuildStub",
+                (),
+                {
+                    "image_ref": "localhost:32000/helm-app:dev",
+                    "image_tag": "helm-app:dev",
+                    "registry_push_status": "succeeded",
+                },
+            )(),
+            "project": type(
+                "ProjectStub",
+                (),
+                {
+                    "id": project_id,
+                    "name": name,
+                    "port": 3000,
+                    "healthcheck_path": "/health",
+                    "env_vars": [{"name": "APP_ENV", "value": "production"}],
+                    "cpu": None,
+                    "memory": None,
+                },
+            )(),
+        },
+    )()
 
 
 def create_pending_deployment(client, *, name="k8s-app", test_command=None):
@@ -254,6 +365,16 @@ def test_create_executor_returns_kubernetes_executor(app):
     assert isinstance(executor, KubernetesExecutor)
     assert executor.kubeconfig == "/tmp/kubeconfig"
     assert executor.namespace == "microk8s"
+    assert executor.deployment_mode == "manifest"
+
+
+def test_create_executor_rejects_invalid_kubernetes_deployment_mode(app):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+        app.config["CONTROL_PLANE_K8S_DEPLOYMENT_MODE"] = "invalid"
+
+        with pytest.raises(ValueError, match="CONTROL_PLANE_K8S_DEPLOYMENT_MODE"):
+            create_executor()
 
 
 def test_executor_contract_for_kubernetes_is_explicit():
@@ -274,6 +395,238 @@ def test_executor_contract_for_kubernetes_is_explicit():
         "CONTROL_PLANE_REGISTRY_NAMESPACE",
         "CONTROL_PLANE_KUBECONFIG",
     )
+
+
+def test_kubernetes_executor_helm_mode_deploys_with_generated_values_and_release_name(tmp_path, monkeypatch):
+    RecordingHelmRunner.instances = []
+    value_generator_calls = []
+    release_name_calls = []
+
+    def fake_values_generator(deployment, config):
+        value_generator_calls.append({"deployment": deployment, "image_pull_secret": config.image_pull_secret})
+        return {
+            "image": {"repository": "localhost:32000/helm-app", "tag": "dev", "pullPolicy": "IfNotPresent", "pullSecrets": []},
+            "replicaCount": 1,
+            "container": {"port": 3000},
+            "env": [{"name": "APP_ENV", "value": "production"}],
+            "envFrom": {"configMaps": [], "secrets": []},
+            "service": {"type": "ClusterIP", "port": 3000, "targetPort": ""},
+            "resources": {},
+            "probes": {"readiness": {"enabled": True}, "liveness": {"enabled": True}, "startup": {"enabled": False}},
+            "ingress": {"enabled": False},
+        }
+
+    def fake_release_name(project, deployment):
+        release_name_calls.append({"project": project, "deployment": deployment})
+        return "paas-helm-app-production-3"
+
+    monkeypatch.setattr("worker.executor.generic_web_app_values", fake_values_generator)
+    monkeypatch.setattr("worker.executor.helm_release_name", fake_release_name)
+
+    kubectl_commands = []
+
+    def fake_runner(args, **kwargs):
+        kubectl_commands.append(args)
+        raise AssertionError(f"Manifest-mode kubectl command should not run in helm deploy mode: {args}")
+
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=fake_runner,
+        port_allocator=lambda: 19090,
+        health_probe=lambda _url: {"status_code": 200, "summary": "ok"},
+        sleep_fn=lambda _seconds: None,
+        registry_enabled=True,
+        registry_url="localhost:32000",
+        registry_namespace="",
+        namespace="apps",
+        image_pull_secret="registry-pull-secret",
+        deployment_mode="helm",
+        helm_chart_path="deploy/helm/generic-web-app",
+        helm_runner_factory=RecordingHelmRunner,
+        popen_factory=DummyPopen,
+    )
+    deployment = make_kubernetes_deployment_stub()
+
+    result = executor.deploy(deployment)
+
+    assert value_generator_calls == [{"deployment": deployment, "image_pull_secret": "registry-pull-secret"}]
+    assert release_name_calls == [{"project": deployment.project, "deployment": deployment}]
+    helm_runner = RecordingHelmRunner.instances[0]
+    assert helm_runner.namespace == "apps"
+    assert helm_runner.chart_path == "deploy/helm/generic-web-app"
+    assert helm_runner.upgrade_install_calls[0]["release"] == "paas-helm-app-production-3"
+    values_file = Path(helm_runner.upgrade_install_calls[0]["values_file"])
+    assert values_file.name == "generic-web-app-values.yaml"
+    assert json.loads(values_file.read_text(encoding="utf-8"))["container"]["port"] == 3000
+    assert result.metadata["deployment_mode"] == "helm"
+    assert result.metadata["helm_release_name"] == "paas-helm-app-production-3"
+    assert result.metadata["namespace"] == "apps"
+    assert result.metadata["chart_path"] == "deploy/helm/generic-web-app"
+    assert result.service_url == "http://paas-helm-app-production-3-generic-web-app.apps.svc.cluster.local:3000"
+    event_types = [event["event_type"] for event in result.events]
+    assert "kubernetes.helm_deploy_started" in event_types
+    assert "kubernetes.helm_deploy_succeeded" in event_types
+    assert "kubernetes.healthcheck_succeeded" in event_types
+    assert not kubectl_commands
+
+
+def test_kubernetes_executor_helm_mode_failure_raises_worker_execution_error(tmp_path):
+    RecordingHelmRunner.instances = []
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        registry_enabled=True,
+        registry_url="localhost:32000",
+        registry_namespace="",
+        namespace="apps",
+        deployment_mode="helm",
+        helm_runner_factory=FailingHelmRunner,
+        popen_factory=DummyPopen,
+    )
+
+    with pytest.raises(WorkerExecutionError) as exc_info:
+        executor.deploy(make_kubernetes_deployment_stub())
+
+    assert exc_info.value.step == "deploy.kubernetes.helm"
+    assert exc_info.value.metadata["deployment_mode"] == "helm"
+    assert exc_info.value.metadata["helm_returncode"] == 1
+    assert "helm failed" in exc_info.value.metadata["helm_stderr_summary"]
+    failed_event = next(event for event in exc_info.value.events if event["event_type"] == "kubernetes.helm_deploy_failed")
+    assert failed_event["metadata_json"]["deployment_mode"] == "helm"
+
+
+def test_kubernetes_executor_manifest_mode_stop_still_uses_kubectl_delete(tmp_path):
+    commands = []
+
+    def fake_runner(args, capture_output, text, timeout, check, input=None, env=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
+        commands.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="deleted\n", stderr="")
+
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=fake_runner,
+        deployment_mode="manifest",
+        popen_factory=DummyPopen,
+    )
+    deployment = make_kubernetes_deployment_stub(deployment_id=9, name="stop-app")
+
+    result = executor.stop(deployment)
+
+    assert result.metadata["stopped"] is True
+    assert any(command[:4] == ["kubectl", "--namespace", "default", "delete"] for command in commands)
+    assert commands[0][-2:] == ["--ignore-not-found=true", "--wait=false"]
+
+
+def test_kubernetes_executor_helm_mode_stop_uninstalls_release(tmp_path):
+    RecordingHelmRunner.instances = []
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        namespace="apps",
+        deployment_mode="helm",
+        helm_runner_factory=RecordingHelmRunner,
+        popen_factory=DummyPopen,
+    )
+    deployment = make_kubernetes_deployment_stub(deployment_id=9, name="stop-app", project_id=3)
+
+    result = executor.stop(deployment)
+
+    helm_runner = RecordingHelmRunner.instances[0]
+    assert helm_runner.namespace == "apps"
+    assert helm_runner.uninstall_call == {"release": "paas-stop-app-production-3"}
+    assert result.deploy_target == "kubernetes"
+    assert result.metadata["stopped"] is True
+    assert result.metadata["deployment_mode"] == "helm"
+    assert result.metadata["helm_release_name"] == "paas-stop-app-production-3"
+    event_types = [event["event_type"] for event in result.events]
+    assert event_types == ["kubernetes.helm_uninstall_started", "kubernetes.helm_uninstall_succeeded"]
+
+
+def test_kubernetes_executor_helm_mode_stop_uses_recorded_release_name_when_available(tmp_path):
+    RecordingHelmRunner.instances = []
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        namespace="apps",
+        deployment_mode="helm",
+        helm_runner_factory=RecordingHelmRunner,
+        popen_factory=DummyPopen,
+    )
+    deployment = make_kubernetes_deployment_stub(deployment_id=9, name="renamed-app", project_id=3)
+    deployment.events = [
+        SimpleNamespace(id=1, metadata_json={"helm_release_name": "paas-original-name-production-3"})
+    ]
+
+    result = executor.stop(deployment)
+
+    helm_runner = RecordingHelmRunner.instances[0]
+    assert helm_runner.uninstall_call == {"release": "paas-original-name-production-3"}
+    assert result.metadata["helm_release_name"] == "paas-original-name-production-3"
+
+
+def test_kubernetes_executor_helm_mode_stop_failure_raises_worker_execution_error(tmp_path):
+    RecordingHelmRunner.instances = []
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        namespace="apps",
+        deployment_mode="helm",
+        helm_runner_factory=FailingHelmUninstallRunner,
+        popen_factory=DummyPopen,
+    )
+
+    with pytest.raises(WorkerExecutionError) as exc_info:
+        executor.stop(make_kubernetes_deployment_stub(deployment_id=9, name="stop-app", project_id=3))
+
+    assert exc_info.value.step == "deploy.kubernetes.helm_uninstall"
+    assert exc_info.value.metadata["helm_returncode"] == 1
+    assert "uninstall failed" in exc_info.value.metadata["helm_stderr_summary"]
+    event_types = [event["event_type"] for event in exc_info.value.events]
+    assert event_types == ["kubernetes.helm_uninstall_started", "kubernetes.helm_uninstall_failed"]
+
+
+def test_kubernetes_executor_helm_mode_stop_treats_release_not_found_as_stopped(tmp_path):
+    RecordingHelmRunner.instances = []
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        namespace="apps",
+        deployment_mode="helm",
+        helm_runner_factory=MissingHelmReleaseRunner,
+        popen_factory=DummyPopen,
+    )
+
+    result = executor.stop(make_kubernetes_deployment_stub(deployment_id=9, name="stop-app", project_id=3))
+
+    assert result.metadata["stopped"] is True
+    assert result.metadata["release_not_found"] is True
+    event_types = [event["event_type"] for event in result.events]
+    assert event_types == ["kubernetes.helm_uninstall_started", "kubernetes.helm_uninstall_not_found"]
+
+
+def test_kubernetes_executor_helm_mode_does_not_change_runtime_status_behavior(tmp_path):
+    commands = []
+
+    def fake_runner(args, capture_output, text, timeout, check, input=None, env=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
+        commands.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="found\n", stderr="")
+
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=fake_runner,
+        deployment_mode="helm",
+        popen_factory=DummyPopen,
+    )
+
+    status = executor.runtime_resource_status(make_kubernetes_deployment_stub(deployment_id=10, name="status-app"))
+
+    assert status["deployment_exists"] is True
+    assert status["service_exists"] is True
+    assert any("deployment/paas-status-app-10" in command for command in commands)
+    assert any("service/paas-status-app-10-svc" in command for command in commands)
 
 
 def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, tmp_path):

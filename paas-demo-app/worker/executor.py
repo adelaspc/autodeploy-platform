@@ -17,6 +17,9 @@ from urllib.request import urlopen
 from flask import current_app
 
 from backend.security import env_var_is_secret, redact_sensitive_data, redact_text, secret_values_from_env_vars
+from worker.helm_runner import HelmCommandError, HelmRunner
+from worker.helm_values import GenericWebAppValuesConfig, generic_web_app_values
+from worker.k8s_names import helm_release_name
 
 
 @dataclass
@@ -1107,6 +1110,7 @@ class KubernetesExecutor(LocalDockerExecutor):
         optional_config=(
             "CONTROL_PLANE_K8S_NAMESPACE",
             "CONTROL_PLANE_K8S_IMAGE_PULL_SECRET",
+            "CONTROL_PLANE_K8S_DEPLOYMENT_MODE",
             "CONTROL_PLANE_REGISTRY_USERNAME",
             "CONTROL_PLANE_REGISTRY_PASSWORD",
             "CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS",
@@ -1138,6 +1142,11 @@ class KubernetesExecutor(LocalDockerExecutor):
         namespace="default",
         kubectl_bin="kubectl",
         image_pull_secret=None,
+        deployment_mode="manifest",
+        helm_chart_path="deploy/helm/generic-web-app",
+        helm_binary="helm",
+        helm_timeout="180s",
+        helm_runner_factory=HelmRunner,
     ):
         super().__init__(
             workspace_root=workspace_root,
@@ -1162,8 +1171,18 @@ class KubernetesExecutor(LocalDockerExecutor):
         self.namespace = namespace or "default"
         self.kubectl_bin = kubectl_bin
         self.image_pull_secret = (image_pull_secret or "").strip() or None
+        self.deployment_mode = self._normalize_deployment_mode(deployment_mode)
+        self.helm_chart_path = helm_chart_path
+        self.helm_binary = helm_binary
+        self.helm_timeout = helm_timeout
+        self.helm_runner_factory = helm_runner_factory
 
     def deploy(self, deployment):
+        if self.deployment_mode == "helm":
+            return self._deploy_with_helm(deployment)
+        return self._deploy_with_manifest(deployment)
+
+    def _deploy_with_manifest(self, deployment):
         _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
         manifest_path = logs_dir / "kubernetes-manifest.json"
         apply_log_path = logs_dir / "kubernetes-apply.log"
@@ -1377,6 +1396,186 @@ class KubernetesExecutor(LocalDockerExecutor):
             healthcheck_url=healthcheck_url,
         )
 
+    def _deploy_with_helm(self, deployment):
+        _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
+        values_path = logs_dir / "generic-web-app-values.yaml"
+        helm_log_path = logs_dir / "helm-upgrade-install.log"
+        port_forward_log_path = logs_dir / "kubernetes-port-forward.log"
+        release_name = helm_release_name(deployment.project, deployment)
+        service_name = self._helm_resource_name(release_name)
+        deployment_name = service_name
+        service_url = self._service_url(service_name, deployment.project.port)
+        healthcheck_url = f"{service_url}{deployment.project.healthcheck_path}"
+        values = generic_web_app_values(
+            deployment,
+            GenericWebAppValuesConfig(image_pull_secret=self.image_pull_secret),
+        )
+        values_path.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
+
+        metadata = {
+            "deployment_mode": "helm",
+            "helm_release_name": release_name,
+            "namespace": self.namespace,
+            "chart_path": self.helm_chart_path,
+            "values_path": str(values_path),
+        }
+        events = [
+            self._event(
+                "kubernetes.helm_deploy_started",
+                "deploying",
+                f"Deploying Helm release '{release_name}'",
+                step="deploy.kubernetes.helm",
+                metadata=metadata,
+            )
+        ]
+        helm_runner = self.helm_runner_factory(
+            namespace=self.namespace,
+            helm_binary=self.helm_binary,
+            chart_path=self.helm_chart_path,
+            helm_timeout=self.helm_timeout,
+        )
+
+        try:
+            helm_result = helm_runner.upgrade_install(release_name, str(values_path))
+        except HelmCommandError as exc:
+            output = "\n".join(part for part in (exc.result.stdout, exc.result.stderr) if part)
+            self._write_log(helm_log_path, exc.result.args, output)
+            failure_metadata = metadata | {
+                "helm_args": exc.result.args,
+                "helm_returncode": exc.result.returncode,
+                "helm_stdout_summary": self._summarize_output(exc.result.stdout),
+                "helm_stderr_summary": self._summarize_output(exc.result.stderr),
+                "helm_log_path": str(helm_log_path),
+            }
+            raise WorkerExecutionError(
+                "deploy.kubernetes.helm",
+                f"Helm release '{release_name}' failed to deploy",
+                metadata=failure_metadata,
+                log_path=str(helm_log_path),
+                events=events
+                + [
+                    self._event(
+                        "kubernetes.helm_deploy_failed",
+                        "failed",
+                        f"Helm release '{release_name}' failed to deploy",
+                        step="deploy.kubernetes.helm",
+                        level="error",
+                        metadata=failure_metadata,
+                    )
+                ],
+            ) from exc
+
+        helm_output = "\n".join(part for part in (helm_result.stdout, helm_result.stderr) if part)
+        self._write_log(helm_log_path, helm_result.args, helm_output)
+        helm_metadata = metadata | {
+            "helm_args": helm_result.args,
+            "helm_returncode": helm_result.returncode,
+            "helm_stdout_summary": self._summarize_output(helm_result.stdout),
+            "helm_stderr_summary": self._summarize_output(helm_result.stderr),
+            "helm_log_path": str(helm_log_path),
+            "service_name": service_name,
+            "deployment_name": deployment_name,
+            "service_url": service_url,
+            "healthcheck_url": healthcheck_url,
+        }
+        events.append(
+            self._event(
+                "kubernetes.helm_deploy_succeeded",
+                "deploying",
+                f"Helm release '{release_name}' deployed successfully",
+                step="deploy.kubernetes.helm",
+                metadata=helm_metadata,
+            )
+        )
+        events.append(
+            self._event(
+                "kubernetes.healthcheck_started",
+                "deploying",
+                f"Waiting for healthcheck on Service '{service_name}'",
+                step="deploy.kubernetes.healthcheck",
+                metadata={"service_name": service_name, "namespace": self.namespace, "healthcheck_url": healthcheck_url},
+            )
+        )
+
+        try:
+            health_metadata = self._port_forward_healthcheck(
+                deployment,
+                service_name=service_name,
+                log_path=port_forward_log_path,
+            )
+        except WorkerExecutionError as exc:
+            diagnostics = self._collect_healthcheck_diagnostics(
+                deployment_name,
+                service_name=service_name,
+                logs_dir=logs_dir,
+            )
+            raise WorkerExecutionError(
+                exc.step,
+                exc.message,
+                metadata=exc.metadata
+                | diagnostics
+                | {
+                    **metadata,
+                    "deployment_name": deployment_name,
+                    "service_name": service_name,
+                    "service_url": service_url,
+                    "healthcheck_url": healthcheck_url,
+                },
+                log_path=exc.log_path,
+                events=events
+                + [
+                    self._event(
+                        "kubernetes.healthcheck_failed",
+                        "failed",
+                        exc.message,
+                        step="deploy.kubernetes.healthcheck",
+                        level="error",
+                        metadata=exc.metadata
+                        | diagnostics
+                        | {
+                            **metadata,
+                            "deployment_name": deployment_name,
+                            "service_name": service_name,
+                            "service_url": service_url,
+                            "healthcheck_url": healthcheck_url,
+                        },
+                    )
+                ],
+            ) from exc
+
+        events.append(
+            self._event(
+                "kubernetes.healthcheck_succeeded",
+                "deploying",
+                "Kubernetes Service passed healthcheck",
+                step="deploy.kubernetes.healthcheck",
+                metadata=health_metadata
+                | {
+                    **metadata,
+                    "deployment_name": deployment_name,
+                    "service_name": service_name,
+                    "service_url": service_url,
+                    "healthcheck_url": healthcheck_url,
+                },
+            )
+        )
+
+        return ExecutionResult(
+            "Kubernetes Helm release deployed and passed healthcheck.",
+            metadata={
+                "executor": self.deploy_target,
+                **helm_metadata,
+                "image_ref": deployment.build.image_ref,
+                **self._env_source_summary(deployment.project.env_vars),
+                **health_metadata,
+            },
+            events=events,
+            log_path=str(helm_log_path),
+            service_url=service_url,
+            deploy_target=self.deploy_target,
+            healthcheck_url=healthcheck_url,
+        )
+
     def preflight_deploy(self, deployment):
         self._ensure_registry_ready(deployment)
         _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
@@ -1398,6 +1597,11 @@ class KubernetesExecutor(LocalDockerExecutor):
         )
 
     def stop(self, deployment):
+        if self.deployment_mode == "helm":
+            return self._stop_with_helm(deployment)
+        return self._stop_with_manifest(deployment)
+
+    def _stop_with_manifest(self, deployment):
         _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
         log_path = logs_dir / "kubernetes-delete.log"
         deployment_name = self._k8s_deployment_name(deployment)
@@ -1441,6 +1645,103 @@ class KubernetesExecutor(LocalDockerExecutor):
                 "stopped": True,
             },
             events=[start_event, delete_result.events[-1]],
+            log_path=str(log_path),
+            deploy_target=self.deploy_target,
+        )
+
+    def _stop_with_helm(self, deployment):
+        _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
+        log_path = logs_dir / "helm-uninstall.log"
+        release_name = self._helm_release_name_for_deployment(deployment)
+        metadata = {
+            "deployment_mode": "helm",
+            "helm_release_name": release_name,
+            "namespace": self.namespace,
+            "chart_path": self.helm_chart_path,
+            "helm_log_path": str(log_path),
+        }
+        start_event = self._event(
+            "kubernetes.helm_uninstall_started",
+            "stopped",
+            f"Uninstalling Helm release '{release_name}'",
+            step="deploy.kubernetes.helm_uninstall",
+            metadata=metadata,
+        )
+        helm_runner = self.helm_runner_factory(
+            namespace=self.namespace,
+            helm_binary=self.helm_binary,
+            chart_path=self.helm_chart_path,
+            helm_timeout=self.helm_timeout,
+        )
+
+        try:
+            helm_result = helm_runner.uninstall(release_name)
+        except HelmCommandError as exc:
+            output = "\n".join(part for part in (exc.result.stdout, exc.result.stderr) if part)
+            self._write_log(log_path, exc.result.args, output)
+            result_metadata = metadata | {
+                "helm_args": exc.result.args,
+                "helm_returncode": exc.result.returncode,
+                "helm_stdout_summary": self._summarize_output(exc.result.stdout),
+                "helm_stderr_summary": self._summarize_output(exc.result.stderr),
+            }
+            if self._helm_release_not_found(exc.result.stderr):
+                return ExecutionResult(
+                    f"Helm release '{release_name}' was already absent.",
+                    metadata=result_metadata | {"stopped": True, "release_not_found": True},
+                    events=[
+                        start_event,
+                        self._event(
+                            "kubernetes.helm_uninstall_not_found",
+                            "stopped",
+                            f"Helm release '{release_name}' was already absent",
+                            step="deploy.kubernetes.helm_uninstall",
+                            metadata=result_metadata | {"release_not_found": True},
+                        ),
+                    ],
+                    log_path=str(log_path),
+                    deploy_target=self.deploy_target,
+                )
+            raise WorkerExecutionError(
+                "deploy.kubernetes.helm_uninstall",
+                f"Helm release '{release_name}' failed to uninstall",
+                metadata=result_metadata,
+                log_path=str(log_path),
+                events=[
+                    start_event,
+                    self._event(
+                        "kubernetes.helm_uninstall_failed",
+                        "failed",
+                        f"Helm release '{release_name}' failed to uninstall",
+                        step="deploy.kubernetes.helm_uninstall",
+                        level="error",
+                        metadata=result_metadata,
+                    ),
+                ],
+            ) from exc
+
+        output = "\n".join(part for part in (helm_result.stdout, helm_result.stderr) if part)
+        self._write_log(log_path, helm_result.args, output)
+        success_metadata = metadata | {
+            "helm_args": helm_result.args,
+            "helm_returncode": helm_result.returncode,
+            "helm_stdout_summary": self._summarize_output(helm_result.stdout),
+            "helm_stderr_summary": self._summarize_output(helm_result.stderr),
+            "stopped": True,
+        }
+        return ExecutionResult(
+            "Helm release uninstalled successfully.",
+            metadata=success_metadata,
+            events=[
+                start_event,
+                self._event(
+                    "kubernetes.helm_uninstall_succeeded",
+                    "stopped",
+                    f"Helm release '{release_name}' uninstalled successfully",
+                    step="deploy.kubernetes.helm_uninstall",
+                    metadata=success_metadata,
+                ),
+            ],
             log_path=str(log_path),
             deploy_target=self.deploy_target,
         )
@@ -1823,6 +2124,30 @@ class KubernetesExecutor(LocalDockerExecutor):
     def _service_url(self, service_name, port):
         return f"http://{service_name}.{self.namespace}.svc.cluster.local:{port}"
 
+    @staticmethod
+    def _normalize_deployment_mode(value):
+        normalized = (value or "manifest").strip().lower()
+        if normalized not in {"manifest", "helm"}:
+            raise ValueError("CONTROL_PLANE_K8S_DEPLOYMENT_MODE must be one of: manifest, helm")
+        return normalized
+
+    @staticmethod
+    def _helm_resource_name(release_name):
+        return f"{release_name}-generic-web-app"[:63].rstrip("-")
+
+    def _helm_release_name_for_deployment(self, deployment):
+        for event in sorted(getattr(deployment, "events", []) or [], key=lambda item: getattr(item, "id", 0), reverse=True):
+            metadata = getattr(event, "metadata_json", None) or {}
+            release_name = metadata.get("helm_release_name") if isinstance(metadata, dict) else None
+            if release_name:
+                return str(release_name)
+        return helm_release_name(deployment.project, deployment)
+
+    @staticmethod
+    def _helm_release_not_found(stderr):
+        normalized = (stderr or "").strip().lower()
+        return "release: not found" in normalized or "release not loaded" in normalized
+
     def _collect_rollout_diagnostics(self, deployment_name, *, logs_dir):
         pods_log_path = logs_dir / "kubernetes-rollout-pods.log"
         describe_log_path = logs_dir / "kubernetes-rollout-describe.log"
@@ -2037,6 +2362,7 @@ def _build_kubernetes_executor():
         kubeconfig=current_app.config.get("CONTROL_PLANE_KUBECONFIG"),
         namespace=current_app.config.get("CONTROL_PLANE_K8S_NAMESPACE", "default"),
         image_pull_secret=current_app.config.get("CONTROL_PLANE_K8S_IMAGE_PULL_SECRET"),
+        deployment_mode=current_app.config.get("CONTROL_PLANE_K8S_DEPLOYMENT_MODE", "manifest"),
     )
 
 

@@ -1,0 +1,47 @@
+replicaCount: 1
+
+image:
+  repository: nginx
+  tag: stable-alpine
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+container:
+  port: 80
+  command: []
+  args: []
+
+env: []
+
+envFrom:
+  configMaps: []
+  secrets: []
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: ""
+
+resources: {}
+
+probes:
+  readiness:
+    enabled: false
+  liveness:
+    enabled: false
+  startup:
+    enabled: false
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  path: /
+  tls: []
+
+podAnnotations: {}
+podLabels: {}
+serviceAnnotations: {}
+ingressAnnotations: {}
+
+strategy: {}

@@ -1,0 +1,10 @@
+image:
+  repository: localhost:32000/example-web-app
+  tag: dev
+  pullPolicy: IfNotPresent
+
+container:
+  port: 8080
+
+service:
+  port: 80

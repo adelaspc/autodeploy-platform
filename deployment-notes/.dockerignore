@@ -1,0 +1,55 @@
+.git
+.gitignore
+.dockerignore
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python local files
+.venv
+venv
+env
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+
+# Local app state
+instance
+*.db
+*.sqlite
+*.sqlite3
+
+# Frontend local files
+frontend/node_modules
+frontend/dist
+node_modules
+dist
+build
+coverage
+
+# Logs, temporary files, and editor metadata
+*.log
+logs
+tmp
+temp
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+
+# Credentials, certs, and dumps
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+*.sql
+*.dump
+*.backup
