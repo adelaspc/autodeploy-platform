@@ -1,0 +1,6 @@
+apiVersion: v2
+name: generic-web-app
+description: Stack-agnostic Helm chart for stateless user web workloads managed by the PaaS
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

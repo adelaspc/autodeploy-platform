@@ -1,0 +1,44 @@
+image:
+  repository: localhost:32000/python-fastapi-app
+  tag: dev
+  pullPolicy: IfNotPresent
+
+container:
+  port: 8000
+
+env:
+  - name: APP_ENV
+    value: production
+
+envFrom:
+  configMaps:
+    - fastapi-app-config
+  secrets:
+    - fastapi-app-secret
+
+service:
+  type: ClusterIP
+  port: 80
+
+probes:
+  readiness:
+    enabled: true
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  liveness:
+    enabled: true
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
+  startup:
+    enabled: true
+    httpGet:
+      path: /health
+      port: http
+    failureThreshold: 30
+    periodSeconds: 2

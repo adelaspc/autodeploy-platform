@@ -212,6 +212,7 @@ def test_platform_health_check_reports_kubernetes_prereq_gaps(client, app):
             "optional_config": [
                 "CONTROL_PLANE_K8S_NAMESPACE",
                 "CONTROL_PLANE_K8S_IMAGE_PULL_SECRET",
+                "CONTROL_PLANE_K8S_DEPLOYMENT_MODE",
                 "CONTROL_PLANE_REGISTRY_USERNAME",
                 "CONTROL_PLANE_REGISTRY_PASSWORD",
                 "CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS",
@@ -315,6 +316,7 @@ def test_platform_health_check_reports_kubernetes_ready_state(client, app):
         "optional_config": [
             "CONTROL_PLANE_K8S_NAMESPACE",
             "CONTROL_PLANE_K8S_IMAGE_PULL_SECRET",
+            "CONTROL_PLANE_K8S_DEPLOYMENT_MODE",
             "CONTROL_PLANE_REGISTRY_USERNAME",
             "CONTROL_PLANE_REGISTRY_PASSWORD",
             "CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS",
@@ -522,8 +524,8 @@ def test_platform_activity_health_check_supports_limit_filters(client, app):
     first_project_id = create_project(client, name="limit-first").get_json()["id"]
     second_project_id = create_project(client, name="limit-second").get_json()["id"]
 
-    first_pending = client.post(f"/api/projects/{first_project_id}/deployments", json={"commit_sha": "1010101010101010"})
-    second_pending = client.post(
+    client.post(f"/api/projects/{first_project_id}/deployments", json={"commit_sha": "1010101010101010"})
+    client.post(
         f"/api/projects/{second_project_id}/deployments",
         json={"commit_sha": "2020202020202020"},
     )
@@ -580,7 +582,7 @@ def test_platform_activity_health_check_supports_status_filters(client, app):
     first_project_id = create_project(client, name="status-first").get_json()["id"]
     second_project_id = create_project(client, name="status-second").get_json()["id"]
 
-    pending_response = client.post(
+    client.post(
         f"/api/projects/{first_project_id}/deployments",
         json={"commit_sha": "6161616161616161"},
     )
@@ -656,7 +658,7 @@ def test_platform_activity_health_check_supports_project_id_filter(client, app):
         f"/api/projects/{first_project_id}/deployments",
         json={"commit_sha": "7171717171717171"},
     )
-    second_deployment = client.post(
+    client.post(
         f"/api/projects/{second_project_id}/deployments",
         json={"commit_sha": "7272727272727272"},
     )

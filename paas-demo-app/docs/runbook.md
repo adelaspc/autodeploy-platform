@@ -118,7 +118,9 @@ In Kubernetes:
 
 ## Production-Like Kubernetes Deployment
 
-The repository now includes a minimal Helm chart:
+The repository separates platform-internal deployment from user workload deployment.
+
+The control-plane chart deploys the PaaS platform internals:
 
 - [deploy/helm/paas-control-plane](../deploy/helm/paas-control-plane)
 
@@ -133,9 +135,68 @@ It deploys:
 - shared workspace PersistentVolumeClaim
 - ServiceAccount, Role, and RoleBinding for executor-facing worker and reconciler runtime
 
+The generic web app chart documents the intended abstraction for stateless user workloads:
+
+- [deploy/helm/generic-web-app](../deploy/helm/generic-web-app)
+
+It deploys:
+
+- one Deployment
+- one Service
+- optional Ingress
+
+It does not include control-plane migrations, workers, PVCs, RBAC, Docker socket mounts, kubeconfig mounts, jobs, cronjobs, or framework-specific commands.
+
+The Kubernetes executor currently still generates minimal Deployment and Service manifests directly. A future direction is:
+
+```text
+project spec -> generated values.yaml -> helm upgrade/install generic-web-app
+```
+
+The repository includes an intermediate values-generation layer for that future direction. It maps the existing project/deployment/build model to the generic chart values contract without calling Helm, calling `kubectl`, or replacing the current executor path.
+
+Current values-generation behavior:
+
+- uses `Build.image_ref` as the preferred Kubernetes image source
+- maps `Project.port` to `container.port` and `service.port`
+- maps literal env vars to `env[].value`
+- maps per-variable ConfigMap and Secret key references to `env[].valueFrom`
+- leaves `envFrom.configMaps` and `envFrom.secrets` empty because the current model does not support whole-resource imports
+- maps `Project.healthcheck_path` to readiness and liveness probe paths for the intended Helm deployment shape
+- leaves startup probes and ingress disabled by default
+- does not generate runtime `command` or `args` from test or migration commands
+
+Future Helm-managed workloads also have stable naming helpers for release names and common labels. The intended flow is:
+
+```text
+project + environment -> stable Helm release name -> helm upgrade/install generic-web-app
+```
+
+Release names use:
+
+```text
+paas-<project-slug>-<environment-slug>-<project-id-suffix>
+```
+
+The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys should upgrade the same release. Stop uninstalls the same release in Helm mode. Diagnostics and reconciliation can eventually use the common PaaS workload labels/selectors.
+
+An isolated Helm runner abstraction also exists for the Helm-mode path. It only builds and executes Helm CLI commands from primitive inputs.
+
+The future Helm-mode flow is:
+
+```text
+project/build/deployment
+  -> generated generic-web-app values
+  -> stable release name
+  -> HelmRunner.upgrade_install(...)
+  -> one Helm release per project/environment
+```
+
+When a Helm-mode deployment is stopped, the executor uses `HelmRunner.uninstall(...)` for the same release. If the release is already absent, stop is treated as idempotently successful.
+
 ### What The Chart Assumes
 
-This chart is intentionally minimal and assumes:
+The control-plane chart is intentionally minimal and assumes:
 
 - you already have a Kubernetes cluster
 - you will provide a real image repository/tag
@@ -198,6 +259,31 @@ Examples are provided at:
 
 These examples are placeholders only. Do not commit real secrets.
 
+### Helm Validation
+
+Validate the control-plane chart with:
+
+```bash
+helm template ci ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-control-plane/values.ci.yaml > /dev/null
+helm template local ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-control-plane/values.local-microk8s.yaml > /dev/null
+```
+
+Validate the generic user workload chart with:
+
+```bash
+helm lint ./deploy/helm/generic-web-app
+helm template generic ./deploy/helm/generic-web-app > /dev/null
+helm template generic-minimal ./deploy/helm/generic-web-app -f ./deploy/helm/generic-web-app/examples/minimal.yaml > /dev/null
+helm template generic-node ./deploy/helm/generic-web-app -f ./deploy/helm/generic-web-app/examples/node-express.yaml > /dev/null
+helm template generic-python ./deploy/helm/generic-web-app -f ./deploy/helm/generic-web-app/examples/python-fastapi.yaml > /dev/null
+```
+
+Generated values from the PaaS mapper can also be validated without a live Kubernetes cluster:
+
+```bash
+helm template generic ./deploy/helm/generic-web-app -f <generated-values.yaml>
+```
+
 ### Kubernetes Executor Notes
 
 The chart includes RBAC for the current Kubernetes executor surface:
@@ -221,8 +307,16 @@ For `CONTROL_PLANE_EXECUTOR=kubernetes`, the worker still needs:
 - Docker access for build/push
 - `git`
 - `kubectl`
+- `helm` when `CONTROL_PLANE_K8S_DEPLOYMENT_MODE=helm`
 - a mounted kubeconfig file referenced by `CONTROL_PLANE_KUBECONFIG`
 - RBAC in the target namespace
+
+`CONTROL_PLANE_K8S_DEPLOYMENT_MODE` controls the user workload deploy and stop behavior:
+
+- `manifest` is the default and keeps the existing direct `kubectl apply` and `kubectl delete` paths
+- `helm` uses generated `generic-web-app` values, a stable release name, `HelmRunner.upgrade_install(...)` for deploy, and `HelmRunner.uninstall(...)` for stop
+
+Reconciliation and diagnostics still use the existing direct Kubernetes resource behavior and will need separate follow-up work before Helm mode is complete. Future full Helm mode should use `helm status` and the common workload labels/selectors for those paths.
 
 The API deployment also mounts the same kubeconfig secret path when configured so `/health/platform` reports the same readiness posture as the worker. A shared PersistentVolumeClaim is used so the API can read runtime logs and diagnostics written by the worker.
 
@@ -270,6 +364,7 @@ Requires:
 - RBAC in the target namespace
 - a shared workspace PersistentVolumeClaim for deployment logs and diagnostics
 - any referenced ConfigMaps/Secrets to already exist
+- Helm CLI when `CONTROL_PLANE_K8S_DEPLOYMENT_MODE=helm`
 
 ## Troubleshooting
 

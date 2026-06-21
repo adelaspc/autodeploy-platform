@@ -1,0 +1,33 @@
+image:
+  repository: localhost:32000/node-express-app
+  tag: dev
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+container:
+  port: 3000
+
+env:
+  - name: NODE_ENV
+    value: production
+
+service:
+  type: ClusterIP
+  port: 80
+
+probes:
+  readiness:
+    enabled: true
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 5
+    periodSeconds: 10
+  liveness:
+    enabled: true
+    httpGet:
+      path: /health
+      port: http
+    initialDelaySeconds: 15
+    periodSeconds: 20
