@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+from pathlib import Path
 
 from backend.extensions import db
 from backend.models import PlatformDeployment
@@ -40,6 +41,36 @@ def test_health_check(client):
 
     assert response.status_code == 200
     assert response.get_json() == {"status": "ok"}
+
+
+def test_frontend_fallback_serves_built_index(client, app):
+    dist_dir = Path(app.static_folder)
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    index_path = dist_dir / "index.html"
+    index_path.write_text("<!doctype html><title>PaaS Control Plane</title>", encoding="utf-8")
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert b"PaaS Control Plane" in response.data
+
+
+def test_frontend_fallback_does_not_shadow_api_routes(client):
+    response = client.get("/api/projects")
+
+    assert response.status_code == 200
+    assert response.get_json() == []
+
+
+def test_frontend_fallback_does_not_serve_index_for_unknown_api_route(client, app):
+    dist_dir = Path(app.static_folder)
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    (dist_dir / "index.html").write_text("<!doctype html><title>PaaS Control Plane</title>", encoding="utf-8")
+
+    response = client.get("/api/not-real")
+
+    assert response.status_code == 404
+    assert b"PaaS Control Plane" not in response.data
 
 
 def test_database_health_check(client):
