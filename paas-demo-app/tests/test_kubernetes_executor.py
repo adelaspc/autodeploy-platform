@@ -47,6 +47,7 @@ class RecordingHelmRunner:
         self.chart_path = chart_path
         self.helm_timeout = helm_timeout
         self.upgrade_install_calls = []
+        self.status_calls = []
         RecordingHelmRunner.instances.append(self)
 
     def upgrade_install(self, release, values_file):
@@ -72,6 +73,15 @@ class RecordingHelmRunner:
             args=[self.helm_binary, "uninstall", release, "--namespace", self.namespace],
             returncode=0,
             stdout="uninstalled\n",
+            stderr="",
+        )
+
+    def status(self, release):
+        self.status_calls.append({"release": release})
+        return HelmResult(
+            args=[self.helm_binary, "status", release, "--namespace", self.namespace, "--output", "json"],
+            returncode=0,
+            stdout='{"info": {"status": "deployed"}}\n',
             stderr="",
         )
 
@@ -101,6 +111,16 @@ class FailingHelmUninstallRunner(RecordingHelmRunner):
 
 
 class MissingHelmReleaseRunner(RecordingHelmRunner):
+    def status(self, release):
+        self.status_calls.append({"release": release})
+        result = HelmResult(
+            args=["helm", "status", release, "--namespace", self.namespace, "--output", "json"],
+            returncode=1,
+            stdout="",
+            stderr=f"Error: release: not found: {release}\n",
+        )
+        raise HelmCommandError(result)
+
     def uninstall(self, release):
         self.uninstall_call = {"release": release}
         result = HelmResult(
@@ -587,6 +607,76 @@ def test_kubernetes_executor_helm_mode_stop_prefers_persisted_release_name(tmp_p
     helm_runner = RecordingHelmRunner.instances[0]
     assert helm_runner.uninstall_call == {"release": "paas-persisted-name-production-3"}
     assert result.metadata["helm_release_name"] == "paas-persisted-name-production-3"
+
+
+def test_kubernetes_executor_stop_uses_helm_when_release_metadata_is_persisted(tmp_path):
+    RecordingHelmRunner.instances = []
+
+    def fake_runner(args, **kwargs):
+        raise AssertionError(f"Manifest-mode kubectl command should not run for Helm metadata stop: {args}")
+
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=fake_runner,
+        namespace="apps",
+        deployment_mode="manifest",
+        helm_runner_factory=RecordingHelmRunner,
+        popen_factory=DummyPopen,
+    )
+    deployment = make_kubernetes_deployment_stub(deployment_id=9, name="persisted-stop-app", project_id=3)
+    deployment.helm_release_name = "paas-persisted-stop-app-production-3"
+
+    result = executor.stop(deployment)
+
+    helm_runner = RecordingHelmRunner.instances[0]
+    assert helm_runner.uninstall_call == {"release": "paas-persisted-stop-app-production-3"}
+    assert result.metadata["helm_release_name"] == "paas-persisted-stop-app-production-3"
+
+
+def test_kubernetes_executor_helm_runtime_status_reports_existing_release(tmp_path):
+    RecordingHelmRunner.instances = []
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        namespace="apps",
+        deployment_mode="helm",
+        helm_runner_factory=RecordingHelmRunner,
+        popen_factory=DummyPopen,
+    )
+    deployment = make_kubernetes_deployment_stub(deployment_id=9, name="status-app", project_id=3)
+    deployment.helm_release_name = "paas-status-app-production-3"
+
+    status = executor.runtime_helm_status(deployment)
+
+    helm_runner = RecordingHelmRunner.instances[0]
+    assert helm_runner.status_calls == [{"release": "paas-status-app-production-3"}]
+    assert status["release_exists"] is True
+    assert status["release_status"] == "deployed"
+    assert status["helm_release_name"] == "paas-status-app-production-3"
+    assert status["namespace"] == "apps"
+
+
+def test_kubernetes_executor_helm_runtime_status_reports_missing_release(tmp_path):
+    RecordingHelmRunner.instances = []
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        namespace="apps",
+        deployment_mode="helm",
+        helm_runner_factory=MissingHelmReleaseRunner,
+        popen_factory=DummyPopen,
+    )
+    deployment = make_kubernetes_deployment_stub(deployment_id=9, name="status-missing-app", project_id=3)
+    deployment.helm_release_name = "paas-status-missing-app-production-3"
+
+    status = executor.runtime_helm_status(deployment)
+
+    helm_runner = RecordingHelmRunner.instances[0]
+    assert helm_runner.status_calls == [{"release": "paas-status-missing-app-production-3"}]
+    assert status["release_exists"] is False
+    assert status["helm_release_name"] == "paas-status-missing-app-production-3"
+    assert status["namespace"] == "apps"
 
 
 def test_kubernetes_executor_helm_mode_stop_failure_raises_worker_execution_error(tmp_path):

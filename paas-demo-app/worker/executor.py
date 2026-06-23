@@ -142,6 +142,9 @@ class DeploymentExecutor:
     def runtime_resource_status(self, deployment):
         return {}
 
+    def runtime_helm_status(self, deployment):
+        return None
+
     def runtime_pod_diagnostics(self, deployment, *, prefix="reconcile"):
         return {}
 
@@ -1597,7 +1600,7 @@ class KubernetesExecutor(LocalDockerExecutor):
         )
 
     def stop(self, deployment):
-        if self.deployment_mode == "helm":
+        if self.deployment_mode == "helm" or self._deployment_has_helm_release_metadata(deployment):
             return self._stop_with_helm(deployment)
         return self._stop_with_manifest(deployment)
 
@@ -1757,6 +1760,60 @@ class KubernetesExecutor(LocalDockerExecutor):
             "service_name": service_name,
             "deployment_exists": deployment_exists,
             "service_exists": service_exists,
+        }
+
+    def runtime_helm_status(self, deployment):
+        release_name = self._helm_release_name_for_deployment(deployment)
+        helm_runner = self.helm_runner_factory(
+            namespace=self.namespace,
+            helm_binary=self.helm_binary,
+            chart_path=self.helm_chart_path,
+            helm_timeout=self.helm_timeout,
+        )
+        try:
+            result = helm_runner.status(release_name)
+        except HelmCommandError as exc:
+            if self._helm_release_not_found(exc.result.stderr):
+                return {
+                    "release_exists": False,
+                    "helm_release_name": release_name,
+                    "namespace": self.namespace,
+                    "chart_path": self.helm_chart_path,
+                    "helm_args": exc.result.args,
+                    "helm_returncode": exc.result.returncode,
+                    "helm_stdout_summary": self._summarize_output(exc.result.stdout),
+                    "helm_stderr_summary": self._summarize_output(exc.result.stderr),
+                }
+            raise WorkerExecutionError(
+                "reconcile.helm_status",
+                f"Failed to inspect Helm release '{release_name}'",
+                metadata={
+                    "helm_release_name": release_name,
+                    "namespace": self.namespace,
+                    "chart_path": self.helm_chart_path,
+                    "helm_args": exc.result.args,
+                    "helm_returncode": exc.result.returncode,
+                    "helm_stdout_summary": self._summarize_output(exc.result.stdout),
+                    "helm_stderr_summary": self._summarize_output(exc.result.stderr),
+                },
+            ) from exc
+
+        release_status = None
+        if result.stdout.strip():
+            try:
+                release_status = json.loads(result.stdout).get("info", {}).get("status")
+            except json.JSONDecodeError:
+                release_status = None
+        return {
+            "release_exists": True,
+            "helm_release_name": release_name,
+            "namespace": self.namespace,
+            "chart_path": self.helm_chart_path,
+            "release_status": release_status,
+            "helm_args": result.args,
+            "helm_returncode": result.returncode,
+            "helm_stdout_summary": self._summarize_output(result.stdout),
+            "helm_stderr_summary": self._summarize_output(result.stderr),
         }
 
     def runtime_pod_diagnostics(self, deployment, *, prefix="reconcile"):
@@ -2145,6 +2202,15 @@ class KubernetesExecutor(LocalDockerExecutor):
             if release_name:
                 return str(release_name)
         return helm_release_name(deployment.project, deployment)
+
+    def _deployment_has_helm_release_metadata(self, deployment):
+        if getattr(deployment, "helm_release_name", None):
+            return True
+        for event in getattr(deployment, "events", []) or []:
+            metadata = getattr(event, "metadata_json", None) or {}
+            if isinstance(metadata, dict) and metadata.get("helm_release_name"):
+                return True
+        return False
 
     @staticmethod
     def _helm_release_not_found(stderr):
