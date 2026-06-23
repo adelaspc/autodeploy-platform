@@ -1668,6 +1668,80 @@ def test_stop_deployment_calls_executor_and_records_events(client, app, monkeypa
     assert payload["events"][-1]["metadata_json"]["runtime_log_path"] == "/tmp/runtime.log"
 
 
+def test_stop_deployment_endpoint_calls_executor_and_records_audit_event(client, app, monkeypatch):
+    project_response = create_project(client, name="deployer-stop-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "abc123def456",
+            "status": "running",
+            "build_status": "succeeded",
+            "service_url": "http://127.0.0.1:18080",
+        },
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "local-docker"
+        deployment.container_name = "paas-deployer-stop-app-1"
+        deployment.container_id = "container123"
+        db.session.commit()
+
+    class StopExecutor:
+        def stop(self, deployment):
+            return ExecutionResult(
+                "Container removed successfully.",
+                metadata={"executor": "local-docker", "stopped": True},
+                log_path="/tmp/stop.log",
+                deploy_target="local-docker",
+                container_name=deployment.container_name,
+                container_id=deployment.container_id,
+            )
+
+    monkeypatch.setattr(deployment_services_api, "create_executor_for_deployment", lambda deployment: StopExecutor())
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments/{deployment_id}/stop",
+        json={"message": "Stop requested by deployer"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "stopped"
+    assert payload["service_url"] is None
+    assert payload["events"][-2]["event_type"] == "deployment.stop_started"
+    assert payload["events"][-2]["message"] == "Stop requested by deployer"
+    assert payload["events"][-1]["event_type"] == "deployment.stopped"
+
+    audit_events = client.get("/api/audit-events").get_json()["items"]
+    assert audit_events[0]["action"] == "deployment.stop_requested"
+    assert audit_events[0]["resource_id"] == str(deployment_id)
+
+
+def test_stop_deployment_endpoint_rejects_non_stop_mutations(client):
+    project_response = create_project(client, name="invalid-stop-payload-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "abc123def456",
+            "status": "running",
+            "build_status": "succeeded",
+        },
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments/{deployment_id}/stop",
+        json={"status": "failed"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"] == "Unsupported stop fields: status"
+
+
 def test_stop_deployment_returns_error_when_cleanup_fails(client, app, monkeypatch):
     project_response = create_project(client, name="broken-stop-app")
     project_id = project_response.get_json()["id"]

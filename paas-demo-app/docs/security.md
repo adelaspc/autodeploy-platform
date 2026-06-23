@@ -94,7 +94,8 @@ Current audit coverage includes:
 - project create, update, and delete
 - deploy, retry, and redeploy actions
 - manual deployment record creation
-- deployment patch and stop actions
+- generic deployment patch actions
+- dedicated deployment stop actions
 - denied mutating requests on protected project API routes
 
 Audit records currently store:
