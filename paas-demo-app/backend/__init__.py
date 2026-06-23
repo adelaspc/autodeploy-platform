@@ -1,4 +1,6 @@
-from flask import Flask
+from pathlib import Path
+
+from flask import Flask, send_from_directory
 
 from backend.api import register_blueprints
 from backend.api.request_context import (
@@ -13,7 +15,7 @@ from worker import run_reconciler, run_reconciler_loop_command, run_worker, run_
 
 
 def create_app(config_class=Config):
-    app = Flask(__name__)
+    app = Flask(__name__, static_folder="../frontend/dist", static_url_path="")
     app.config.from_object(config_class)
     init_app = getattr(config_class, "init_app", None)
     if callable(init_app):
@@ -37,5 +39,21 @@ def create_app(config_class=Config):
     app.cli.add_command(run_worker_once)
     app.cli.add_command(run_reconciler)
     app.cli.add_command(run_reconciler_loop_command)
+
+    dist_dir = Path(app.static_folder or "")
+
+    @app.route("/", defaults={"path": ""})
+    @app.route("/<path:path>")
+    def serve_frontend(path):
+        if path == "health" or path.startswith(("api/", "health/")):
+            return {"error": "Not found"}, 404
+
+        if path and (dist_dir / path).is_file():
+            return send_from_directory(dist_dir, path)
+
+        if dist_dir.is_dir():
+            return send_from_directory(dist_dir, "index.html")
+
+        return {"error": "Frontend build not available"}, 404
 
     return app
