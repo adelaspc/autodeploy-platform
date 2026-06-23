@@ -3,6 +3,7 @@ from backend.api.deployment_orchestration import (
     create_deployment_event,
     now_utc,
 )
+from backend.deployment_runtime_metadata import persist_helm_runtime_metadata
 from backend.extensions import db
 from worker.executor import create_executor_for_deployment
 
@@ -30,6 +31,7 @@ def stop_deployment_runtime(deployment, *, message=None):
         deployment.host_port = stop_result.host_port
     if stop_result.healthcheck_url:
         deployment.healthcheck_url = stop_result.healthcheck_url
+    persist_helm_runtime_metadata(deployment, stop_result.metadata)
     for event in stop_result.events or ():
         create_deployment_event(
             deployment.id,
