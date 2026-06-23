@@ -7,6 +7,7 @@ This repository is the PaaS platform backend. It manages projects, builds, deplo
 ```text
 paas-demo-app/
 ├── backend/
+├── frontend/
 ├── worker/
 ├── migrations/
 ├── tests/
@@ -41,6 +42,36 @@ Run lint checks:
 ```bash
 .venv/bin/ruff check backend worker wsgi.py
 ```
+
+Run the operator frontend locally:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Build and test the frontend:
+
+```bash
+cd frontend
+npm run test
+npm run build
+```
+
+## Operator Frontend
+
+The control plane includes a Vue/Vite operator console served by Flask in built images and by Vite during local development.
+
+Current UI scope:
+
+- bearer token storage for protected APIs
+- platform health and activity
+- project create, edit, and delete
+- project environment variable management for literal values, ConfigMap key refs, and Secret key refs
+- default test command configuration
+- deploy/test trigger, retry, redeploy, and stop actions
+- deployment summary, events, build logs, runtime logs, and Kubernetes diagnostics
 
 Run security checks:
 
