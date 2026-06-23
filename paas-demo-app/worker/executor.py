@@ -2136,6 +2136,9 @@ class KubernetesExecutor(LocalDockerExecutor):
         return f"{release_name}-generic-web-app"[:63].rstrip("-")
 
     def _helm_release_name_for_deployment(self, deployment):
+        persisted_release_name = getattr(deployment, "helm_release_name", None)
+        if persisted_release_name:
+            return str(persisted_release_name)
         for event in sorted(getattr(deployment, "events", []) or [], key=lambda item: getattr(item, "id", 0), reverse=True):
             metadata = getattr(event, "metadata_json", None) or {}
             release_name = metadata.get("helm_release_name") if isinstance(metadata, dict) else None

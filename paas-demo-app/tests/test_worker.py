@@ -83,6 +83,23 @@ class OrderedExecutor:
         )
 
 
+class HelmMetadataExecutor(OrderedExecutor):
+    def deploy(self, deployment):
+        self.calls.append("deploy")
+        return ExecutionResult(
+            "Helm deployment simulated",
+            metadata={
+                "deployment_mode": "helm",
+                "helm_release_name": "paas-worker-helm-production-1",
+                "namespace": "apps",
+                "chart_path": "deploy/helm/generic-web-app",
+            },
+            log_path="/tmp/test-workspaces/deploy.log",
+            service_url="http://paas-worker-helm-production-1-generic-web-app.apps.svc.cluster.local:5000",
+            deploy_target="kubernetes",
+        )
+
+
 class FailingExecutor:
     def clone_repo(self, deployment):
         return ExecutionResult(
@@ -270,6 +287,26 @@ def test_process_next_pending_deployment_runs_to_completion(client):
     assert push_event["metadata_json"]["step"] == "image.push"
     assert push_event["metadata_json"]["push_log_available"] is True
     assert push_event["metadata_json"]["push_summary"] == "Push skipped"
+
+
+def test_process_next_pending_deployment_persists_helm_runtime_metadata(client):
+    pending = create_pending_deployment(client, name="worker-helm")
+    executor = HelmMetadataExecutor()
+
+    processed = process_next_pending_deployment(executor=executor)
+
+    assert processed is not None
+    assert processed.id == pending["id"]
+    assert processed.deploy_target == "kubernetes"
+    assert processed.helm_release_name == "paas-worker-helm-production-1"
+    assert processed.helm_namespace == "apps"
+    assert processed.helm_chart_path == "deploy/helm/generic-web-app"
+
+    deployment_response = client.get(f"/api/projects/{processed.project_id}/deployments/{processed.id}")
+    deployment = deployment_response.get_json()
+    assert deployment["helm_release_name"] == "paas-worker-helm-production-1"
+    assert deployment["helm_namespace"] == "apps"
+    assert deployment["helm_chart_path"] == "deploy/helm/generic-web-app"
 
 
 def test_process_next_pending_deployment_persists_preflight_failure_state(client):

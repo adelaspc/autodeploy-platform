@@ -1742,6 +1742,55 @@ def test_stop_deployment_endpoint_rejects_non_stop_mutations(client):
     assert response.get_json()["error"] == "Unsupported stop fields: status"
 
 
+def test_stop_deployment_persists_helm_runtime_metadata(client, app, monkeypatch):
+    project_response = create_project(client, name="helm-stop-metadata-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "abc123def456",
+            "status": "running",
+            "build_status": "succeeded",
+            "service_url": "http://helm-stop-metadata-app.apps.svc.cluster.local:5000",
+        },
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        db.session.commit()
+
+    class StopExecutor:
+        def stop(self, deployment):
+            return ExecutionResult(
+                "Helm release uninstalled successfully.",
+                metadata={
+                    "deployment_mode": "helm",
+                    "helm_release_name": "paas-helm-stop-metadata-app-production-1",
+                    "namespace": "apps",
+                    "chart_path": "deploy/helm/generic-web-app",
+                    "stopped": True,
+                },
+                log_path="/tmp/helm-uninstall.log",
+                deploy_target="kubernetes",
+            )
+
+    monkeypatch.setattr(deployment_services_api, "create_executor_for_deployment", lambda deployment: StopExecutor())
+
+    response = client.patch(
+        f"/api/projects/{project_id}/deployments/{deployment_id}",
+        json={"status": "stopped"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "stopped"
+    assert payload["helm_release_name"] == "paas-helm-stop-metadata-app-production-1"
+    assert payload["helm_namespace"] == "apps"
+    assert payload["helm_chart_path"] == "deploy/helm/generic-web-app"
+
+
 def test_stop_deployment_returns_error_when_cleanup_fails(client, app, monkeypatch):
     project_response = create_project(client, name="broken-stop-app")
     project_id = project_response.get_json()["id"]
@@ -2168,11 +2217,42 @@ def test_get_deployment_summary_includes_kubernetes_runtime_metadata(client, app
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["deploy_target"] == "kubernetes"
+    assert payload["helm_release_name"] is None
+    assert payload["helm_namespace"] is None
+    assert payload["helm_chart_path"] is None
     assert payload["kubernetes_namespace"] == "default"
     assert payload["kubernetes_deployment_name"] == "paas-k8s-summary-app-1"
     assert payload["kubernetes_service_name"] == "paas-k8s-summary-app-1-svc"
     assert payload["last_kubernetes_failure_stage"] is None
     assert payload["last_kubernetes_failure_summary"] is None
+
+
+def test_get_deployment_summary_includes_persisted_helm_runtime_metadata(client, app):
+    project_response = create_project(client, name="helm-summary-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.service_url = "http://paas-helm-summary-app-production-1-generic-web-app.apps.svc.cluster.local:5000"
+        deployment.helm_release_name = "paas-helm-summary-app-production-1"
+        deployment.helm_namespace = "apps"
+        deployment.helm_chart_path = "deploy/helm/generic-web-app"
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/summary")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["helm_release_name"] == "paas-helm-summary-app-production-1"
+    assert payload["helm_namespace"] == "apps"
+    assert payload["helm_chart_path"] == "deploy/helm/generic-web-app"
+    assert payload["kubernetes_namespace"] == "apps"
 
 
 def test_get_deployment_summary_includes_last_kubernetes_failure_context(client, app):
