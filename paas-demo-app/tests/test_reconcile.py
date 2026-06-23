@@ -255,6 +255,83 @@ def test_reconciler_marks_running_kubernetes_deployment_failed_when_service_miss
         assert event.metadata_json["service_exists"] is False
 
 
+def test_reconciler_keeps_running_helm_deployment_when_release_exists(client, app, monkeypatch):
+    deployment_payload = create_deployment(client, name="helm-present", status="running", build_status="succeeded")
+    deployment_id = deployment_payload["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.helm_release_name = "paas-helm-present-production-1"
+        deployment.helm_namespace = "apps"
+        deployment.helm_chart_path = "deploy/helm/generic-web-app"
+        deployment.service_url = "http://paas-helm-present-production-1-generic-web-app.apps.svc.cluster.local:5000"
+        db.session.commit()
+
+    class HealthyHelmExecutor:
+        def runtime_helm_status(self, deployment):
+            return {
+                "release_exists": True,
+                "helm_release_name": deployment.helm_release_name,
+                "namespace": deployment.helm_namespace,
+                "release_status": "deployed",
+            }
+
+        def cleanup_workspace(self, deployment):
+            return {"workspace_removed": False, "log_removed": False}
+
+    import worker.reconcile as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "create_executor_for_deployment", lambda deployment: HealthyHelmExecutor())
+
+    with app.app_context():
+        changes = reconcile_deployments()
+        assert changes == 0
+        updated = db.session.get(PlatformDeployment, deployment_id)
+        assert updated.status == "running"
+        assert not any(event.event_type == "reconcile.helm_release_missing" for event in updated.events)
+
+
+def test_reconciler_marks_running_helm_deployment_failed_when_release_missing(client, app, monkeypatch):
+    deployment_payload = create_deployment(client, name="helm-missing", status="running", build_status="succeeded")
+    deployment_id = deployment_payload["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.helm_release_name = "paas-helm-missing-production-1"
+        deployment.helm_namespace = "apps"
+        deployment.service_url = "http://paas-helm-missing-production-1-generic-web-app.apps.svc.cluster.local:5000"
+        db.session.commit()
+
+    class MissingHelmExecutor:
+        def runtime_helm_status(self, deployment):
+            return {
+                "release_exists": False,
+                "helm_release_name": deployment.helm_release_name,
+                "namespace": deployment.helm_namespace,
+            }
+
+        def cleanup_workspace(self, deployment):
+            return {"workspace_removed": False, "log_removed": False}
+
+    import worker.reconcile as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "create_executor_for_deployment", lambda deployment: MissingHelmExecutor())
+
+    with app.app_context():
+        changes = reconcile_deployments()
+        assert changes == 1
+        updated = db.session.get(PlatformDeployment, deployment_id)
+        assert updated.status == "failed"
+        assert updated.service_url is None
+        assert "Helm release" in updated.last_error
+        event = next(event for event in updated.events if event.event_type == "reconcile.helm_release_missing")
+        assert event.step == "reconcile.helm_release_missing"
+        assert event.metadata_json["helm_release_name"] == "paas-helm-missing-production-1"
+        assert event.metadata_json["release_exists"] is False
+
+
 def test_reconciler_records_cleanup_failed_when_kubernetes_resource_check_errors(client, app, monkeypatch):
     deployment_payload = create_deployment(client, name="k8s-check-error", status="running", build_status="succeeded")
     deployment_id = deployment_payload["id"]
@@ -286,6 +363,104 @@ def test_reconciler_records_cleanup_failed_when_kubernetes_resource_check_errors
         assert updated.status == "running"
         event = next(event for event in updated.events if event.event_type == "reconcile.cleanup_failed")
         assert "kubectl get failed" in event.message
+
+
+def test_reconciler_removes_leftover_helm_release_from_failed_deployment(client, app, monkeypatch):
+    deployment_payload = create_deployment(client, name="helm-leftover", status="failed", build_status="failed")
+    deployment_id = deployment_payload["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.helm_release_name = "paas-helm-leftover-production-1"
+        deployment.helm_namespace = "apps"
+        deployment.helm_chart_path = "deploy/helm/generic-web-app"
+        db.session.commit()
+
+    class LeftoverHelmExecutor:
+        def runtime_helm_status(self, deployment):
+            return {
+                "release_exists": True,
+                "helm_release_name": deployment.helm_release_name,
+                "namespace": deployment.helm_namespace,
+                "release_status": "failed",
+            }
+
+        def stop(self, deployment):
+            return ExecutionResult(
+                "Helm release uninstalled successfully.",
+                metadata={
+                    "deployment_mode": "helm",
+                    "helm_release_name": deployment.helm_release_name,
+                    "namespace": deployment.helm_namespace,
+                    "stopped": True,
+                },
+                log_path="/tmp/reconcile-helm-uninstall.log",
+            )
+
+        def cleanup_workspace(self, deployment):
+            return {"workspace_removed": False, "log_removed": False}
+
+    import worker.reconcile as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "create_executor_for_deployment", lambda deployment: LeftoverHelmExecutor())
+
+    with app.app_context():
+        changes = reconcile_deployments()
+        assert changes == 1
+        updated = db.session.get(PlatformDeployment, deployment_id)
+        event = next(event for event in updated.events if event.event_type == "reconcile.helm_release_removed")
+        assert event.metadata_json["helm_release_name"] == "paas-helm-leftover-production-1"
+        assert event.metadata_json["namespace"] == "apps"
+        assert event.metadata_json["release_status"] == "failed"
+        assert event.metadata_json["log_path"] == "/tmp/reconcile-helm-uninstall.log"
+
+
+def test_reconciler_records_cleanup_failed_when_helm_release_removal_errors(client, app, monkeypatch):
+    deployment_payload = create_deployment(client, name="helm-leftover-error", status="failed", build_status="failed")
+    deployment_id = deployment_payload["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.helm_release_name = "paas-helm-leftover-error-production-1"
+        deployment.helm_namespace = "apps"
+        db.session.commit()
+
+    class BrokenLeftoverHelmExecutor:
+        def runtime_helm_status(self, deployment):
+            return {
+                "release_exists": True,
+                "helm_release_name": deployment.helm_release_name,
+                "namespace": deployment.helm_namespace,
+                "release_status": "failed",
+            }
+
+        def stop(self, deployment):
+            raise WorkerExecutionError(
+                "deploy.kubernetes.helm_uninstall",
+                "helm uninstall failed",
+                metadata={"helm_release_name": deployment.helm_release_name, "namespace": deployment.helm_namespace},
+            )
+
+        def cleanup_workspace(self, deployment):
+            return {"workspace_removed": False, "log_removed": False}
+
+    import worker.reconcile as reconcile_module
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "create_executor_for_deployment",
+        lambda deployment: BrokenLeftoverHelmExecutor(),
+    )
+
+    with app.app_context():
+        changes = reconcile_deployments()
+        assert changes == 0
+        updated = db.session.get(PlatformDeployment, deployment_id)
+        event = next(event for event in updated.events if event.event_type == "reconcile.helm_cleanup_failed")
+        assert "helm uninstall failed" in event.message
+        assert event.metadata_json["helm_release_name"] == "paas-helm-leftover-error-production-1"
 
 
 def test_reconciler_removes_leftover_kubernetes_resources_from_failed_deployment(client, app, monkeypatch):
