@@ -182,6 +182,36 @@ def test_deployer_token_cannot_perform_admin_only_project_update(client, app):
     assert payload["request_id"] == forbidden_response.headers["X-Request-ID"]
 
 
+def test_deployer_token_can_stop_deployment_through_dedicated_endpoint_only(client, app):
+    headers = configure_api_tokens(app)
+    create_response = client.post(
+        "/api/projects",
+        json=create_project_payload(name="deployer-stop-app"),
+        headers=headers["admin"],
+    )
+    project_id = create_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+        headers=headers["admin"],
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    forbidden_patch_response = client.patch(
+        f"/api/projects/{project_id}/deployments/{deployment_id}",
+        json={"status": "stopped"},
+        headers=headers["deployer"],
+    )
+    stop_response = client.post(
+        f"/api/projects/{project_id}/deployments/{deployment_id}/stop",
+        headers=headers["deployer"],
+    )
+
+    assert forbidden_patch_response.status_code == 403
+    assert stop_response.status_code == 200
+    assert stop_response.get_json()["status"] == "stopped"
+
+
 def test_admin_token_can_manage_projects_and_deployments(client, app):
     headers = configure_api_tokens(app)
     create_response = client.post("/api/projects", json=create_project_payload(name="admin-app"), headers=headers["admin"])
