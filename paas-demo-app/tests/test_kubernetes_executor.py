@@ -566,6 +566,29 @@ def test_kubernetes_executor_helm_mode_stop_uses_recorded_release_name_when_avai
     assert result.metadata["helm_release_name"] == "paas-original-name-production-3"
 
 
+def test_kubernetes_executor_helm_mode_stop_prefers_persisted_release_name(tmp_path):
+    RecordingHelmRunner.instances = []
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        namespace="apps",
+        deployment_mode="helm",
+        helm_runner_factory=RecordingHelmRunner,
+        popen_factory=DummyPopen,
+    )
+    deployment = make_kubernetes_deployment_stub(deployment_id=9, name="renamed-app", project_id=3)
+    deployment.helm_release_name = "paas-persisted-name-production-3"
+    deployment.events = [
+        SimpleNamespace(id=1, metadata_json={"helm_release_name": "paas-event-name-production-3"})
+    ]
+
+    result = executor.stop(deployment)
+
+    helm_runner = RecordingHelmRunner.instances[0]
+    assert helm_runner.uninstall_call == {"release": "paas-persisted-name-production-3"}
+    assert result.metadata["helm_release_name"] == "paas-persisted-name-production-3"
+
+
 def test_kubernetes_executor_helm_mode_stop_failure_raises_worker_execution_error(tmp_path):
     RecordingHelmRunner.instances = []
     executor = KubernetesExecutor(

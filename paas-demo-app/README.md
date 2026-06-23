@@ -905,11 +905,15 @@ The deployment summary endpoint also exposes Kubernetes-specific read-model fiel
 - `kubernetes_namespace`
 - `kubernetes_deployment_name`
 - `kubernetes_service_name`
+- `helm_release_name`
+- `helm_namespace`
+- `helm_chart_path`
 - `last_kubernetes_failure_stage`
 - `last_kubernetes_failure_summary`
 - `last_kubernetes_failure_missing_resources`
 
 For healthy Kubernetes deployments, those fields identify the active namespace and generated resource names.
+For Helm-managed Kubernetes deployments, the Helm fields identify the release name, release namespace, and chart path used by the executor. Older Helm deployments without persisted columns may still rely on deployment event metadata as a fallback during stop.
 
 For failed Kubernetes deployments, `last_kubernetes_failure_stage` is one of:
 
