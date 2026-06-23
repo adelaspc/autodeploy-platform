@@ -935,9 +935,18 @@ If a client needs the latest Kubernetes failure context in a more stable read mo
 - `pod_names`
 - `pod_describe_summary`
 - `pod_logs_summary`
+- `helm_release_name`
+- `helm_namespace`
+- `helm_chart_path`
+- `helm_returncode`
+- `helm_stdout_summary`
+- `helm_stderr_summary`
+- `helm_log_path`
+- `helm_release_status`
 - `diagnostics`
 
 The `diagnostics` field contains the raw metadata from the latest Kubernetes failure event, while the top-level fields extract the most relevant parts for direct display.
+For Helm deploy, uninstall, or reconcile failures, `failure_stage` is `helm` and the Helm fields expose the release metadata and command summaries without making live cluster calls from the API.
 
 ### Healthcheck Behavior
 

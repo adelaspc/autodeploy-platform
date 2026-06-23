@@ -206,6 +206,30 @@ def latest_kubernetes_failure_event(deployment):
     )
 
 
+HELM_DIAGNOSTIC_EVENTS = {
+    "kubernetes.helm_deploy_failed",
+    "kubernetes.helm_uninstall_failed",
+    "reconcile.helm_release_missing",
+    "reconcile.helm_cleanup_failed",
+}
+
+
+def latest_helm_diagnostic_event(deployment):
+    return latest_kubernetes_event(deployment, HELM_DIAGNOSTIC_EVENTS)
+
+
+def helm_failure_summary(event, metadata):
+    if event is None:
+        return None
+    return (
+        metadata.get("helm_stderr_summary")
+        or metadata.get("helm_stdout_summary")
+        or metadata.get("error_message")
+        or metadata.get("summary")
+        or event.message
+    )
+
+
 def kubernetes_failure_stage_and_summary(failure_event):
     if failure_event is None:
         return None, None
@@ -256,6 +280,19 @@ def kubernetes_failure_stage_and_summary(failure_event):
     return None, None
 
 
+def helm_diagnostic_fields(deployment, metadata):
+    return {
+        "helm_release_name": metadata.get("helm_release_name") or deployment.helm_release_name,
+        "helm_namespace": metadata.get("namespace") or deployment.helm_namespace,
+        "helm_chart_path": metadata.get("chart_path") or deployment.helm_chart_path,
+        "helm_returncode": metadata.get("helm_returncode"),
+        "helm_stdout_summary": metadata.get("helm_stdout_summary"),
+        "helm_stderr_summary": metadata.get("helm_stderr_summary"),
+        "helm_log_path": metadata.get("helm_log_path"),
+        "helm_release_status": metadata.get("release_status"),
+    }
+
+
 def serialize_kubernetes_diagnostics(deployment):
     if deployment.deploy_target != "kubernetes":
         return None
@@ -276,7 +313,7 @@ def serialize_kubernetes_diagnostics(deployment):
         return {
             "deployment_id": deployment.id,
             "deploy_target": deployment.deploy_target,
-            "namespace": metadata.get("namespace"),
+            "namespace": metadata.get("namespace") or deployment.helm_namespace,
             "deployment_name": metadata.get("deployment_name"),
             "service_name": metadata.get("service_name"),
             "failure_stage": "preflight",
@@ -292,19 +329,36 @@ def serialize_kubernetes_diagnostics(deployment):
             "pod_describe_summary": None,
             "pod_logs_summary": None,
             "diagnostics": metadata,
-        }
+        } | helm_diagnostic_fields(deployment, metadata)
 
     failure_event = latest_kubernetes_failure_event(deployment)
     failure_stage, failure_summary = kubernetes_failure_stage_and_summary(failure_event)
-    metadata = redact_sensitive_data(
-        failure_event.metadata_json if failure_event and failure_event.metadata_json else {},
-        secret_values=secret_values,
-    )
+    helm_event = latest_helm_diagnostic_event(deployment)
+    if helm_event is not None and (
+        failure_event is None
+        or (
+            helm_event.created_at,
+            helm_event.id or 0,
+        )
+        >= (
+            failure_event.created_at,
+            failure_event.id or 0,
+        )
+    ):
+        failure_event = helm_event
+        metadata = redact_sensitive_data(helm_event.metadata_json or {}, secret_values=secret_values)
+        failure_stage = "helm"
+        failure_summary = helm_failure_summary(helm_event, metadata)
+    else:
+        metadata = redact_sensitive_data(
+            failure_event.metadata_json if failure_event and failure_event.metadata_json else {},
+            secret_values=secret_values,
+        )
 
     return {
         "deployment_id": deployment.id,
         "deploy_target": deployment.deploy_target,
-        "namespace": metadata.get("namespace"),
+        "namespace": metadata.get("namespace") or deployment.helm_namespace,
         "deployment_name": metadata.get("deployment_name"),
         "service_name": metadata.get("service_name"),
         "failure_stage": failure_stage,
@@ -332,7 +386,7 @@ def serialize_kubernetes_diagnostics(deployment):
             else None
         ),
         "diagnostics": metadata,
-    }
+    } | helm_diagnostic_fields(deployment, metadata)
 
 
 def serialize_deployment_summary(deployment, *, branch):

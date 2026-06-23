@@ -2424,6 +2424,106 @@ def test_get_kubernetes_diagnostics_returns_structured_failure_view(client, app)
     assert payload["diagnostics"]["healthcheck_service_summary"] == "Endpoints: <none> | Session Affinity: None"
 
 
+def test_get_kubernetes_diagnostics_includes_helm_deploy_failure_context(client, app):
+    project_response = create_project(client, name="helm-diagnostics-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.helm_release_name = "paas-helm-diagnostics-app-production-1"
+        deployment.helm_namespace = "apps"
+        deployment.helm_chart_path = "deploy/helm/generic-web-app"
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="kubernetes.helm_deploy_failed",
+                step="deploy.kubernetes.helm",
+                level="error",
+                status="failed",
+                message="Helm release failed to deploy",
+                metadata_json={
+                    "deployment_mode": "helm",
+                    "helm_release_name": deployment.helm_release_name,
+                    "namespace": deployment.helm_namespace,
+                    "chart_path": deployment.helm_chart_path,
+                    "helm_returncode": 1,
+                    "helm_stdout_summary": "",
+                    "helm_stderr_summary": "Error: rendered manifests contain a resource that already exists",
+                    "helm_log_path": "/tmp/helm-upgrade-install.log",
+                },
+            )
+        )
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["failure_stage"] == "helm"
+    assert payload["failure_event_type"] == "kubernetes.helm_deploy_failed"
+    assert payload["failure_summary"] == "Error: rendered manifests contain a resource that already exists"
+    assert payload["helm_release_name"] == "paas-helm-diagnostics-app-production-1"
+    assert payload["helm_namespace"] == "apps"
+    assert payload["helm_chart_path"] == "deploy/helm/generic-web-app"
+    assert payload["helm_returncode"] == 1
+    assert payload["helm_stderr_summary"] == "Error: rendered manifests contain a resource that already exists"
+    assert payload["helm_log_path"] == "/tmp/helm-upgrade-install.log"
+    assert payload["diagnostics"]["deployment_mode"] == "helm"
+
+
+def test_get_kubernetes_diagnostics_includes_helm_reconcile_context(client, app):
+    project_response = create_project(client, name="helm-reconcile-diagnostics-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.helm_release_name = "paas-helm-reconcile-diagnostics-app-production-1"
+        deployment.helm_namespace = "apps"
+        deployment.helm_chart_path = "deploy/helm/generic-web-app"
+        db.session.add(
+            DeploymentEvent(
+                deployment_id=deployment_id,
+                event_type="reconcile.helm_release_missing",
+                step="reconcile.helm_release_missing",
+                level="error",
+                status="failed",
+                message="Marked running deployment failed because its Helm release is missing",
+                metadata_json={
+                    "release_exists": False,
+                    "helm_release_name": deployment.helm_release_name,
+                    "namespace": deployment.helm_namespace,
+                    "chart_path": deployment.helm_chart_path,
+                    "helm_stderr_summary": "Error: release: not found",
+                },
+            )
+        )
+        db.session.commit()
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["failure_stage"] == "helm"
+    assert payload["failure_event_type"] == "reconcile.helm_release_missing"
+    assert payload["failure_summary"] == "Error: release: not found"
+    assert payload["helm_release_name"] == "paas-helm-reconcile-diagnostics-app-production-1"
+    assert payload["helm_namespace"] == "apps"
+    assert payload["helm_release_status"] is None
+    assert payload["diagnostics"]["release_exists"] is False
+
+
 def test_secret_values_are_redacted_from_diagnostics_summary_and_logs(client, app, tmp_path):
     project_response = create_project(
         client,
