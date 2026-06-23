@@ -19,6 +19,10 @@ CONFIG_KEY_BY_ROLE = {
     "admin": "CONTROL_PLANE_API_TOKEN_ADMIN",
 }
 
+TOKEN_MISSING = "missing"
+TOKEN_MALFORMED = "malformed"
+TOKEN_PRESENT = "present"
+
 
 @dataclass(frozen=True)
 class ApiPrincipal:
@@ -41,12 +45,22 @@ def api_auth_enabled():
     return bool(configured_api_tokens())
 
 
+def _unauthorized_response(message):
+    response = jsonify(error_payload(message))
+    response.headers["WWW-Authenticate"] = "Bearer"
+    return response, 401
+
+
 def _missing_token_response():
-    return jsonify(error_payload("Missing bearer token")), 401
+    return _unauthorized_response("Missing bearer token")
 
 
 def _invalid_token_response():
-    return jsonify(error_payload("Invalid bearer token")), 401
+    return _unauthorized_response("Invalid bearer token")
+
+
+def _malformed_token_response():
+    return _unauthorized_response("Malformed bearer token")
 
 
 def _forbidden_response():
@@ -56,15 +70,15 @@ def _forbidden_response():
 def _extract_bearer_token():
     authorization = request.headers.get("Authorization")
     if not isinstance(authorization, str) or not authorization.strip():
-        return None
+        return TOKEN_MISSING, None
 
     parts = authorization.strip().split(None, 1)
     if len(parts) != 2:
-        return None
+        return TOKEN_MALFORMED, None
     scheme, token = parts
     if scheme.lower() != "bearer" or not token.strip():
-        return None
-    return token.strip()
+        return TOKEN_MALFORMED, None
+    return TOKEN_PRESENT, token.strip()
 
 
 def authenticate_bearer_token(token):
@@ -120,10 +134,13 @@ def authorize_request(required_role):
 
     principal = _cached_request_principal()
     if principal is None:
-        token = _extract_bearer_token()
-        if token is None:
+        token_status, token = _extract_bearer_token()
+        if token_status == TOKEN_MISSING:
             _record_denied_request_audit(reason="missing_token", required_role=required_role)
             return _missing_token_response()
+        if token_status == TOKEN_MALFORMED:
+            _record_denied_request_audit(reason="malformed_token", required_role=required_role)
+            return _malformed_token_response()
         principal = authenticate_bearer_token(token)
         if principal is None:
             _record_denied_request_audit(reason="invalid_token", required_role=required_role)

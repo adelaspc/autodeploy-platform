@@ -393,6 +393,9 @@ def test_platform_health_check_reports_api_auth_posture(client, app):
         ],
         "webhook_auth_mode": "github_signature",
     }
+    assert "read-token" not in str(payload)
+    assert "deployer-token" not in str(payload)
+    assert "admin-token" not in str(payload)
 
 
 def test_platform_activity_health_check_reports_recent_and_active_deployments(client, app):
