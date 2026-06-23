@@ -175,12 +175,20 @@ def kubernetes_summary_fields(deployment):
             )
 
     return {
-        "kubernetes_namespace": metadata.get("namespace"),
+        "kubernetes_namespace": deployment.helm_namespace or metadata.get("namespace"),
         "kubernetes_deployment_name": metadata.get("deployment_name"),
         "kubernetes_service_name": metadata.get("service_name"),
         "last_kubernetes_failure_stage": failure_stage,
         "last_kubernetes_failure_summary": failure_summary,
         "last_kubernetes_failure_missing_resources": failure_missing_resources,
+    }
+
+
+def helm_summary_fields(deployment):
+    return {
+        "helm_release_name": deployment.helm_release_name,
+        "helm_namespace": deployment.helm_namespace,
+        "helm_chart_path": deployment.helm_chart_path,
     }
 
 
@@ -371,7 +379,7 @@ def serialize_deployment_summary(deployment, *, branch):
         "created_at": deployment.created_at.isoformat() if deployment.created_at else None,
         "updated_at": deployment.updated_at.isoformat() if deployment.updated_at else None,
         "events": [event.to_dict() for event in reversed(recent_deployment_events(deployment))],
-    } | kubernetes_summary_fields(deployment)
+    } | kubernetes_summary_fields(deployment) | helm_summary_fields(deployment)
 
 
 def read_log_tail(path, *, tail_lines, secret_values=()):

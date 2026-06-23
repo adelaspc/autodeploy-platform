@@ -40,6 +40,9 @@ class PlatformDeployment(db.Model):
     host_port = db.Column(db.Integer, nullable=True)
     healthcheck_url = db.Column(db.String(1024), nullable=True)
     service_url = db.Column(db.String(255), nullable=True)
+    helm_release_name = db.Column(db.String(255), nullable=True)
+    helm_namespace = db.Column(db.String(255), nullable=True)
+    helm_chart_path = db.Column(db.String(1024), nullable=True)
     preflight_status = db.Column(db.String(32), nullable=True)
     preflight_summary = db.Column(db.Text, nullable=True)
     preflight_metadata_json = db.Column(db.JSON, nullable=True)
@@ -86,6 +89,9 @@ class PlatformDeployment(db.Model):
             "host_port": self.host_port,
             "healthcheck_url": self.healthcheck_url,
             "service_url": self.service_url,
+            "helm_release_name": self.helm_release_name,
+            "helm_namespace": self.helm_namespace,
+            "helm_chart_path": self.helm_chart_path,
             "preflight_status": self.preflight_status,
             "preflight_summary": self.preflight_summary,
             "preflight_metadata_json": redact_sensitive_data(

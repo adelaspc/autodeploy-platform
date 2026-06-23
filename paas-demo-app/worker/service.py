@@ -4,6 +4,7 @@ from flask import current_app
 from sqlalchemy import and_, or_, select, update
 
 from backend.extensions import db
+from backend.deployment_runtime_metadata import persist_helm_runtime_metadata
 from backend.models import DeploymentEvent, PlatformDeployment
 from backend.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
 from worker.executor import WorkerExecutionError, create_executor
@@ -137,6 +138,7 @@ def apply_execution_result(deployment, result):
         deployment.healthcheck_url = result.healthcheck_url
     if result.service_url:
         deployment.service_url = result.service_url
+    persist_helm_runtime_metadata(deployment, result.metadata)
 
 
 def clear_preflight_state(deployment):
