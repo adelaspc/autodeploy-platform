@@ -368,9 +368,9 @@ async function stopDeployment(deployment) {
     return;
   }
   await runDeploymentAction(
-    `/api/projects/${selectedProjectId.value}/deployments/${deployment.deployment_id}`,
-    "PATCH",
-    { status: "stopped" },
+    `/api/projects/${selectedProjectId.value}/deployments/${deployment.deployment_id}/stop`,
+    "POST",
+    null,
     "Stop requested",
   );
 }
