@@ -483,6 +483,83 @@ def get_project_deployment_build_log(project_id, deployment_id):
     return jsonify(serialize_build_log_payload(deployment, build_log_path, tail_lines=tail_lines))
 
 
+def _stop_project_deployment(project_id, deployment, update_data, *, audit_action):
+    try:
+        apply_deployment_update(deployment, update_data)
+    except WorkerExecutionError as exc:
+        db.session.rollback()
+        secret_values = secret_values_from_env_vars(deployment.project.env_vars if deployment.project else [])
+        record_audit_event(
+            action="deployment.stop_requested",
+            resource_type="deployment",
+            resource_id=deployment.id,
+            status="failure",
+            metadata={
+                "project_id": project_id,
+                "step": exc.step,
+                "error_message": exc.message,
+            },
+        )
+        return (
+            jsonify(
+                {
+                    "error": exc.message,
+                    "step": exc.step,
+                    "metadata": redact_sensitive_data(exc.metadata, secret_values=secret_values),
+                }
+            ),
+            409,
+        )
+
+    db.session.commit()
+    record_audit_event(
+        action=audit_action,
+        resource_type="deployment",
+        resource_id=deployment.id,
+        metadata={
+            "project_id": project_id,
+            "updated_fields": sorted(update_data.keys()),
+            "status": deployment.status,
+            "build_status": deployment.build.status,
+            "service_url": deployment.service_url,
+        },
+    )
+
+    return jsonify(serialize_project_deployment(deployment, include_events=True))
+
+
+@projects_bp.post("/<int:project_id>/deployments/<int:deployment_id>/stop")
+@require_api_role("deployer")
+def stop_project_deployment(project_id, deployment_id):
+    deployment = get_project_deployment_or_404(project_id, deployment_id)
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Invalid stop payload. Expected a JSON object"}), 400
+
+    unsupported_fields = sorted(set(payload) - {"message"})
+    if unsupported_fields:
+        return jsonify({"error": "Unsupported stop fields: " + ", ".join(unsupported_fields)}), 400
+
+    message = payload.get("message")
+    if message is not None and not isinstance(message, str):
+        return jsonify({"error": "Invalid message. Expected a string"}), 400
+
+    update_data = {"status": "stopped"}
+    if message is not None:
+        update_data["message"] = message
+
+    update_data, validation_error = validate_deployment_patch_payload(update_data, deployment)
+    if validation_error:
+        return jsonify({"error": validation_error}), 400
+
+    return _stop_project_deployment(
+        project_id,
+        deployment,
+        update_data,
+        audit_action="deployment.stop_requested",
+    )
+
+
 @projects_bp.patch("/<int:project_id>/deployments/<int:deployment_id>")
 @require_api_role("admin")
 def update_project_deployment(project_id, deployment_id):
@@ -493,32 +570,12 @@ def update_project_deployment(project_id, deployment_id):
         return jsonify({"error": validation_error}), 400
 
     if update_data.get("status") == "stopped":
-        try:
-            apply_deployment_update(deployment, update_data)
-        except WorkerExecutionError as exc:
-            db.session.rollback()
-            secret_values = secret_values_from_env_vars(deployment.project.env_vars if deployment.project else [])
-            record_audit_event(
-                action="deployment.stop_requested",
-                resource_type="deployment",
-                resource_id=deployment.id,
-                status="failure",
-                metadata={
-                    "project_id": project_id,
-                    "step": exc.step,
-                    "error_message": exc.message,
-                },
-            )
-            return (
-                jsonify(
-                    {
-                        "error": exc.message,
-                        "step": exc.step,
-                        "metadata": redact_sensitive_data(exc.metadata, secret_values=secret_values),
-                    }
-                ),
-                409,
-            )
+        return _stop_project_deployment(
+            project_id,
+            deployment,
+            update_data,
+            audit_action="deployment.stopped",
+        )
     else:
         apply_deployment_update(deployment, update_data)
 

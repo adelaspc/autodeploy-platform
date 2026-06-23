@@ -121,6 +121,7 @@ helm template generic-python ./deploy/helm/generic-web-app -f ./deploy/helm/gene
 - `GET /api/projects/<id>/builds`
 - `GET /api/projects/<id>/deployments`
 - `GET/POST/PATCH /api/projects/<id>/deployments`
+- `POST /api/projects/<id>/deployments/<deployment_id>/stop`
 - `GET /api/projects/<id>/deployments/<deployment_id>/summary`
 - `GET /api/projects/<id>/deployments/<deployment_id>/kubernetes-diagnostics`
 - `GET /api/projects/<id>/deployments/<deployment_id>/events`
@@ -192,8 +193,8 @@ Authorization: Bearer <token>
 Role matrix:
 
 - `read_only`: read/list/show routes, logs, summaries, diagnostics, `/health/db`, `/health/platform`, and `/health/activity`
-- `deployer`: everything in `read_only` plus deploy, retry, and redeploy actions
-- `admin`: everything in `deployer` plus project create/update/delete, manual deployment record creation, and deployment patch/stop operations
+- `deployer`: everything in `read_only` plus deploy, retry, redeploy, and dedicated stop actions
+- `admin`: everything in `deployer` plus project create/update/delete, manual deployment record creation, and generic deployment patch operations
 
 Public routes:
 
@@ -232,6 +233,7 @@ Currently audited actions include:
 - redeploy triggered
 - manual deployment created
 - deployment patched
+- deployment stop requested
 - deployment stopped
 - denied mutating API attempts on protected project routes
 
@@ -732,10 +734,9 @@ In `local-docker` mode, the deployment apply event also includes:
 7. Stop the local deployment and clean up the container:
 
 ```bash
-curl -X PATCH http://127.0.0.1:5000/api/projects/1/deployments/1 \
+curl -X POST http://127.0.0.1:5000/api/projects/1/deployments/1/stop \
   -H 'Content-Type: application/json' \
   -d '{
-    "status": "stopped",
     "message": "Stop requested"
   }'
 ```
@@ -1037,10 +1038,9 @@ When the reconciler detects Kubernetes drift, it also records best-effort pod di
 ### Stop a Kubernetes Deployment
 
 ```bash
-curl -X PATCH http://127.0.0.1:5000/api/projects/1/deployments/1 \
+curl -X POST http://127.0.0.1:5000/api/projects/1/deployments/1/stop \
   -H 'Content-Type: application/json' \
   -d '{
-    "status": "stopped",
     "message": "Stop requested"
   }'
 ```
