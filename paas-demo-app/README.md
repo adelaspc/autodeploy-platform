@@ -465,6 +465,7 @@ Useful settings:
 - `CONTROL_PLANE_KUBECONFIG`
 - `CONTROL_PLANE_K8S_NAMESPACE`
 - `CONTROL_PLANE_K8S_IMAGE_PULL_SECRET`
+- `CONTROL_PLANE_K8S_DEPLOYMENT_MODE`
 - `CONTROL_PLANE_DEPLOY_HOST`
 - `CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS`
 - `CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS`
@@ -492,7 +493,8 @@ The final deploy step depends on the executor:
 The Kubernetes executor is intentionally narrow in this iteration:
 
 - MicroK8s-compatible kubeconfig access
-- minimal Deployment + Service resources only
+- direct manifest mode with minimal Deployment + Service resources
+- feature-flagged Helm mode for the generic web app chart
 - rollout wait via `kubectl rollout status`
 - healthcheck via temporary `kubectl port-forward`
 - minimal stop support through resource deletion
@@ -500,7 +502,6 @@ The Kubernetes executor is intentionally narrow in this iteration:
 
 Not included yet:
 
-- Helm
 - ingress
 - cert-manager
 - autoscaling

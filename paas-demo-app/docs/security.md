@@ -78,6 +78,20 @@ Current storage tradeoff:
 - those values are masked on read rather than encrypted at rest
 - this is an intentional portfolio-stage tradeoff because the project does not yet include key management, envelope encryption, or an external secret manager
 
+Log-redaction boundaries:
+
+- API responses, deployment read models, audit metadata, and worker command metadata are redacted before returning or persisting operator-visible data
+- redaction is best-effort for values the control plane knows about through token config, project secret fields, registry credentials, and secret env vars
+- the platform cannot redact an unknown secret if a user application prints it under an unrelated value or generates it independently at runtime
+- for Kubernetes deployments, prefer `secret_key_ref` entries so secret values stay in Kubernetes Secrets instead of the control-plane database
+
+Token rotation guidance:
+
+- configure API tokens through environment variables or Kubernetes Secrets, never in committed values files
+- rotate by updating the relevant secret value, restarting the API pods, and then updating clients to use the new token
+- during a manual rotation window, temporarily configure the replacement token in a higher or equivalent role only when operationally necessary, then remove the old value promptly
+- treat webhook secrets and Git clone tokens as separate credentials with separate rotation steps
+
 Future hardening options:
 
 - move secret delivery to Kubernetes Secrets for all cluster deployments
@@ -152,8 +166,5 @@ These are intentional scope limits for this project stage. The current model is 
 
 ## Suggested Next Hardening Steps
 
-- add explicit auth posture to deployment/runbook docs
-- add token rotation guidance for deployment environments
-- document log-redaction boundaries more clearly
 - extend the audit trail with more lifecycle and webhook-admission signals if needed
 - move secrets to a dedicated secret manager or Kubernetes secret delivery pattern when presenting a more production-oriented setup

@@ -147,13 +147,12 @@ It deploys:
 
 It does not include control-plane migrations, workers, PVCs, RBAC, Docker socket mounts, kubeconfig mounts, jobs, cronjobs, or framework-specific commands.
 
-The Kubernetes executor currently still generates minimal Deployment and Service manifests directly. A future direction is:
+The Kubernetes executor supports two workload deployment modes:
 
-```text
-project spec -> generated values.yaml -> helm upgrade/install generic-web-app
-```
+- `manifest`: default; generates minimal Deployment and Service manifests directly, then uses `kubectl apply` and `kubectl delete`
+- `helm`: generates `generic-web-app` values, installs or upgrades a stable Helm release, and uninstalls that release on stop
 
-The repository includes an intermediate values-generation layer for that future direction. It maps the existing project/deployment/build model to the generic chart values contract without calling Helm, calling `kubectl`, or replacing the current executor path.
+The repository includes a values-generation layer for Helm mode. It maps the existing project/deployment/build model to the generic chart values contract before the executor calls Helm.
 
 Current values-generation behavior:
 
@@ -162,11 +161,11 @@ Current values-generation behavior:
 - maps literal env vars to `env[].value`
 - maps per-variable ConfigMap and Secret key references to `env[].valueFrom`
 - leaves `envFrom.configMaps` and `envFrom.secrets` empty because the current model does not support whole-resource imports
-- maps `Project.healthcheck_path` to readiness and liveness probe paths for the intended Helm deployment shape
+- maps `Project.healthcheck_path` to readiness and liveness probe paths for Helm-managed workloads
 - leaves startup probes and ingress disabled by default
 - does not generate runtime `command` or `args` from test or migration commands
 
-Future Helm-managed workloads also have stable naming helpers for release names and common labels. The intended flow is:
+Helm-managed workloads use stable naming helpers for release names and common labels. The flow is:
 
 ```text
 project + environment -> stable Helm release name -> helm upgrade/install generic-web-app
@@ -180,9 +179,9 @@ paas-<project-slug>-<environment-slug>-<project-id-suffix>
 
 The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys should upgrade the same release. Stop uninstalls the same release in Helm mode. Diagnostics and reconciliation can eventually use the common PaaS workload labels/selectors.
 
-An isolated Helm runner abstraction also exists for the Helm-mode path. It only builds and executes Helm CLI commands from primitive inputs.
+An isolated Helm runner abstraction exists for the Helm-mode path. It only builds and executes Helm CLI commands from primitive inputs.
 
-The future Helm-mode flow is:
+The Helm-mode flow is:
 
 ```text
 project/build/deployment
