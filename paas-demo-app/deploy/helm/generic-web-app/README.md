@@ -20,28 +20,29 @@ It does not render jobs, migrations, PVCs, RBAC, service accounts, Docker socket
 
 `deploy/helm/generic-web-app` is the desired workload abstraction for user applications managed by the PaaS.
 
-The PaaS now has a pure values-generation layer that maps the existing project/deployment/build model into this chart's values contract.
+The PaaS has a values-generation layer that maps the existing project/deployment/build model into this chart's values contract.
 
 Current behavior:
 
-- the Kubernetes executor still deploys via direct generated Deployment and Service manifests
-- the values generator does not call Helm or Kubernetes
+- the Kubernetes executor defaults to direct generated Deployment and Service manifests
+- when `CONTROL_PLANE_K8S_DEPLOYMENT_MODE=helm`, the executor renders generated values and deploys this chart with Helm
 - per-variable ConfigMap and Secret key references are rendered through `env[].valueFrom`
 - `envFrom.configMaps` and `envFrom.secrets` are not generated yet because the current project model does not have whole-resource import fields
+- diagnostics and reconciliation still use the existing direct Kubernetes resource behavior
 
-A later iteration can move toward:
+Helm mode follows this path:
 
 ```text
 project spec -> generated values.yaml -> helm upgrade/install generic-web-app
 ```
 
-Future Helm-managed user workloads should use one stable release per project/environment workload, not one release per deployment attempt. The intended release name shape is:
+Helm-managed user workloads use one stable release per project/environment workload, not one release per deployment attempt. The release name shape is:
 
 ```text
 paas-<project-slug>-<environment-slug>-<project-id-suffix>
 ```
 
-Redeploys should upgrade the same release. Stop behavior can eventually uninstall the release, and diagnostics/reconciliation can use the common PaaS workload labels/selectors.
+Redeploys upgrade the same release. Stop behavior uninstalls the release, and diagnostics/reconciliation can later move to `helm status` plus common PaaS workload labels/selectors.
 
 ## Validation
 

@@ -47,6 +47,10 @@ def github_headers(app, payload, *, event="push", delivery_id="delivery-123"):
     }
 
 
+def assert_bearer_challenge(response):
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
 def test_public_health_endpoint_remains_open(client, app):
     configure_api_tokens(app)
 
@@ -65,6 +69,7 @@ def test_protected_route_rejects_missing_bearer_token(client, app):
     payload = response.get_json()
     assert payload["error"] == "Missing bearer token"
     assert payload["request_id"] == response.headers["X-Request-ID"]
+    assert_bearer_challenge(response)
 
 
 def test_protected_route_rejects_invalid_bearer_token(client, app):
@@ -76,6 +81,24 @@ def test_protected_route_rejects_invalid_bearer_token(client, app):
     payload = response.get_json()
     assert payload["error"] == "Invalid bearer token"
     assert payload["request_id"] == response.headers["X-Request-ID"]
+    assert_bearer_challenge(response)
+
+
+def test_protected_route_rejects_malformed_authorization_header(client, app):
+    configure_api_tokens(app)
+
+    responses = [
+        client.get("/api/projects", headers={"Authorization": "Bearer"}),
+        client.get("/api/projects", headers={"Authorization": "Basic read-token"}),
+        client.get("/api/projects", headers={"Authorization": "read-token"}),
+    ]
+
+    for response in responses:
+        assert response.status_code == 401
+        payload = response.get_json()
+        assert payload["error"] == "Malformed bearer token"
+        assert payload["request_id"] == response.headers["X-Request-ID"]
+        assert_bearer_challenge(response)
 
 
 def test_read_only_token_can_access_protected_read_endpoints(client, app, monkeypatch):
@@ -106,6 +129,7 @@ def test_read_only_token_cannot_mutate_projects(client, app):
     payload = response.get_json()
     assert payload["error"] == "Forbidden"
     assert payload["request_id"] == response.headers["X-Request-ID"]
+    assert "WWW-Authenticate" not in response.headers
 
 
 def test_deployer_token_can_trigger_deploy_retry_and_redeploy_actions(client, app, monkeypatch):
