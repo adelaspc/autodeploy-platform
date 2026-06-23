@@ -1038,7 +1038,7 @@ The failure metadata includes:
 
 These diagnostics are best-effort. They are intended to make common issues such as image pull failures, failed scheduling, or manifest admission problems visible through deployment events without requiring direct cluster access during the first debugging pass.
 
-When the reconciler detects Kubernetes drift, it also records best-effort pod diagnostics in reconcile events such as `reconcile.kubernetes_missing_resource` and `reconcile.kubernetes_resources_removed`. That metadata uses `reconcile_*` or `reconcile_cleanup_*` field prefixes and is intended to preserve the last useful pod context even when the deployment is no longer healthy.
+When the reconciler detects Kubernetes drift, it records best-effort pod diagnostics in direct-resource reconcile events such as `reconcile.kubernetes_missing_resource` and `reconcile.kubernetes_resources_removed`. For Helm-managed workloads, it uses persisted Helm release metadata with `helm status` and `helm uninstall`, recording events such as `reconcile.helm_release_missing`, `reconcile.helm_release_removed`, and `reconcile.helm_cleanup_failed`.
 
 ### Stop a Kubernetes Deployment
 

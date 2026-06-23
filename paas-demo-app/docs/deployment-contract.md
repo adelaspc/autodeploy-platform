@@ -81,7 +81,7 @@ Helm-managed workload naming follows this shape:
 paas-<project-slug>-<environment-slug>-<project-id-suffix>
 ```
 
-The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys upgrade the same release. Stop behavior uninstalls the release. Diagnostics and reconciliation can eventually use the common PaaS workload labels/selectors.
+The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys upgrade the same release. Stop behavior uninstalls the release. Reconciliation uses persisted Helm release metadata for Helm-managed workloads.
 
 An isolated Helm runner abstraction exists for the Helm-mode path. The Kubernetes executor can now use it for deploy and stop when `CONTROL_PLANE_K8S_DEPLOYMENT_MODE=helm`.
 
@@ -90,7 +90,7 @@ Current deployment modes:
 - `manifest`: default; keeps the existing direct manifest generation, `kubectl apply`, and `kubectl delete` behavior
 - `helm`: uses generated generic chart values, stable release naming, `HelmRunner.upgrade_install(...)` for deploy, and `HelmRunner.uninstall(...)` for stop
 
-Helm mode treats release-not-found uninstall failures as idempotently stopped. Reconciliation and diagnostics still use the existing direct Kubernetes resource behavior. Future full Helm mode should use `helm status` and common labels/selectors for those paths.
+Helm mode treats release-not-found uninstall failures as idempotently stopped. Reconciliation uses `helm status` for running Helm releases and `helm uninstall` for failed or stopped deployments with leftover releases. Kubernetes diagnostics still use direct resource and pod inspection.
 
 Helm-mode flow:
 

@@ -177,7 +177,7 @@ Release names use:
 paas-<project-slug>-<environment-slug>-<project-id-suffix>
 ```
 
-The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys should upgrade the same release. Stop uninstalls the same release in Helm mode. Diagnostics and reconciliation can eventually use the common PaaS workload labels/selectors.
+The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys should upgrade the same release. Stop uninstalls the same release in Helm mode. Reconciliation uses the recorded Helm release metadata to verify and clean Helm-managed workloads.
 
 An isolated Helm runner abstraction exists for the Helm-mode path. It only builds and executes Helm CLI commands from primitive inputs.
 
@@ -315,7 +315,7 @@ For `CONTROL_PLANE_EXECUTOR=kubernetes`, the worker still needs:
 - `manifest` is the default and keeps the existing direct `kubectl apply` and `kubectl delete` paths
 - `helm` uses generated `generic-web-app` values, a stable release name, `HelmRunner.upgrade_install(...)` for deploy, and `HelmRunner.uninstall(...)` for stop
 
-Reconciliation and diagnostics still use the existing direct Kubernetes resource behavior and will need separate follow-up work before Helm mode is complete. Future full Helm mode should use `helm status` and the common workload labels/selectors for those paths.
+Reconciliation is Helm-aware when persisted Helm release metadata is available: running deployments are checked with `helm status`, and leftover releases for failed or stopped deployments are removed with `helm uninstall`. Kubernetes failure diagnostics still use the existing direct resource and pod inspection behavior.
 
 The API deployment also mounts the same kubeconfig secret path when configured so `/health/platform` reports the same readiness posture as the worker. A shared PersistentVolumeClaim is used so the API can read runtime logs and diagnostics written by the worker.
 
