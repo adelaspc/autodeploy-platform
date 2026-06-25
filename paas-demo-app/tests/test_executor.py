@@ -3,7 +3,7 @@ import subprocess
 import base64
 import pytest
 
-from worker.executor import LocalDockerExecutor
+from worker.executor import LocalDockerExecutor, WorkerExecutionError
 from worker.service import process_next_pending_deployment
 
 from tests.test_worker import create_pending_deployment
@@ -143,18 +143,61 @@ def test_local_docker_executor_pushes_registry_image_when_enabled(tmp_path):
     deployment.build.image_ref = build_result.image_ref
     tag_result = executor.tag_image(deployment)
     push_result = executor.push_image(deployment)
+    verify_result = executor.verify_image(deployment)
 
     assert build_result.image_tag == "demo-app:abc123def456"
     assert build_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
     assert tag_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
     assert push_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
+    assert verify_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
     build_call = next(item for item in commands if item["args"][:2] == ["docker", "build"])
     assert build_call["args"][3] == "demo-app:abc123def456"
     assert any(item["args"][:2] == ["docker", "tag"] for item in commands)
     assert any(item["args"][:2] == ["docker", "push"] for item in commands)
+    assert any(item["args"][:3] == ["docker", "manifest", "inspect"] for item in commands)
     login_call = next(item for item in commands if item["args"][:2] == ["docker", "login"])
     assert login_call["input"] == "super-secret"
     assert "super-secret" not in " ".join(" ".join(item["args"]) for item in commands)
+
+
+def test_local_docker_executor_fails_when_registry_image_verification_fails(tmp_path):
+    def verify_runner(args, capture_output, text, timeout, check, input=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
+        if args[:3] == ["docker", "manifest", "inspect"]:
+            return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="manifest unknown\n")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
+
+    executor = LocalDockerExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=verify_runner,
+        registry_enabled=True,
+        registry_url="registry.example.com",
+        registry_namespace="paas",
+    )
+    deployment = type(
+        "DeploymentStub",
+        (),
+        {
+            "id": 1,
+            "project_id": 2,
+            "build": type(
+                "BuildStub",
+                (),
+                {
+                    "image_tag": "demo-app:abc123def456",
+                    "image_ref": "registry.example.com/paas/demo-app:abc123def456",
+                },
+            )(),
+            "project": type("ProjectStub", (), {"env_vars": []})(),
+        },
+    )()
+
+    try:
+        executor.verify_image(deployment)
+        raise AssertionError("verify_image should fail when manifest inspect fails")
+    except WorkerExecutionError as exc:
+        assert exc.step == "image.verify"
+        assert "manifest unknown" in exc.metadata["summary"]
 
 
 def test_local_docker_executor_skips_push_when_registry_disabled(tmp_path):
@@ -177,9 +220,11 @@ def test_local_docker_executor_skips_push_when_registry_disabled(tmp_path):
 
     tag_result = executor.tag_image(deployment)
     push_result = executor.push_image(deployment)
+    verify_result = executor.verify_image(deployment)
 
     assert tag_result.metadata["skipped"] is True
     assert push_result.metadata["skipped"] is True
+    assert verify_result.metadata["skipped"] is True
 
 
 def test_local_docker_executor_retries_retryable_steps(tmp_path):

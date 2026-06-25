@@ -500,11 +500,14 @@ When registry support is enabled, the build and publish flow is:
 - test local image
 - tag local image for the registry
 - push registry image
+- verify the pushed registry image with `docker manifest inspect`
 
 The final deploy step depends on the executor:
 
 - `local-docker`: deploy locally from the local image
 - `kubernetes`: deploy the pushed `image_ref` into Kubernetes
+
+If registry image verification fails after a successful push command, the worker marks the build/deployment failed before starting the deploy step. This catches partial-success registry states where a tag appears to exist but cannot be resolved as a pullable image manifest.
 
 The Kubernetes executor is intentionally narrow in this iteration:
 

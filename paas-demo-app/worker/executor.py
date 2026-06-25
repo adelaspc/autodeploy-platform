@@ -119,6 +119,9 @@ class DeploymentExecutor:
     def push_image(self, deployment):
         raise NotImplementedError
 
+    def verify_image(self, deployment):
+        raise NotImplementedError
+
     def preflight_deploy(self, deployment):
         return PreflightResult(
             status="skipped",
@@ -191,6 +194,16 @@ class FakeDeploymentExecutor(DeploymentExecutor):
         return ExecutionResult(
             "Image push skipped for fake executor",
             metadata={"executor": self.deploy_target, "skipped": True},
+            image_tag=deployment.build.image_tag,
+            image_ref=deployment.build.image_ref or deployment.build.image_tag,
+        )
+
+    def verify_image(self, deployment):
+        return ExecutionResult(
+            "Image verification skipped for fake executor",
+            metadata={"executor": self.deploy_target, "skipped": True},
+            image_tag=deployment.build.image_tag,
+            image_ref=deployment.build.image_ref or deployment.build.image_tag,
         )
 
     def preflight_deploy(self, deployment):
@@ -244,7 +257,7 @@ class LocalDockerExecutor(DeploymentExecutor):
             "CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS",
         ),
     )
-    retryable_steps = frozenset({"repository.clone", "image.build", "tests", "image.push"})
+    retryable_steps = frozenset({"repository.clone", "image.build", "tests", "image.push", "image.verify"})
 
     def __init__(
         self,
@@ -437,6 +450,31 @@ class LocalDockerExecutor(DeploymentExecutor):
         push_result.image_ref = registry_image_ref
         push_result.metadata |= login_metadata
         return push_result
+
+    def verify_image(self, deployment):
+        _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
+        log_path = logs_dir / "verify-image.log"
+        registry_image_ref = deployment.build.image_ref
+        if not self.registry_enabled:
+            log_path.write_text("Image verification skipped because registry push is disabled.\n", encoding="utf-8")
+            return ExecutionResult(
+                "Image verification skipped because registry push is disabled",
+                metadata={"executor": self.deploy_target, "skipped": True, "registry_enabled": False},
+                log_path=str(log_path),
+                image_tag=deployment.build.image_tag,
+                image_ref=registry_image_ref or deployment.build.image_tag,
+            )
+        if not registry_image_ref:
+            raise WorkerExecutionError("image.verify", "Registry image reference is missing before verification step")
+
+        verify_result = self._run_command(
+            "image.verify",
+            ["docker", "manifest", "inspect", registry_image_ref],
+            log_path=log_path,
+        )
+        verify_result.image_tag = deployment.build.image_tag
+        verify_result.image_ref = registry_image_ref
+        return verify_result
 
     def preflight_deploy(self, deployment):
         return PreflightResult(

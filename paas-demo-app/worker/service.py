@@ -44,11 +44,18 @@ def push_error_hint(message, metadata=None):
                 "registry plan or private repository limit",
             ]
         }
-    if "unauthorized" in haystack or "insufficient scopes" in haystack:
+    if "unauthorized" in haystack or "insufficient scopes" in haystack or "insufficient_scope" in haystack:
         return {
             "possible_causes": [
                 "registry authentication failed",
                 "registry token does not have push permission",
+            ]
+        }
+    if "manifest unknown" in haystack or "no such manifest" in haystack:
+        return {
+            "possible_causes": [
+                "registry image tag was not published",
+                "registry push may have partially succeeded without a retrievable manifest",
             ]
         }
     if "repository does not exist" in haystack:
@@ -609,6 +616,36 @@ def process_deployment(deployment, executor=None):
             extra_events=push_result.events,
         )
 
+        record_event(
+            deployment,
+            "image.verify_started",
+            deployment.status,
+            "Worker started verifying registry image",
+            step="image.verify",
+            metadata={"image_ref": deployment.build.image_ref},
+        )
+        db.session.commit()
+        verify_result = executor.verify_image(deployment)
+        ensure_claim_owned(deployment)
+        apply_execution_result(deployment, verify_result)
+        commit_step_result(
+            deployment,
+            event_type="image.verify_succeeded",
+            status=deployment.status,
+            message=verify_result.message,
+            step="image.verify",
+            metadata=verify_result.metadata
+            | {
+                "log_path": verify_result.log_path,
+                "step": "image.verify",
+                "image_tag": verify_result.image_tag,
+                "image_ref": verify_result.image_ref,
+                "summary": verify_result.message,
+                "skipped": bool(verify_result.metadata.get("skipped")),
+            },
+            extra_events=verify_result.events,
+        )
+
         begin_step(
             deployment,
             "deploying",
@@ -685,7 +722,7 @@ def process_deployment(deployment, executor=None):
     except WorkerExecutionError as exc:
         if exc.log_path:
             deployment.build.log_path = exc.log_path
-        if exc.step == "image.push":
+        if exc.step in {"image.push", "image.verify"}:
             deployment.build.registry_push_status = "failed"
         persist_preflight_failure(deployment, exc)
         try:

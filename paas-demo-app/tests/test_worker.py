@@ -62,6 +62,16 @@ class OrderedExecutor:
             log_path="/tmp/test-workspaces/push.log",
         )
 
+    def verify_image(self, deployment):
+        self.calls.append("verify_image")
+        return ExecutionResult(
+            "Image verification skipped",
+            metadata={"executor": "ordered", "skipped": True},
+            image_tag=deployment.build.image_tag,
+            image_ref=deployment.build.image_ref,
+            log_path="/tmp/test-workspaces/verify-image.log",
+        )
+
     def preflight_deploy(self, deployment):
         self.calls.append("preflight_deploy")
         return PreflightResult(
@@ -125,6 +135,9 @@ class FailingExecutor:
     def push_image(self, deployment):
         return ExecutionResult("Image pushed")
 
+    def verify_image(self, deployment):
+        return ExecutionResult("Image verified")
+
     def deploy(self, deployment):
         return ExecutionResult("Deployed", service_url="https://example.local", deploy_target="failing")
 
@@ -158,6 +171,30 @@ class PushFailingExecutor:
         raise AssertionError("deploy should not run after push failure")
 
 
+class VerifyFailingExecutor(OrderedExecutor):
+    def push_image(self, deployment):
+        self.calls.append("push_image")
+        return ExecutionResult(
+            "Image pushed",
+            metadata={"summary": "Image pushed"},
+            image_tag=deployment.build.image_tag,
+            image_ref=deployment.build.image_ref,
+            log_path="/tmp/test-workspaces/push.log",
+        )
+
+    def verify_image(self, deployment):
+        self.calls.append("verify_image")
+        raise WorkerExecutionError(
+            "image.verify",
+            "Registry image verification failed",
+            metadata={"summary": "manifest unknown", "output_tail": ["manifest unknown"]},
+            log_path="/tmp/test-workspaces/verify-image.log",
+        )
+
+    def deploy(self, deployment):
+        raise AssertionError("deploy should not run after image verification failure")
+
+
 class ClaimObservingExecutor:
     def __init__(self):
         self.claim_timestamps = []
@@ -186,6 +223,10 @@ class ClaimObservingExecutor:
         self.claim_timestamps.append(deployment.claimed_at)
         return ExecutionResult("Push skipped", metadata={"skipped": True})
 
+    def verify_image(self, deployment):
+        self.claim_timestamps.append(deployment.claimed_at)
+        return ExecutionResult("Image verification skipped", metadata={"skipped": True})
+
     def deploy(self, deployment):
         self.claim_timestamps.append(deployment.claimed_at)
         return ExecutionResult("Deployment simulated", service_url=f"https://{deployment.project.name}.local", deploy_target="observing")
@@ -213,6 +254,9 @@ class ClaimLosingExecutor:
 
     def push_image(self, deployment):
         return ExecutionResult("Push skipped")
+
+    def verify_image(self, deployment):
+        return ExecutionResult("Image verification skipped")
 
     def deploy(self, deployment):
         return ExecutionResult("Deployed", service_url="https://example.local", deploy_target="claim-loss")
@@ -264,6 +308,7 @@ def test_process_next_pending_deployment_runs_to_completion(client):
         "run_tests",
         "tag_image",
         "push_image",
+        "verify_image",
         "preflight_deploy",
         "deploy",
     ]
@@ -277,6 +322,8 @@ def test_process_next_pending_deployment_runs_to_completion(client):
     assert "tests.succeeded" in event_types
     assert "image.tag_started" in event_types
     assert "image.tag_succeeded" in event_types
+    assert "image.verify_started" in event_types
+    assert "image.verify_succeeded" in event_types
     assert "deployment.preflight_succeeded" in event_types
     assert "deployment.running" in event_types
     assert "claim_acquired" in event_types
@@ -287,6 +334,9 @@ def test_process_next_pending_deployment_runs_to_completion(client):
     assert push_event["metadata_json"]["step"] == "image.push"
     assert push_event["metadata_json"]["push_log_available"] is True
     assert push_event["metadata_json"]["push_summary"] == "Push skipped"
+    verify_event = next(event for event in deployment["events"] if event["event_type"] == "image.verify_succeeded")
+    assert verify_event["metadata_json"]["step"] == "image.verify"
+    assert verify_event["metadata_json"]["skipped"] is True
 
 
 def test_process_next_pending_deployment_persists_helm_runtime_metadata(client):
@@ -331,6 +381,9 @@ def test_process_next_pending_deployment_persists_preflight_failure_state(client
 
         def push_image(self, deployment):
             return ExecutionResult("Push skipped", metadata={"skipped": True})
+
+        def verify_image(self, deployment):
+            return ExecutionResult("Image verification skipped", metadata={"skipped": True})
 
         def preflight_deploy(self, deployment):
             raise WorkerExecutionError(
@@ -432,6 +485,32 @@ def test_process_next_pending_deployment_stops_after_push_failure(client):
     ]
 
 
+def test_process_next_pending_deployment_stops_after_registry_verification_failure(client):
+    pending = create_pending_deployment(client, name="worker-verify-failure")
+    executor = VerifyFailingExecutor()
+
+    processed = process_next_pending_deployment(executor=executor)
+
+    assert processed is not None
+    assert processed.id == pending["id"]
+    assert processed.status == "failed"
+    assert processed.build.status == "failed"
+    assert processed.build.registry_push_status == "failed"
+    assert processed.last_error == "Registry image verification failed"
+    assert processed.build.log_path == "/tmp/test-workspaces/verify-image.log"
+    assert executor.calls == ["clone_repo", "build_image", "run_tests", "tag_image", "push_image", "verify_image"]
+
+    deployment_response = client.get(f"/api/projects/{processed.project_id}/deployments/{processed.id}")
+    deployment = deployment_response.get_json()
+    event_types = [event["event_type"] for event in deployment["events"]]
+    assert "image.push_succeeded" in event_types
+    assert "image.verify_started" in event_types
+    assert "image.verify.failed" in event_types
+    assert "deployment.apply_started" not in event_types
+    failed_event = next(event for event in deployment["events"] if event["event_type"] == "image.verify.failed")
+    assert failed_event["metadata_json"]["summary"] == "manifest unknown"
+
+
 def test_run_worker_loop_polls_until_stopped():
     calls = {"count": 0}
     messages = []
@@ -529,7 +608,7 @@ def test_worker_refreshes_claim_during_processing(client):
 
     assert processed is not None
     assert processed.status == "running"
-    assert len(executor.claim_timestamps) == 6
+    assert len(executor.claim_timestamps) == 7
     assert all(timestamp is not None for timestamp in executor.claim_timestamps)
     assert executor.claim_timestamps == sorted(executor.claim_timestamps)
 
@@ -577,6 +656,9 @@ def test_long_running_worker_step_does_not_get_reclaimed(client, app):
 
         def push_image(self, deployment):
             return ExecutionResult("Push skipped")
+
+        def verify_image(self, deployment):
+            return ExecutionResult("Image verification skipped")
 
         def deploy(self, deployment):
             return ExecutionResult("Deployment simulated", service_url="https://long-running.local", deploy_target="long")

@@ -344,7 +344,11 @@ def test_kubernetes_executor_processes_mixed_env_sources_and_records_summary(cli
             repo_dir.mkdir(parents=True, exist_ok=True)
             (repo_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="clone ok\n", stderr="")
-        if args[:2] in (["docker", "build"], ["docker", "tag"], ["docker", "push"]):
+        if args[:2] in (["docker", "build"], ["docker", "tag"], ["docker", "push"]) or args[:3] == [
+            "docker",
+            "manifest",
+            "inspect",
+        ]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
         if args[:3] == ["kubectl", "--namespace", "default"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="kubectl ok\n", stderr="")
@@ -759,6 +763,8 @@ def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, t
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="tag ok\n", stderr="")
         if args[:2] == ["docker", "push"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="push ok\n", stderr="")
+        if args[:3] == ["docker", "manifest", "inspect"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="manifest ok\n", stderr="")
         if args[:3] == ["kubectl", "--namespace", "default"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="kubectl ok\n", stderr="")
         raise AssertionError(f"Unexpected command: {args}")

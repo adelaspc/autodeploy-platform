@@ -440,9 +440,12 @@ newgrp microk8s
 Check:
 
 - the pushed `image_ref` in the deployment summary
+- the deployment event stream includes `image.verify_succeeded`
 - the Docker Hub repository exists under `CONTROL_PLANE_REGISTRY_NAMESPACE`
 - `CONTROL_PLANE_K8S_IMAGE_PULL_SECRET` is set before the deployment is created
 - the secret exists in the same namespace as the workload
+
+The worker verifies pushed registry images with `docker manifest inspect` before deployment. If `image.verify.failed` appears, fix registry/tag/auth state before investigating Kubernetes pod pull behavior.
 
 Create or replace a Docker Hub pull secret with:
 
