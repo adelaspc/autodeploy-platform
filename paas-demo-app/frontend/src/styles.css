@@ -375,6 +375,88 @@ small {
   margin-bottom: 16px;
 }
 
+.diagnostics-summary {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  border-left: 3px solid #4d6f61;
+  background: #0b1714;
+  padding: 12px 14px;
+}
+
+.diagnostics-summary[data-stage="helm"],
+.diagnostics-summary[data-stage="preflight"],
+.diagnostics-summary[data-stage="manifest_apply"],
+.diagnostics-summary[data-stage="rollout"],
+.diagnostics-summary[data-stage="healthcheck"] {
+  border-left-color: #e7c86a;
+}
+
+.diagnostics-summary span,
+.diagnostics-list span {
+  color: #90aa9e;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.diagnostics-summary strong,
+.diagnostics-list strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.diagnostics-section {
+  border-top: 1px solid #1d302a;
+  padding-top: 14px;
+}
+
+.diagnostics-section h2 {
+  margin-bottom: 4px;
+  font-size: 16px;
+}
+
+.diagnostics-fields .metric-row {
+  grid-template-columns: 130px minmax(0, 1fr);
+}
+
+.diagnostics-list {
+  display: grid;
+  gap: 6px;
+  padding: 12px 0;
+  border-bottom: 1px solid #16231f;
+}
+
+.diagnostics-snippet {
+  min-height: 0;
+  max-height: 220px;
+  margin-top: 12px;
+  border: 1px solid #1d302a;
+  background: #06100d;
+  padding: 12px;
+}
+
+.diagnostics-raw {
+  margin-top: 14px;
+}
+
+.diagnostics-raw summary {
+  cursor: pointer;
+  color: #90aa9e;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.diagnostics-raw pre {
+  margin-top: 10px;
+}
+
 .diagnostics-placeholder {
   margin: 14px 0 0;
 }
@@ -385,6 +467,7 @@ small {
   .workspace,
   .details-grid,
   .log-grid,
+  .diagnostics-grid,
   .deploy-form,
   .project-form {
     grid-template-columns: 1fr;
