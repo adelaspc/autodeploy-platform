@@ -376,6 +376,9 @@ def test_platform_health_check_reports_api_auth_posture(client, app):
     app.config["CONTROL_PLANE_API_TOKEN_READ_ONLY"] = "read-token"
     app.config["CONTROL_PLANE_API_TOKEN_DEPLOYER"] = "deployer-token"
     app.config["CONTROL_PLANE_API_TOKEN_ADMIN"] = "admin-token"
+    app.config["CONTROL_PLANE_API_TOKENS_JSON"] = json.dumps(
+        [{"name": "ops-admin", "role": "admin", "token": "json-admin-token"}]
+    )
 
     response = client.get("/health/platform", headers={"Authorization": "Bearer read-token"})
 
@@ -396,6 +399,8 @@ def test_platform_health_check_reports_api_auth_posture(client, app):
     assert "read-token" not in str(payload)
     assert "deployer-token" not in str(payload)
     assert "admin-token" not in str(payload)
+    assert "json-admin-token" not in str(payload)
+    assert "ops-admin" not in str(payload)
 
 
 def test_platform_activity_health_check_reports_recent_and_active_deployments(client, app):

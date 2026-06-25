@@ -1,6 +1,6 @@
 from sqlalchemy.orm import selectinload
 
-from backend.api.auth import CONFIG_KEY_BY_ROLE, api_auth_enabled
+from backend.api.auth import api_auth_enabled, configured_api_roles
 from backend.api.project_validation import (
     kubernetes_deployment_prereq_error,
     kubernetes_deployment_prereq_missing_settings,
@@ -47,11 +47,7 @@ def platform_status_payload():
     deployment_prereq_error = kubernetes_deployment_prereq_error()
     registry_enabled = bool(current_app.config.get("CONTROL_PLANE_REGISTRY_ENABLED", False))
     registry_missing = registry_missing_settings()
-    configured_roles = [
-        role
-        for role, config_key in CONFIG_KEY_BY_ROLE.items()
-        if isinstance(current_app.config.get(config_key), str) and current_app.config.get(config_key).strip()
-    ]
+    configured_roles = configured_api_roles()
 
     deployment_creation_ready = deployment_prereq_error is None
     status = "ok" if deployment_creation_ready else "degraded"
