@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, ref } from "vue";
 import { apiRequest, storeToken, storedToken } from "./api";
+import { buildDiagnosticsView } from "./diagnostics";
 
 const EMPTY_PROJECT_FORM = {
   name: "",
@@ -53,6 +54,7 @@ const latestDeployments = computed(() => projectActivity.value?.latest_deploymen
 const activeDeployment = computed(() => projectStatus.value?.active_deployment || null);
 const latestFailedDeployment = computed(() => projectStatus.value?.latest_failed_deployment || null);
 const latestDeployment = computed(() => projectStatus.value?.latest_deployment || null);
+const diagnosticsView = computed(() => buildDiagnosticsView(diagnostics.value));
 const deployButtonLabel = computed(() => (isDeploying.value ? "Queuing" : "Run deploy / test"));
 const projectSubmitLabel = computed(() => {
   if (isSavingProject.value) {
@@ -854,9 +856,59 @@ onMounted(initialize);
     <section v-if="diagnostics" class="panel diagnostics-panel">
       <div class="panel-head">
         <span>kubernetes diagnostics</span>
-        <span class="subtle">{{ diagnostics.failure_stage || "no failure" }}</span>
+        <span class="subtle">{{ diagnosticsView.stageLabel }}</span>
       </div>
-      <pre>{{ JSON.stringify(diagnostics, null, 2) }}</pre>
+      <div class="diagnostics-summary" :data-stage="diagnosticsView.stage || 'none'">
+        <span>{{ diagnosticsView.stageLabel }}</span>
+        <strong>{{ diagnosticsView.summary }}</strong>
+        <small>
+          {{ diagnosticsView.eventType }}
+          <template v-if="diagnosticsView.eventAt"> - {{ formatTime(diagnosticsView.eventAt) }}</template>
+        </small>
+      </div>
+
+      <div class="diagnostics-grid">
+        <article v-if="diagnosticsView.hasHelm" class="diagnostics-section">
+          <h2>Helm</h2>
+          <div v-if="diagnosticsView.helmFields.length" class="diagnostics-fields">
+            <div v-for="field in diagnosticsView.helmFields" :key="field.label" class="metric-row">
+              <span>{{ field.label }}</span>
+              <strong>{{ field.value }}</strong>
+            </div>
+          </div>
+          <p v-if="diagnosticsView.helmStderrSummary" class="alert compact">{{ diagnosticsView.helmStderrSummary }}</p>
+          <pre v-if="diagnosticsView.helmStdoutSummary" class="diagnostics-snippet">{{ diagnosticsView.helmStdoutSummary }}</pre>
+        </article>
+
+        <article v-if="diagnosticsView.hasResourceContext" class="diagnostics-section">
+          <h2>Kubernetes</h2>
+          <div v-if="diagnosticsView.resourceFields.length" class="diagnostics-fields">
+            <div v-for="field in diagnosticsView.resourceFields" :key="field.label" class="metric-row">
+              <span>{{ field.label }}</span>
+              <strong>{{ field.value }}</strong>
+            </div>
+          </div>
+          <div v-if="diagnosticsView.missingResources.length" class="diagnostics-list">
+            <span>Missing resources</span>
+            <strong>{{ diagnosticsView.missingResources.join(", ") }}</strong>
+          </div>
+          <div v-if="diagnosticsView.checkedResources.length" class="diagnostics-list">
+            <span>Checked resources</span>
+            <strong>{{ diagnosticsView.checkedResources.join(", ") }}</strong>
+          </div>
+          <div v-if="diagnosticsView.podNames.length" class="diagnostics-list">
+            <span>Pods</span>
+            <strong>{{ diagnosticsView.podNames.join(", ") }}</strong>
+          </div>
+          <pre v-if="diagnosticsView.podDescribeSummary" class="diagnostics-snippet">{{ diagnosticsView.podDescribeSummary }}</pre>
+          <pre v-if="diagnosticsView.podLogsSummary" class="diagnostics-snippet">{{ diagnosticsView.podLogsSummary }}</pre>
+        </article>
+      </div>
+
+      <details class="diagnostics-raw">
+        <summary>Raw diagnostics</summary>
+        <pre>{{ diagnosticsView.rawJson }}</pre>
+      </details>
     </section>
   </main>
 </template>
