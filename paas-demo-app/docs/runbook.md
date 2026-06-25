@@ -411,6 +411,99 @@ Check:
 - the kubeconfig Secret is mounted and `CONTROL_PLANE_KUBECONFIG` points at that file
 - referenced ConfigMaps and Secrets exist in the target namespace
 
+If the failure says the worker cannot find `kubectl`, remember that the worker executes a binary named `kubectl`. A shell alias such as `alias kubectl='microk8s kubectl'` is not visible to the worker. For local MicroK8s, create a wrapper:
+
+```bash
+sudo tee /usr/local/bin/kubectl >/dev/null <<'EOF'
+#!/bin/sh
+exec /snap/bin/microk8s kubectl "$@"
+EOF
+sudo chmod +x /usr/local/bin/kubectl
+```
+
+Then verify as the same user that runs the API and worker:
+
+```bash
+kubectl get nodes
+kubectl get secret dockerhub-pull -n default
+```
+
+If MicroK8s returns `access denied`, add the user to the `microk8s` group and open a fresh shell:
+
+```bash
+sudo usermod -a -G microk8s "$USER"
+newgrp microk8s
+```
+
+### `kubernetes` pods cannot pull private Docker Hub images
+
+Check:
+
+- the pushed `image_ref` in the deployment summary
+- the Docker Hub repository exists under `CONTROL_PLANE_REGISTRY_NAMESPACE`
+- `CONTROL_PLANE_K8S_IMAGE_PULL_SECRET` is set before the deployment is created
+- the secret exists in the same namespace as the workload
+
+Create or replace a Docker Hub pull secret with:
+
+```bash
+kubectl create secret docker-registry dockerhub-pull \
+  --docker-server=https://index.docker.io/v1/ \
+  --docker-username=<dockerhub-username> \
+  --docker-password=<dockerhub-token> \
+  --namespace default
+```
+
+Test private image pull through Kubernetes, not with `ctr`, because `ctr` does not automatically use Kubernetes `imagePullSecrets`:
+
+```bash
+kubectl run pull-test \
+  --image=docker.io/<namespace>/<repository>:<tag> \
+  --restart=Never \
+  --namespace default \
+  --overrides='{"spec":{"imagePullSecrets":[{"name":"dockerhub-pull"}]}}'
+
+kubectl describe pod pull-test -n default
+```
+
+### Helm deploy succeeds far enough to create a pod, but the pod restarts
+
+Check application logs first:
+
+```bash
+kubectl logs pod/<pod-name> -n default -c app --tail=100
+kubectl describe pod <pod-name> -n default
+```
+
+Common causes:
+
+- the app listens on a different port than the project `port`
+- the app listens on `127.0.0.1` instead of `0.0.0.0`
+- the project `healthcheck_path` does not return HTTP 200
+- required app environment variables are missing
+
+For the Deployment Notes sample app, add these project env vars for a local Kubernetes demo:
+
+```text
+DEPLOYMENT_NOTES_ENV=development
+DEPLOYMENT_NOTES_DATABASE_URL=sqlite:////tmp/deployment_notes.db
+DEPLOYMENT_NOTES_SERVE_FRONTEND=true
+```
+
+### Kubernetes diagnostics endpoint says the deployment is not Kubernetes
+
+Use the deployment row ID, not the Helm release suffix. Log paths include both IDs:
+
+```text
+/tmp/paas-workspaces/project-13/deployment-33/logs/...
+```
+
+The matching diagnostics request is:
+
+```bash
+curl http://127.0.0.1:5000/api/projects/13/deployments/33/kubernetes-diagnostics
+```
+
 ### Migrations fail on startup
 
 Check:

@@ -20,6 +20,21 @@ def configure_api_tokens(app):
     }
 
 
+def configure_api_tokens_json(app):
+    app.config["CONTROL_PLANE_API_TOKENS_JSON"] = json.dumps(
+        [
+            {"name": "ops-read", "role": "read_only", "token": "json-read-token"},
+            {"name": "ci-deployer", "role": "deployer", "token": "json-deployer-token"},
+            {"name": "break-glass-admin", "role": "admin", "token": "json-admin-token"},
+        ]
+    )
+    return {
+        "read_only": bearer_headers("json-read-token"),
+        "deployer": bearer_headers("json-deployer-token"),
+        "admin": bearer_headers("json-admin-token"),
+    }
+
+
 def create_project_payload(name="secured-app"):
     return {
         "name": name,
@@ -99,6 +114,51 @@ def test_protected_route_rejects_malformed_authorization_header(client, app):
         assert payload["error"] == "Malformed bearer token"
         assert payload["request_id"] == response.headers["X-Request-ID"]
         assert_bearer_challenge(response)
+
+
+def test_json_configured_tokens_can_authenticate_requests(client, app, monkeypatch):
+    headers = configure_api_tokens_json(app)
+
+    create_response = client.post("/api/projects", json=create_project_payload(name="json-auth-app"), headers=headers["admin"])
+    project_id = create_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
+    deploy_response = client.post(f"/api/projects/{project_id}/deploy", json={}, headers=headers["deployer"])
+    deployment_id = deploy_response.get_json()["deployment_id"]
+    read_response = client.get(
+        f"/api/projects/{project_id}/deployments/{deployment_id}/summary",
+        headers=headers["read_only"],
+    )
+    forbidden_response = client.patch(
+        f"/api/projects/{project_id}",
+        json={"branch": "release"},
+        headers=headers["deployer"],
+    )
+
+    assert create_response.status_code == 201
+    assert deploy_response.status_code == 201
+    assert read_response.status_code == 200
+    assert forbidden_response.status_code == 403
+
+
+def test_json_and_legacy_token_config_are_additive(client, app):
+    app.config["CONTROL_PLANE_API_TOKEN_ADMIN"] = "legacy-admin-token"
+    app.config["CONTROL_PLANE_API_TOKENS_JSON"] = json.dumps(
+        [{"name": "ops-read", "role": "read_only", "token": "json-read-token"}]
+    )
+
+    read_response = client.get("/health/platform", headers=bearer_headers("json-read-token"))
+    admin_response = client.post(
+        "/api/projects",
+        json=create_project_payload(name="mixed-token-config-app"),
+        headers=bearer_headers("legacy-admin-token"),
+    )
+
+    assert read_response.status_code == 200
+    assert read_response.get_json()["api_auth"]["configured_roles"] == ["read_only", "admin"]
+    assert admin_response.status_code == 201
 
 
 def test_read_only_token_can_access_protected_read_endpoints(client, app, monkeypatch):

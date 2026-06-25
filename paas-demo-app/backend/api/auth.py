@@ -1,4 +1,5 @@
 import hmac
+import json
 from dataclasses import dataclass
 from functools import wraps
 
@@ -32,13 +33,60 @@ class ApiPrincipal:
         return ROLE_LEVELS[self.role] >= ROLE_LEVELS[required_role]
 
 
+@dataclass(frozen=True)
+class ApiTokenConfig:
+    role: str
+    token: str
+    name: str | None = None
+
+
+def _normalize_json_token_entry(entry, index):
+    if not isinstance(entry, dict):
+        raise ValueError(f"API token entry {index + 1} must be an object")
+
+    role = entry.get("role")
+    token = entry.get("token")
+    name = entry.get("name")
+
+    if role not in ROLE_LEVELS:
+        raise ValueError(f"API token entry {index + 1} has an invalid role")
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError(f"API token entry {index + 1} must include a non-empty token")
+    if name is not None and not isinstance(name, str):
+        raise ValueError(f"API token entry {index + 1} name must be a string")
+
+    return ApiTokenConfig(role=role, token=token.strip(), name=name.strip() if isinstance(name, str) else None)
+
+
+def _json_configured_api_tokens():
+    raw_value = current_app.config.get("CONTROL_PLANE_API_TOKENS_JSON")
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return []
+
+    try:
+        parsed = json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("CONTROL_PLANE_API_TOKENS_JSON must be valid JSON") from exc
+
+    if not isinstance(parsed, list):
+        raise ValueError("CONTROL_PLANE_API_TOKENS_JSON must be a JSON array")
+
+    return [_normalize_json_token_entry(entry, index) for index, entry in enumerate(parsed)]
+
+
 def configured_api_tokens():
     configured = []
+    configured.extend(_json_configured_api_tokens())
     for role, config_key in CONFIG_KEY_BY_ROLE.items():
         token = current_app.config.get(config_key)
         if isinstance(token, str) and token.strip():
-            configured.append((role, token.strip()))
+            configured.append(ApiTokenConfig(role=role, token=token.strip(), name=config_key))
     return configured
+
+
+def configured_api_roles():
+    roles = {token_config.role for token_config in configured_api_tokens()}
+    return [role for role in ROLE_LEVELS if role in roles]
 
 
 def api_auth_enabled():
@@ -82,9 +130,9 @@ def _extract_bearer_token():
 
 
 def authenticate_bearer_token(token):
-    for role, configured_token in configured_api_tokens():
-        if hmac.compare_digest(token, configured_token):
-            return ApiPrincipal(role=role)
+    for token_config in configured_api_tokens():
+        if hmac.compare_digest(token, token_config.token):
+            return ApiPrincipal(role=token_config.role)
     return None
 
 

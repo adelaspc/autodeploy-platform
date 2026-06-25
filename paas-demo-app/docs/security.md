@@ -19,6 +19,19 @@ Current token environment variables:
 - `CONTROL_PLANE_API_TOKEN_READ_ONLY`
 - `CONTROL_PLANE_API_TOKEN_DEPLOYER`
 - `CONTROL_PLANE_API_TOKEN_ADMIN`
+- `CONTROL_PLANE_API_TOKENS_JSON`
+
+The role-specific variables are the simplest path when one token per role is enough. `CONTROL_PLANE_API_TOKENS_JSON` supports multiple named tokens:
+
+```json
+[
+  {"name": "ops-read", "role": "read_only", "token": "replace-me"},
+  {"name": "ci-deployer", "role": "deployer", "token": "replace-me"},
+  {"name": "break-glass-admin", "role": "admin", "token": "replace-me"}
+]
+```
+
+The JSON token list is additive with the role-specific variables. Token names are optional operator metadata and are not returned by health/readiness responses.
 
 If none of those variables are configured, bearer-token auth is disabled. That mode is intended only for local development and test workflows.
 
@@ -49,6 +62,7 @@ Webhook authentication is separate:
 ## Secret Handling Posture
 
 - API tokens are read from environment configuration.
+- API tokens can be configured either as one token per role or as a JSON list of named role tokens.
 - Git clone credentials for private repositories are also environment-backed.
 - The control plane compares API tokens using constant-time comparison.
 - Raw bearer tokens should not be logged.
