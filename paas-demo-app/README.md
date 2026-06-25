@@ -181,8 +181,21 @@ Configure any of these environment variables to enable API authentication:
 - `CONTROL_PLANE_API_TOKEN_READ_ONLY`
 - `CONTROL_PLANE_API_TOKEN_DEPLOYER`
 - `CONTROL_PLANE_API_TOKEN_ADMIN`
+- `CONTROL_PLANE_API_TOKENS_JSON`
 
 When no API token variables are configured, bearer-token auth is disabled. This is intended only for local development and test workflows.
+
+For a single token per role, use the role-specific variables. For multiple named tokens or cleaner Kubernetes Secret management, use `CONTROL_PLANE_API_TOKENS_JSON`:
+
+```json
+[
+  {"name": "ops-read", "role": "read_only", "token": "replace-me"},
+  {"name": "ci-deployer", "role": "deployer", "token": "replace-me"},
+  {"name": "break-glass-admin", "role": "admin", "token": "replace-me"}
+]
+```
+
+The JSON token list is additive with the role-specific variables. Supported roles are `read_only`, `deployer`, and `admin`. Token names are optional metadata for operators and must not contain secret material.
 
 Use the token as:
 
@@ -214,6 +227,7 @@ Authentication responses:
 Security notes and tradeoffs:
 
 - tokens are configured through environment variables rather than a user database or OAuth flow
+- `CONTROL_PLANE_API_TOKENS_JSON` supports multiple named tokens without changing the route authorization model
 - the control plane compares bearer tokens with constant-time comparison
 - route logic does not embed raw token values
 - the application does not log raw bearer tokens
@@ -753,7 +767,7 @@ The Kubernetes executor targets a local MicroK8s-style cluster through a kubecon
 ### Assumptions
 
 - MicroK8s is running locally
-- `kubectl` can reach the cluster using the configured kubeconfig
+- `kubectl` can reach the cluster using the configured kubeconfig from the same environment that runs the worker
 - the cluster can pull the pushed image from Docker Hub or another reachable registry
 - the application exposes a single HTTP port and a working healthcheck path
 
@@ -774,6 +788,26 @@ export CONTROL_PLANE_K8S_IMAGE_PULL_SECRET=<existing-kubernetes-secret-name>
 
 `CONTROL_PLANE_EXECUTOR=kubernetes` requires registry push to succeed before deploy. The Kubernetes executor deploys using `build.image_ref`, not the local image tag.
 
+For local MicroK8s installs, `microk8s kubectl` is not enough by itself because the worker executes a binary named `kubectl`. Shell aliases are not visible to the worker process. Expose MicroK8s kubectl as a real executable:
+
+```bash
+sudo tee /usr/local/bin/kubectl >/dev/null <<'EOF'
+#!/bin/sh
+exec /snap/bin/microk8s kubectl "$@"
+EOF
+sudo chmod +x /usr/local/bin/kubectl
+
+kubectl get nodes
+```
+
+If that returns `access denied`, allow the user that runs the API and worker to access MicroK8s, then start a fresh shell:
+
+```bash
+sudo usermod -a -G microk8s "$USER"
+newgrp microk8s
+kubectl get nodes
+```
+
 The control plane now rejects deployment creation up front when Kubernetes mode is selected but the required executor settings are incomplete. At minimum, deployment-creation paths require:
 
 - `CONTROL_PLANE_REGISTRY_ENABLED=true`
@@ -782,6 +816,30 @@ The control plane now rejects deployment creation up front when Kubernetes mode 
 - `CONTROL_PLANE_KUBECONFIG`
 
 If `CONTROL_PLANE_K8S_IMAGE_PULL_SECRET` is set, the Kubernetes executor adds that existing secret name under `imagePullSecrets` in the generated Pod spec. This is a reference only: the control plane does not create or manage the secret in this iteration.
+
+For private Docker Hub images, create the pull secret in the same namespace used by `CONTROL_PLANE_K8S_NAMESPACE`:
+
+```bash
+kubectl create secret docker-registry dockerhub-pull \
+  --docker-server=https://index.docker.io/v1/ \
+  --docker-username=<your-dockerhub-username> \
+  --docker-password=<your-dockerhub-token> \
+  --namespace default
+
+export CONTROL_PLANE_K8S_IMAGE_PULL_SECRET=dockerhub-pull
+```
+
+To verify a private image pull with the Kubernetes secret, use a pod-level test. `microk8s ctr images pull ...` does not use Kubernetes `imagePullSecrets` automatically:
+
+```bash
+kubectl run pull-test \
+  --image=docker.io/<namespace>/<repository>:<tag> \
+  --restart=Never \
+  --namespace default \
+  --overrides='{"spec":{"imagePullSecrets":[{"name":"dockerhub-pull"}]}}'
+
+kubectl describe pod pull-test --namespace default
+```
 
 Before `kubectl apply`, the Kubernetes executor now performs a read-only preflight check for:
 
@@ -821,6 +879,24 @@ curl -X POST http://127.0.0.1:5000/api/projects \
   }'
 ```
 
+The project name becomes part of the pushed image reference. With `CONTROL_PLANE_REGISTRY_URL=docker.io`, `CONTROL_PLANE_REGISTRY_NAMESPACE=<namespace>`, and project name `microk8s-app`, the worker pushes:
+
+```text
+docker.io/<namespace>/microk8s-app:<commit-sha>
+```
+
+Make sure that Docker Hub repository exists, or that the configured token can create/push to it.
+
+For the Deployment Notes sample app, the Kubernetes demo needs these project env vars so the container can boot:
+
+```json
+[
+  {"name": "DEPLOYMENT_NOTES_ENV", "value_source": "literal", "value": "development"},
+  {"name": "DEPLOYMENT_NOTES_DATABASE_URL", "value_source": "literal", "value": "sqlite:////tmp/deployment_notes.db"},
+  {"name": "DEPLOYMENT_NOTES_SERVE_FRONTEND", "value_source": "literal", "value": "true"}
+]
+```
+
 If a Kubernetes deployment needs environment variables from existing cluster resources, use the project `env_vars` field with one of these shapes:
 
 - literal value:
@@ -848,6 +924,17 @@ In this iteration, the control plane:
 - does not create Secrets
 - may store secret literal values for local-style execution, but masks them on read
 - assumes referenced Kubernetes resources already exist
+
+When checking diagnostics by API, use the deployment row ID, not the Helm release suffix. A log path like `/tmp/paas-workspaces/project-13/deployment-33/logs/...` maps to:
+
+- project ID: `13`
+- deployment ID: `33`
+
+The diagnostics URL for that example is:
+
+```bash
+curl http://127.0.0.1:5000/api/projects/13/deployments/33/kubernetes-diagnostics
+```
 
 ### Trigger a Deployment
 
