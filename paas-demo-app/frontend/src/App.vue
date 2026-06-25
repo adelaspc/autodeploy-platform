@@ -53,6 +53,20 @@ const latestDeployments = computed(() => projectActivity.value?.latest_deploymen
 const activeDeployment = computed(() => projectStatus.value?.active_deployment || null);
 const latestFailedDeployment = computed(() => projectStatus.value?.latest_failed_deployment || null);
 const latestDeployment = computed(() => projectStatus.value?.latest_deployment || null);
+const showKubernetesDiagnosticsPendingMessage = computed(() => {
+  if (!deploymentSummary.value || diagnostics.value) {
+    return false;
+  }
+  if (deploymentSummary.value.deploy_target === "kubernetes") {
+    return true;
+  }
+  return (
+    platformHealth.value?.executor === "kubernetes" &&
+    ["pending", "cloning", "building", "testing", "pushing_image", "deploying"].includes(
+      deploymentSummary.value.deployment_status,
+    )
+  );
+});
 const deployButtonLabel = computed(() => (isDeploying.value ? "Queuing" : "Run deploy / test"));
 const projectSubmitLabel = computed(() => {
   if (isSavingProject.value) {
@@ -857,6 +871,13 @@ onMounted(initialize);
         <span class="subtle">{{ diagnostics.failure_stage || "no failure" }}</span>
       </div>
       <pre>{{ JSON.stringify(diagnostics, null, 2) }}</pre>
+    </section>
+    <section v-else-if="showKubernetesDiagnosticsPendingMessage" class="panel diagnostics-panel">
+      <div class="panel-head">
+        <span>kubernetes diagnostics</span>
+        <span class="subtle">pending</span>
+      </div>
+      <p class="muted diagnostics-placeholder">Kubernetes diagnostics will appear after the deploy phase starts.</p>
     </section>
   </main>
 </template>
