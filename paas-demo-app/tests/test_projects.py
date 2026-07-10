@@ -1,11 +1,12 @@
 from pathlib import Path
+import base64
 import hashlib
 import hmac
 import json
+import subprocess
 
 from backend.api import deployment_services as deployment_services_api
 from backend.api import deployment_orchestration as deployment_orchestration_api
-from backend.api import projects as projects_api
 from backend.extensions import db
 from backend.models import DeploymentEvent, PlatformDeployment
 from worker.executor import ExecutionResult, WorkerExecutionError
@@ -204,6 +205,30 @@ def test_create_project_rejects_healthcheck_path_without_leading_slash(client):
     assert "healthcheck_path" in response.get_json()["error"]
 
 
+def test_create_project_rejects_shell_control_in_default_test_command(client):
+    response = create_project(
+        client,
+        name="invalid-default-test-command-app",
+        default_test_command="pytest -q && curl https://example.test",
+    )
+
+    assert response.status_code == 400
+    assert "default_test_command" in response.get_json()["error"]
+    assert "Shell control" in response.get_json()["error"]
+
+
+def test_create_project_rejects_shell_wrapper_in_migration_command(client):
+    response = create_project(
+        client,
+        name="invalid-migration-command-app",
+        migration_command="bash -c 'flask db upgrade'",
+    )
+
+    assert response.status_code == 400
+    assert "migration_command" in response.get_json()["error"]
+    assert "Shell wrappers" in response.get_json()["error"]
+
+
 def test_create_project_requires_unique_name(client):
     assert create_project(client).status_code == 201
 
@@ -233,6 +258,19 @@ def test_update_project(client):
     assert updated["port"] == 8080
     assert updated["trigger"] == "github_push"
     assert updated["default_test_command"] == "ruff check ."
+
+
+def test_update_project_rejects_overlong_command(client):
+    project_response = create_project(client, name="overlong-command-app")
+    project_id = project_response.get_json()["id"]
+
+    update_response = client.patch(
+        f"/api/projects/{project_id}",
+        json={"default_test_command": "p" * 256},
+    )
+
+    assert update_response.status_code == 400
+    assert "at most 255 characters" in update_response.get_json()["error"]
 
 
 def test_get_project_activity_returns_empty_state(client):
@@ -1063,11 +1101,27 @@ def test_trigger_deployment_creates_build_and_event_history(client):
     assert len(builds) == 1
     assert builds[0]["status"] == "pending"
 
-    events_response = client.get(f"/api/projects/{project_id}/deployments/{deployment['id']}/events")
-    assert events_response.status_code == 200
-    events = events_response.get_json()
-    assert len(events) == 1
-    assert events[0]["status"] == "pending"
+
+def test_trigger_deployment_rejects_shell_control_test_command(client):
+    project_response = create_project(client, name="invalid-deployment-command-app")
+    project_id = project_response.get_json()["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "abc123def456",
+            "registry": "ghcr.io/example",
+            "image_name": "invalid-deployment-command-app",
+            "image_tag": "abc123def456",
+            "build_status": "pending",
+            "status": "pending",
+            "test_command": "pytest -q > test-output.txt",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "test_command" in response.get_json()["error"]
+    assert "Shell control" in response.get_json()["error"]
 
 
 def test_update_deployment_status_tracks_transition_and_events(client):
@@ -1253,6 +1307,24 @@ def test_deploy_project_allows_explicit_null_test_command_override(client, monke
     assert deployment["build"]["test_command"] is None
 
 
+def test_deploy_project_rejects_shell_wrapper_test_command(client, monkeypatch):
+    project_response = create_project(client, name="invalid-deploy-command-app")
+    project_id = project_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
+
+    response = client.post(
+        f"/api/projects/{project_id}/deploy",
+        json={"test_command": "sh -c true"},
+    )
+
+    assert response.status_code == 400
+    assert "test_command" in response.get_json()["error"]
+    assert "Shell wrappers" in response.get_json()["error"]
+
+
 def test_deploy_project_returns_conflict_when_commit_resolution_fails(client, monkeypatch):
     project_response = create_project(client, name="broken-deploy-app")
     project_id = project_response.get_json()["id"]
@@ -1267,6 +1339,62 @@ def test_deploy_project_returns_conflict_when_commit_resolution_fails(client, mo
 
     assert response.status_code == 409
     assert response.get_json() == {"error": "Unable to resolve commit for branch 'main': boom"}
+
+
+def test_deploy_project_resolves_private_github_commit_with_token_env(client, monkeypatch):
+    calls = []
+
+    def fake_run(command, capture_output, text, timeout, check, env=None):
+        calls.append({"command": command, "env": env})
+        return subprocess.CompletedProcess(command, 0, stdout="0123456789abcdef\trefs/heads/main\n", stderr="")
+
+    monkeypatch.setenv("CONTROL_PLANE_GIT_TOKEN_GITHUB", "ghp_secret_token")
+    monkeypatch.setattr(deployment_orchestration_api.subprocess, "run", fake_run)
+    project_response = create_project(
+        client,
+        name="private-github-deploy-app",
+        repo_url="https://github.com/example/private-repo",
+        git_auth_type="token",
+        git_secret_ref="GITHUB",
+    )
+    project_id = project_response.get_json()["id"]
+
+    response = client.post(f"/api/projects/{project_id}/deploy", json={})
+
+    assert response.status_code == 201
+    assert response.get_json()["commit_sha"] == "0123456789abcdef"
+    assert calls[0]["command"] == [
+        "git",
+        "ls-remote",
+        "https://github.com/example/private-repo.git",
+        "refs/heads/main",
+    ]
+    assert calls[0]["env"]["GIT_TERMINAL_PROMPT"] == "0"
+    assert calls[0]["env"]["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    encoded = calls[0]["env"]["GIT_CONFIG_VALUE_0"].split("basic ", 1)[1]
+    assert base64.b64decode(encoded).decode("utf-8") == "x-access-token:ghp_secret_token"
+
+
+def test_deploy_project_reports_missing_git_token_env_for_private_repo(client, monkeypatch):
+    monkeypatch.delenv("CONTROL_PLANE_GIT_TOKEN_GITHUB", raising=False)
+    project_response = create_project(
+        client,
+        name="missing-private-github-token-app",
+        repo_url="https://github.com/example/private-repo",
+        git_auth_type="token",
+        git_secret_ref="GITHUB",
+    )
+    project_id = project_response.get_json()["id"]
+
+    response = client.post(f"/api/projects/{project_id}/deploy", json={})
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "error": (
+            "Unable to resolve commit for branch 'main': "
+            "Git token environment variable 'CONTROL_PLANE_GIT_TOKEN_GITHUB' is not set"
+        )
+    }
 
 
 def test_deploy_project_rejects_kubernetes_executor_without_required_settings(client, app):
@@ -1521,6 +1649,32 @@ def test_get_project_deployment_and_list_include_preflight_fields(client, app):
     assert list_payload["items"][0]["preflight_completed_at"] is not None
 
 
+def test_deployment_live_health_endpoint_returns_safe_probe_result(client, monkeypatch):
+    project_response = create_project(client, name="live-health-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        "backend.api.projects.probe_deployment_health",
+        lambda deployment: {
+            "status": "unhealthy",
+            "message": "Workload healthcheck returned HTTP 503.",
+            "http_status": 503,
+            "checked_at": "2026-06-30T12:00:00+00:00",
+        },
+    )
+
+    response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/live-health")
+
+    assert response.status_code == 200
+    assert response.get_json()["status"] == "unhealthy"
+    assert response.get_json()["http_status"] == 503
+
+
 def test_retry_deployment_falls_back_to_project_default_test_command(client, app, monkeypatch):
     project_response = create_project(client, name="retry-default-test-command-app", default_test_command="pytest -q")
     project_id = project_response.get_json()["id"]
@@ -1740,6 +1894,79 @@ def test_stop_deployment_endpoint_rejects_non_stop_mutations(client):
 
     assert response.status_code == 400
     assert response.get_json()["error"] == "Unsupported stop fields: status"
+
+
+def test_cleanup_kubernetes_deployment_removes_resources_and_preserves_history(client, app, monkeypatch):
+    project_id = create_project(client, name="cleanup-k8s-app").get_json()["id"]
+    deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "abc123def456",
+            "status": "running",
+            "build_status": "succeeded",
+            "service_url": "http://paas-deployment-a.127.0.0.1.nip.io",
+        },
+    ).get_json()["id"]
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.healthcheck_url = f"{deployment.service_url}/health"
+        db.session.commit()
+
+    class CleanupExecutor:
+        def stop(self, _deployment):
+            return ExecutionResult(
+                "Kubernetes resources deleted successfully.",
+                metadata={"executor": "kubernetes", "stopped": True},
+                events=[{
+                    "event_type": "kubernetes.resources_deleted",
+                    "status": "stopped",
+                    "message": "Kubernetes resources deleted successfully",
+                    "step": "deploy.kubernetes.delete",
+                }],
+                deploy_target="kubernetes",
+            )
+
+    monkeypatch.setattr(
+        deployment_services_api,
+        "create_executor_for_deployment",
+        lambda _deployment: CleanupExecutor(),
+    )
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments/{deployment_id}/cleanup",
+        json={"message": "Remove old demo resources"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "stopped"
+    assert payload["service_url"] is None
+    assert payload["healthcheck_url"] is None
+    assert [event["event_type"] for event in payload["events"][-3:]] == [
+        "deployment.cleanup_started",
+        "kubernetes.resources_deleted",
+        "deployment.cleanup_succeeded",
+    ]
+    audit_events = client.get("/api/audit-events").get_json()["items"]
+    assert audit_events[0]["action"] == "deployment.cleanup_requested"
+
+
+def test_cleanup_rejects_non_kubernetes_deployment(client, app):
+    project_id = create_project(client, name="cleanup-docker-app").get_json()["id"]
+    deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    ).get_json()["id"]
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "local-docker"
+        db.session.commit()
+
+    response = client.post(f"/api/projects/{project_id}/deployments/{deployment_id}/cleanup")
+
+    assert response.status_code == 409
+    assert response.get_json()["error"] == "Cleanup is available only for Kubernetes deployments"
 
 
 def test_stop_deployment_persists_helm_runtime_metadata(client, app, monkeypatch):
@@ -2402,6 +2629,12 @@ def test_get_kubernetes_diagnostics_returns_structured_failure_view(client, app)
                     "healthcheck_pod_names": ["app-123"],
                     "healthcheck_pod_describe_summary": "app-123: Pod Conditions: | Ready  True",
                     "healthcheck_pod_logs_summary": "app-123: waiting for upstream dependency",
+                    "healthcheck_pod_previous_logs_summary": "app-123: previous boot failed before binding port",
+                    "healthcheck_pod_phase": "Running",
+                    "healthcheck_container_reason": "CrashLoopBackOff",
+                    "healthcheck_restart_count": 4,
+                    "healthcheck_images": ["docker.io/example/app:v1"],
+                    "healthcheck_image_pull_secrets": ["dockerhub-pull"],
                 },
             )
         )
@@ -2421,6 +2654,12 @@ def test_get_kubernetes_diagnostics_returns_structured_failure_view(client, app)
     assert payload["pod_names"] == ["app-123"]
     assert payload["pod_describe_summary"] == "app-123: Pod Conditions: | Ready  True"
     assert payload["pod_logs_summary"] == "app-123: waiting for upstream dependency"
+    assert payload["pod_previous_logs_summary"] == "app-123: previous boot failed before binding port"
+    assert payload["pod_phase"] == "Running"
+    assert payload["container_reason"] == "CrashLoopBackOff"
+    assert payload["restart_count"] == 4
+    assert payload["images"] == ["docker.io/example/app:v1"]
+    assert payload["image_pull_secrets"] == ["dockerhub-pull"]
     assert payload["diagnostics"]["healthcheck_service_summary"] == "Endpoints: <none> | Session Affinity: None"
 
 

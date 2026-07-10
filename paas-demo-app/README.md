@@ -12,6 +12,7 @@ paas-demo-app/
 ├── migrations/
 ├── tests/
 ├── docs/
+├── demo-app/              # temporary reference workload; will move to its own repository
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -22,6 +23,7 @@ Additional reference:
 
 - [Security Notes](docs/security.md)
 - [Operations Runbook](docs/runbook.md)
+- [Portfolio Demo Script](docs/demo-script.md)
 
 ## Local Quality Commands
 
@@ -31,16 +33,42 @@ Install runtime and CI/dev dependencies:
 .venv/bin/python -m pip install -r requirements-dev.txt
 ```
 
+`requirements.txt` contains pinned runtime dependencies used by the control-plane image. `requirements-dev.txt` includes those runtime pins plus pinned local/CI tooling such as pytest, Ruff, Bandit, pip-audit, and PyYAML.
+
+Create local ignored environment profiles:
+
+```bash
+make env-init
+```
+
+The committed `.env*.example` files contain configuration templates only. Put passwords, API tokens, registry credentials, and Git tokens in the ignored `.env.secrets`; `make env-init` creates missing local files without overwriting existing ones.
+
+The Makefile loads `.env.<profile>` together with `.env.secrets` for runtime commands. Common profiles are:
+
+- `PROFILE=demo`: fake executor, no real infrastructure required
+- `PROFILE=local-docker`: local Docker executor
+- `PROFILE=local-kubernetes`: local Kubernetes or Helm executor
+
+Examples:
+
+```bash
+make api PROFILE=demo
+make worker-once PROFILE=local-kubernetes
+make k8s-demo-check PROFILE=local-kubernetes
+make compose-up PROFILE=local-docker
+make health-platform PROFILE=local-kubernetes
+```
+
 Run the full backend test suite:
 
 ```bash
-.venv/bin/python -m pytest
+make test
 ```
 
 Run lint checks:
 
 ```bash
-.venv/bin/ruff check backend worker wsgi.py
+make lint
 ```
 
 Run the operator frontend locally:
@@ -72,6 +100,9 @@ Current UI scope:
 - default test command configuration
 - deploy/test trigger, retry, redeploy, and stop actions
 - deployment summary, events, build logs, runtime logs, and Kubernetes diagnostics
+- live HTTP health monitoring for the selected public workload and explicit Kubernetes resource cleanup
+- first-class pod phase, container reason, restart count, image, and imagePullSecrets diagnostics
+- copy/download JSON diagnostic bundles containing the selected deployment context, events, and loaded logs
 
 Run security checks:
 
@@ -86,6 +117,7 @@ Validate that migrations apply cleanly:
 mkdir -p instance
 rm -f instance/ci-control-plane.db
 CONTROL_PLANE_ENV=development \
+CONTROL_PLANE_ALLOW_AUTH_DISABLED=true \
 CONTROL_PLANE_DATABASE_URL="sqlite:////$(pwd)/instance/ci-control-plane.db" \
 .venv/bin/python -m flask --app wsgi:app db upgrade
 ```
@@ -99,7 +131,7 @@ docker build --tag paas-control-plane:local .
 Validate the deployment assets:
 
 ```bash
-docker compose config
+make compose-config PROFILE=demo
 helm template ci ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-control-plane/values.ci.yaml > /dev/null
 helm template local ./deploy/helm/paas-control-plane -f ./deploy/helm/paas-control-plane/values.local-microk8s.yaml > /dev/null
 helm lint ./deploy/helm/generic-web-app
@@ -115,16 +147,28 @@ helm template generic-python ./deploy/helm/generic-web-app -f ./deploy/helm/gene
 - `GET /health/db`
 - `GET /health/platform`
 - `GET /health/activity`
+- `GET /health/observability`
 - `GET /api/audit-events`
 - `GET/POST/PATCH/DELETE /api/projects`
+- `GET /api/projects/<id>`
+- `GET /api/projects/<id>/status`
 - `GET /api/projects/<id>/activity`
 - `GET /api/projects/<id>/builds`
 - `GET /api/projects/<id>/deployments`
-- `GET/POST/PATCH /api/projects/<id>/deployments`
+- `GET/POST /api/projects/<id>/deployments`
+- `GET /api/projects/<id>/deployments/latest`
+- `POST /api/projects/<id>/deploy`
+- `POST /api/projects/<id>/redeploy`
+- `POST /api/projects/<id>/deployments/<deployment_id>/retry`
+- `GET /api/projects/<id>/deployments/<deployment_id>`
+- `PATCH /api/projects/<id>/deployments/<deployment_id>`
 - `POST /api/projects/<id>/deployments/<deployment_id>/stop`
+- `POST /api/projects/<id>/deployments/<deployment_id>/cleanup`
 - `GET /api/projects/<id>/deployments/<deployment_id>/summary`
+- `GET /api/projects/<id>/deployments/<deployment_id>/live-health`
 - `GET /api/projects/<id>/deployments/<deployment_id>/kubernetes-diagnostics`
 - `GET /api/projects/<id>/deployments/<deployment_id>/events`
+- `GET /api/projects/<id>/deployments/<deployment_id>/build-log`
 - `GET /api/projects/<id>/deployments/<deployment_id>/runtime-log`
 - `POST /api/webhooks/github`
 - `python -m flask --app wsgi:app run-worker-once`
@@ -141,6 +185,10 @@ The repository now includes two operator-facing deployment paths:
 - a stack-agnostic generic web app Helm chart that documents the intended user workload abstraction
 
 Local startup, Kubernetes rollout, migration flow, required config/secrets, health endpoints, and troubleshooting are documented in [docs/runbook.md](docs/runbook.md).
+
+Docker socket access is treated as a trusted local-demo boundary. Compose does not mount `/var/run/docker.sock` by default; the `local-docker` and `local-kubernetes` profiles enable the dedicated `docker-compose.docker-socket.yml` override through `CONTROL_PLANE_COMPOSE_DOCKER_SOCKET_ENABLED=true`. The base control-plane Helm chart also keeps the socket disabled by default; do not use Docker-socket-backed builds with untrusted repositories or workloads.
+
+Configured commands such as `default_test_command`, deployment `test_command`, and `migration_command` are parsed as direct argv-style commands, not shell snippets. Simple commands such as `pytest -q`, `python -m pytest`, `python -m py_compile server.py`, `npm test`, and `ruff check .` are accepted. Shell wrappers and shell control syntax such as `sh -c`, `bash -c`, `&&`, `||`, `|`, redirection, backticks, and subshells are rejected at the API boundary and checked again by the worker.
 
 ## Database
 
@@ -183,7 +231,7 @@ Configure any of these environment variables to enable API authentication:
 - `CONTROL_PLANE_API_TOKEN_ADMIN`
 - `CONTROL_PLANE_API_TOKENS_JSON`
 
-When no API token variables are configured, bearer-token auth is disabled. This is intended only for local development and test workflows.
+When no API token variables are configured, the app fails fast unless auth-disabled mode is explicitly opted into with `CONTROL_PLANE_ALLOW_AUTH_DISABLED=true` in a local environment (`CONTROL_PLANE_ENV=development`, `local`, or `test`). This keeps local demos simple without making production-like config fail open.
 
 For a single token per role, use the role-specific variables. For multiple named tokens or cleaner Kubernetes Secret management, use `CONTROL_PLANE_API_TOKENS_JSON`:
 
@@ -205,7 +253,7 @@ Authorization: Bearer <token>
 
 Role matrix:
 
-- `read_only`: read/list/show routes, logs, summaries, diagnostics, `/health/db`, `/health/platform`, and `/health/activity`
+- `read_only`: read/list/show routes, logs, summaries, diagnostics, audit events, `/health/db`, `/health/platform`, `/health/activity`, and `/health/observability`
 - `deployer`: everything in `read_only` plus deploy, retry, redeploy, and dedicated stop actions
 - `admin`: everything in `deployer` plus project create/update/delete, manual deployment record creation, and generic deployment patch operations
 
@@ -292,6 +340,43 @@ Behavior:
 
 This is intentionally lightweight request correlation for operator workflows. It is not distributed tracing and does not introduce spans, trace propagation, or tracing infrastructure.
 
+## Observability
+
+The control plane exposes a deliberately small observability surface instead of bundling a full monitoring stack:
+
+- structured JSON application logs on stdout for the API, worker, and reconciler
+- request completion logs with `request_id`, HTTP method, path, status, and `duration_ms`
+- health and readiness endpoints described below
+- persisted deployment events, audit records, build/runtime logs, and Kubernetes diagnostics
+- an optional Prometheus-compatible `GET /metrics` endpoint
+
+Metrics are disabled by default. Enable and protect the endpoint with a dedicated token:
+
+```env
+CONTROL_PLANE_METRICS_ENABLED=true
+CONTROL_PLANE_METRICS_TOKEN=replace-with-a-dedicated-secret
+```
+
+Keep `CONTROL_PLANE_METRICS_TOKEN` in `.env.secrets` or a Kubernetes Secret. Scrape the endpoint with:
+
+```bash
+curl -H "Authorization: Bearer ${CONTROL_PLANE_METRICS_TOKEN}" http://127.0.0.1:5000/metrics
+```
+
+When disabled, `/metrics` returns `404`. When enabled, it requires the dedicated bearer token and returns `401` for missing or invalid credentials. The metrics token is separate from operator API tokens.
+
+The endpoint exports aggregate deployment, build, webhook, event, worker-claim, and latest-deployment-update metrics. Labels are restricted to bounded values such as status, result, and level. It intentionally does not expose request IDs, project/deployment IDs, application or repository names, branches, users, image tags, or error messages as Prometheus labels.
+
+For the selected running deployment, the operator UI polls the protected `live-health` endpoint every two seconds. The control-plane API checks the workload's recorded public URL plus its configured healthcheck path and reports the real HTTP result. This transient signal does not mutate deployment lifecycle history: Kubernetes Pod replacement can appear as `unhealthy` and recover to `healthy` while the deployment remains `running`.
+
+`CONTROL_PLANE_LOG_FORMAT=json` is the default. Set it to `text` only when plain Flask/Gunicorn application log formatting is preferred locally.
+
+## Reference Workload
+
+The temporary [`demo-app/`](demo-app/) directory contains Deployment Lab, a stateless Flask + Vue workload designed for the portfolio walkthrough. Its UI is a read-only deployment receipt showing release identity, environment, hostname/Pod, uptime, injected public configuration, secret presence, and controlled failure posture.
+
+The workload supports happy-path, config update, slow startup, healthcheck failure, API latency, CrashLoopBackOff, secret reference, and Pod self-healing demonstrations. It deliberately does not reproduce control-plane events, metrics, or Kubernetes state inside the workload. `demo-app/` will move to a separate repository after its contract is stable.
+
 ## Secret Handling
 
 The control plane now distinguishes normal project configuration from secret-bearing configuration in `env_vars`.
@@ -360,11 +445,12 @@ Current tradeoffs:
 - `pip-audit` is non-blocking because advisory data changes outside the repo and the dependency set is still relatively lightweight
 - `bandit` skips a small set of subprocess and workspace-path heuristics because this control plane intentionally orchestrates external tools such as `git`, `docker`, and `kubectl`, and uses an explicit workspace root under operator control
 - mypy is not enforced yet because the codebase does not have a clean typing baseline, and adding it now would create more noise than signal
+- direct runtime and dev dependencies are pinned, but transitive dependencies are resolved by pip rather than committed as a full lock file
 
 Future hardening options:
 
 - add a typed baseline and introduce mypy incrementally
-- pin direct dependencies more tightly to make dependency-audit results more stable
+- add a generated lock file or constraints file if the project needs stricter supply-chain reproducibility later
 - split fast PR checks from slower scheduled security checks if CI time grows
 - add image scanning or SBOM generation when the project is ready for a stronger supply-chain story
 
@@ -419,7 +505,7 @@ For a quick operator-facing config summary, `GET /health/platform` reports:
 - registry config readiness at the config level
 - Kubernetes deployment prereq readiness at the config level
 
-This endpoint is intentionally config-only. It does not perform live Docker, registry, database, or Kubernetes API checks beyond the separate `/health/db` probe.
+This endpoint is intentionally config-only. It does not perform live Docker, registry, database, or Kubernetes API checks beyond the separate `/health/db` probe. `/health/db` returns only safe reachability status and a stable error code; raw database driver details are kept in API logs.
 
 For a quick operator-facing activity view, `GET /health/activity` reports:
 
@@ -461,7 +547,7 @@ The worker supports two executor modes:
 
 - `fake`: default, test-friendly executor with simulated infrastructure behavior
 - `local-docker`: clones a Git repository into a local workspace, builds a Docker image, optionally runs tests in the built image, optionally tags and pushes to a registry, starts a local container, and waits for the configured healthcheck to succeed
-- `kubernetes`: clones a Git repository into a local workspace, builds a Docker image, optionally runs tests, tags and pushes the image to a registry, applies a minimal Kubernetes Deployment and Service, waits for rollout, and then healthchecks the app through a temporary `kubectl port-forward`
+- `kubernetes`: clones a Git repository into a local workspace, builds a Docker image, optionally runs tests, tags and pushes the image to a registry, applies Kubernetes runtime resources, waits for rollout, and then healthchecks the app through a temporary `kubectl port-forward`. In manifest mode the managed runtime resources are Deployment, Service, and optional Ingress; in Helm mode the managed runtime is the generated Helm release.
 
 Useful settings:
 
@@ -477,11 +563,18 @@ Useful settings:
 - `CONTROL_PLANE_API_TOKEN_READ_ONLY`
 - `CONTROL_PLANE_API_TOKEN_DEPLOYER`
 - `CONTROL_PLANE_API_TOKEN_ADMIN`
+- `CONTROL_PLANE_ALLOW_AUTH_DISABLED`
 - `CONTROL_PLANE_GITHUB_WEBHOOK_SECRET`
 - `CONTROL_PLANE_KUBECONFIG`
 - `CONTROL_PLANE_K8S_NAMESPACE`
 - `CONTROL_PLANE_K8S_IMAGE_PULL_SECRET`
 - `CONTROL_PLANE_K8S_DEPLOYMENT_MODE`
+- `CONTROL_PLANE_K8S_HELM_CHART_PATH`
+- `CONTROL_PLANE_K8S_HELM_BINARY`
+- `CONTROL_PLANE_K8S_HELM_TIMEOUT`
+- `CONTROL_PLANE_K8S_INGRESS_ENABLED`
+- `CONTROL_PLANE_K8S_INGRESS_CLASS_NAME`
+- `CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN`
 - `CONTROL_PLANE_DEPLOY_HOST`
 - `CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS`
 - `CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS`
@@ -500,7 +593,7 @@ When registry support is enabled, the build and publish flow is:
 - test local image
 - tag local image for the registry
 - push registry image
-- verify the pushed registry image with `docker manifest inspect`
+- verify the pushed registry image with `docker buildx imagetools inspect`
 
 The final deploy step depends on the executor:
 
@@ -518,10 +611,11 @@ The Kubernetes executor is intentionally narrow in this iteration:
 - healthcheck via temporary `kubectl port-forward`
 - minimal stop support through resource deletion
 - optional env var injection from existing ConfigMaps and Secrets
+- namespace-scoped, least-privilege RBAC for manifest mode; Helm release Secret mutation is explicit opt-in through `rbac.helmReleaseStorage`
 
 Not included yet:
 
-- ingress
+- advanced ingress automation
 - cert-manager
 - autoscaling
 - namespaces per app
@@ -676,9 +770,10 @@ git commit -m "init local docker app"
 2. Start the control plane with the local Docker executor:
 
 ```bash
-cd /home/adela/autodeploy-platform/paas-demo-app
+cd /path/to/paas-demo-app
 unset CONTROL_PLANE_DATABASE_URL DATABASE_URL APP_ENV
 export CONTROL_PLANE_ENV=development
+export CONTROL_PLANE_ALLOW_AUTH_DISABLED=true
 export CONTROL_PLANE_EXECUTOR=local-docker
 .venv/bin/flask --app wsgi:app db upgrade
 .venv/bin/flask --app wsgi:app run --debug
@@ -716,7 +811,7 @@ curl -X POST http://127.0.0.1:5000/api/projects/1/deployments \
     "image_tag": "localmain001",
     "status": "pending",
     "build_status": "pending",
-    "test_command": "sh -c true"
+    "test_command": "python -m py_compile server.py"
   }'
 ```
 
@@ -765,12 +860,15 @@ The runtime log endpoint returns tailed container output as JSON. By default it 
 
 ## Kubernetes Manual Flow
 
+For the full local MicroK8s plus private Docker Hub demo path, see [docs/runbook.md](docs/runbook.md#local-kubernetes-demo-runbook). That runbook covers Compose profiles, generated kubeconfig handling, BuildKit, Docker Hub pull secrets, UI project settings, validation commands, and the common failure modes from a real end-to-end run.
+
 The Kubernetes executor targets a local MicroK8s-style cluster through a kubeconfig file and a registry-pushed image.
 
 ### Assumptions
 
 - MicroK8s is running locally
 - `kubectl` can reach the cluster using the configured kubeconfig from the same environment that runs the worker
+- when using Docker Compose, the host kubeconfig is mounted into the worker container
 - the cluster can pull the pushed image from Docker Hub or another reachable registry
 - the application exposes a single HTTP port and a working healthcheck path
 
@@ -778,18 +876,30 @@ The Kubernetes executor targets a local MicroK8s-style cluster through a kubecon
 
 ```bash
 export CONTROL_PLANE_ENV=development
+export CONTROL_PLANE_ALLOW_AUTH_DISABLED=true
 export CONTROL_PLANE_EXECUTOR=kubernetes
 export CONTROL_PLANE_REGISTRY_ENABLED=true
 export CONTROL_PLANE_REGISTRY_URL=docker.io
 export CONTROL_PLANE_REGISTRY_NAMESPACE=<your-dockerhub-namespace>
 export CONTROL_PLANE_REGISTRY_USERNAME=<your-dockerhub-username>
 export CONTROL_PLANE_REGISTRY_PASSWORD=<your-dockerhub-password-or-token>
-export CONTROL_PLANE_KUBECONFIG=/path/to/microk8s-config
+export CONTROL_PLANE_KUBECONFIG_HOST=/var/snap/microk8s/current/credentials/client.config
+export CONTROL_PLANE_KUBECONFIG=/tmp/paas-kubeconfig
 export CONTROL_PLANE_K8S_NAMESPACE=default
 export CONTROL_PLANE_K8S_IMAGE_PULL_SECRET=<existing-kubernetes-secret-name>
+export CONTROL_PLANE_K8S_DEPLOYMENT_MODE=manifest
+# For Helm mode:
+# export CONTROL_PLANE_K8S_DEPLOYMENT_MODE=helm
+# export CONTROL_PLANE_K8S_HELM_CHART_PATH=deploy/helm/generic-web-app
+# export CONTROL_PLANE_K8S_HELM_BINARY=helm
+# export CONTROL_PLANE_K8S_HELM_TIMEOUT=180s
 ```
 
 `CONTROL_PLANE_EXECUTOR=kubernetes` requires registry push to succeed before deploy. The Kubernetes executor deploys using `build.image_ref`, not the local image tag.
+
+`CONTROL_PLANE_KUBECONFIG_HOST` is the kubeconfig path on the machine running Docker Compose. `CONTROL_PLANE_KUBECONFIG` is the path inside the control-plane containers. Keep it as `/tmp/paas-kubeconfig` unless you also change the Compose bind mount.
+
+The Compose Makefile targets add the kubeconfig file group to the worker and reconciler containers automatically. If `make compose-toolcheck` reports `Permission denied` for `/tmp/paas-kubeconfig`, recreate the runtime containers with `make compose-recreate-runtime PROFILE=local-kubernetes` so the updated group membership is applied.
 
 For local MicroK8s installs, `microk8s kubectl` is not enough by itself because the worker executes a binary named `kubectl`. Shell aliases are not visible to the worker process. Expose MicroK8s kubectl as a real executable:
 
@@ -855,8 +965,10 @@ If any of those resources are missing, the deploy fails early with `kubernetes.p
 ### Start the Control Plane
 
 ```bash
-cd /home/adela/autodeploy-platform/paas-demo-app
+cd /path/to/paas-demo-app
 unset CONTROL_PLANE_DATABASE_URL DATABASE_URL APP_ENV
+export CONTROL_PLANE_ENV=development
+export CONTROL_PLANE_ALLOW_AUTH_DISABLED=true
 .venv/bin/flask --app wsgi:app db upgrade
 .venv/bin/flask --app wsgi:app run --debug
 ```
@@ -890,13 +1002,15 @@ docker.io/<namespace>/microk8s-app:<commit-sha>
 
 Make sure that Docker Hub repository exists, or that the configured token can create/push to it.
 
-For the Deployment Notes sample app, the Kubernetes demo needs these project env vars so the container can boot:
+For the Deployment Lab reference workload, a normal Kubernetes demo can use:
 
 ```json
 [
-  {"name": "DEPLOYMENT_NOTES_ENV", "value_source": "literal", "value": "development"},
-  {"name": "DEPLOYMENT_NOTES_DATABASE_URL", "value_source": "literal", "value": "sqlite:////tmp/deployment_notes.db"},
-  {"name": "DEPLOYMENT_NOTES_SERVE_FRONTEND", "value_source": "literal", "value": "true"}
+  {"name": "APP_ENV", "value_source": "literal", "value": "demo"},
+  {"name": "APP_VERSION", "value_source": "literal", "value": "1.0.0"},
+  {"name": "APP_COMMIT_SHA", "value_source": "literal", "value": "<current-commit>"},
+  {"name": "FEATURE_MESSAGE", "value_source": "literal", "value": "Running through the local PaaS"},
+  {"name": "DEMO_HEALTH_STATUS", "value_source": "literal", "value": "healthy"}
 ]
 ```
 
@@ -1016,13 +1130,18 @@ For failed Kubernetes deployments, `last_kubernetes_failure_stage` is one of:
 
 For preflight failures, `last_kubernetes_failure_missing_resources` contains the missing `ConfigMap` and `Secret` references directly from the preflight event metadata.
 
-If a client needs the latest Kubernetes failure context in a more stable read model than raw events, `GET /api/projects/<id>/deployments/<deployment_id>/kubernetes-diagnostics` returns:
+If a client needs Kubernetes runtime or failure context in a more stable read model than raw events, `GET /api/projects/<id>/deployments/<deployment_id>/kubernetes-diagnostics` returns:
 
 - `failure_stage`
 - `failure_summary`
 - `missing_resources`
 - `checked_resources`
 - `pod_names`
+- `pod_phase`
+- `container_reason`
+- `restart_count`
+- `images`
+- `image_pull_secrets`
 - `pod_describe_summary`
 - `pod_logs_summary`
 - `helm_release_name`
@@ -1035,12 +1154,12 @@ If a client needs the latest Kubernetes failure context in a more stable read mo
 - `helm_release_status`
 - `diagnostics`
 
-The `diagnostics` field contains the raw metadata from the latest Kubernetes failure event, while the top-level fields extract the most relevant parts for direct display.
+The `diagnostics` field contains the raw metadata from the latest relevant Kubernetes event, while the top-level fields extract the most relevant parts for direct display. Successful deployments use the healthcheck event, so current Pod runtime fields remain visible without requiring a failure.
 For Helm deploy, uninstall, or reconcile failures, `failure_stage` is `helm` and the Helm fields expose the release metadata and command summaries without making live cluster calls from the API.
 
 ### Healthcheck Behavior
 
-The Kubernetes executor does not expose an ingress or NodePort in this iteration. After rollout succeeds, it performs the healthcheck by:
+The Kubernetes executor can expose workloads through an optional Ingress in both manifest and Helm modes. When disabled, the ClusterIP URL is reported as an internal endpoint and is not presented as a browser link. After rollout succeeds, it performs the healthcheck independently by:
 
 1. starting a temporary `kubectl port-forward` to the generated Service
 2. probing the configured `healthcheck_path`
@@ -1149,4 +1268,4 @@ curl -X POST http://127.0.0.1:5000/api/projects/1/deployments/1/stop \
   }'
 ```
 
-In Kubernetes mode, stop performs a minimal cleanup by deleting the generated Deployment and Service resources and recording Kubernetes delete events before the final `deployment.stopped` event.
+In Kubernetes mode, stop deletes the generated Deployment, Service, and Ingress resources and records Kubernetes delete events before the final `deployment.stopped` event. The dedicated cleanup action performs the same runtime removal for old running, failed, or stopped deployments while retaining their control-plane history.

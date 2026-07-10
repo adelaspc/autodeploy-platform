@@ -7,10 +7,32 @@ metadata:
     {{- include "paas-control-plane.labels" . | nindent 4 }}
 rules:
   - apiGroups: [""]
-    resources: ["configmaps", "pods", "pods/log", "pods/portforward", "secrets", "services"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+  {{- if .Values.rbac.helmReleaseStorage }}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+  {{- end }}
 {{- end }}
-

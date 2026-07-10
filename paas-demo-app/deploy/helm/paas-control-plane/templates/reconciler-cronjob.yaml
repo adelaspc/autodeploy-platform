@@ -37,8 +37,10 @@ spec:
                     name: {{ include "paas-control-plane.fullname" . }}-config
                 - secretRef:
                     name: {{ include "paas-control-plane.fullname" . }}-secret
-              {{- if .Values.kubeconfig.existingSecret }}
               env:
+                - name: CONTROL_PLANE_COMPONENT
+                  value: reconciler
+              {{- if .Values.kubeconfig.existingSecret }}
                 - name: CONTROL_PLANE_KUBECONFIG
                   value: {{ printf "%s/%s" .Values.kubeconfig.mountPath .Values.kubeconfig.fileName | quote }}
               {{- end }}

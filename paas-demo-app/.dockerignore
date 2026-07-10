@@ -8,6 +8,12 @@ __pycache__
 *.pyd
 *.db
 .env
+.env.*
+.runtime
+instance
+context.txt
+UI.jpeg:Zone.Identifier
+demo-app
 frontend/node_modules
 frontend/dist
 .pytest_cache

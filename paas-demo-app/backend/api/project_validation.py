@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 
 from flask import current_app
 
+from backend.command_validation import validate_optional_command
 from backend.models import Build, PlatformDeployment, Project
 from backend.security import normalize_project_env_vars
 from worker.executor import executor_contract_for_name
@@ -28,16 +29,6 @@ def validate_healthcheck_path(value):
         return string_error
     if not value.startswith("/"):
         return "Invalid healthcheck_path. Expected an absolute path starting with '/'"
-    return None
-
-
-def validate_optional_command(value, field_name):
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        return f"Invalid {field_name}. Expected a string"
-    if not value.strip():
-        return f"Invalid {field_name}. Expected a non-empty string"
     return None
 
 
@@ -138,10 +129,11 @@ def validate_project_spec_fields(payload):
         if healthcheck_error:
             return healthcheck_error
 
-    if "default_test_command" in payload:
-        test_command_error = validate_optional_command(payload["default_test_command"], "default_test_command")
-        if test_command_error:
-            return test_command_error
+    for command_field in ("default_test_command", "migration_command"):
+        if command_field in payload:
+            command_error = validate_optional_command(payload[command_field], command_field)
+            if command_error:
+                return command_error
 
     return None
 
@@ -164,16 +156,19 @@ def validate_project_payload(payload):
     if missing_fields:
         return f"Missing required fields: {', '.join(missing_fields)}"
 
-    field_error = validate_project_spec_fields(
-        {
-            "name": payload.get("name"),
-            "repo_url": payload.get("repo_url"),
-            "branch": payload.get("branch"),
-            "dockerfile_path": payload.get("dockerfile_path", "Dockerfile"),
-            "build_context": payload.get("build_context", "."),
-            "healthcheck_path": payload.get("healthcheck_path"),
-        }
-    )
+    spec_payload = {
+        "name": payload.get("name"),
+        "repo_url": payload.get("repo_url"),
+        "branch": payload.get("branch"),
+        "dockerfile_path": payload.get("dockerfile_path", "Dockerfile"),
+        "build_context": payload.get("build_context", "."),
+        "healthcheck_path": payload.get("healthcheck_path"),
+    }
+    for command_field in ("default_test_command", "migration_command"):
+        if command_field in payload:
+            spec_payload[command_field] = payload.get(command_field)
+
+    field_error = validate_project_spec_fields(spec_payload)
     if field_error:
         return field_error
 
@@ -354,6 +349,11 @@ def validate_deployment_request_payload(payload):
     build_status = payload.get("build_status", "pending")
     if build_status not in Build.VALID_STATUSES:
         return "Invalid build status. Expected one of: " + ", ".join(Build.VALID_STATUSES)
+
+    if "test_command" in payload:
+        test_command_error = validate_optional_command(payload.get("test_command"), "test_command")
+        if test_command_error:
+            return test_command_error
 
     return None
 

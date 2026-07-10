@@ -11,6 +11,7 @@ from backend.api.request_context import (
 )
 from backend.config import Config
 from backend.extensions import db, migrate
+from backend.logging_config import install_structured_logging
 from worker import run_reconciler, run_reconciler_loop_command, run_worker, run_worker_once
 
 
@@ -23,6 +24,7 @@ def create_app(config_class=Config):
 
     db.init_app(app)
     migrate.init_app(app, db)
+    install_structured_logging(app)
     install_request_logging(app)
 
     @app.before_request

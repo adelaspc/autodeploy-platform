@@ -92,6 +92,10 @@ def kubernetes_summary_fields(deployment):
             "kubernetes_namespace": None,
             "kubernetes_deployment_name": None,
             "kubernetes_service_name": None,
+            "kubernetes_ingress_name": None,
+            "kubernetes_ingress_host": None,
+            "kubernetes_ingress_class": None,
+            "internal_service_url": None,
             "last_kubernetes_failure_stage": None,
             "last_kubernetes_failure_summary": None,
             "last_kubernetes_failure_missing_resources": None,
@@ -178,6 +182,10 @@ def kubernetes_summary_fields(deployment):
         "kubernetes_namespace": deployment.helm_namespace or metadata.get("namespace"),
         "kubernetes_deployment_name": metadata.get("deployment_name"),
         "kubernetes_service_name": metadata.get("service_name"),
+        "kubernetes_ingress_name": metadata.get("ingress_name"),
+        "kubernetes_ingress_host": metadata.get("ingress_host"),
+        "kubernetes_ingress_class": metadata.get("ingress_class"),
+        "internal_service_url": metadata.get("internal_service_url"),
         "last_kubernetes_failure_stage": failure_stage,
         "last_kubernetes_failure_summary": failure_summary,
         "last_kubernetes_failure_missing_resources": failure_missing_resources,
@@ -350,10 +358,15 @@ def serialize_kubernetes_diagnostics(deployment):
         failure_stage = "helm"
         failure_summary = helm_failure_summary(helm_event, metadata)
     else:
+        source_event = failure_event or latest_kubernetes_event(
+            deployment, {"kubernetes.healthcheck_succeeded"}
+        )
         metadata = redact_sensitive_data(
-            failure_event.metadata_json if failure_event and failure_event.metadata_json else {},
+            source_event.metadata_json if source_event and source_event.metadata_json else {},
             secret_values=secret_values,
         )
+
+    pod_stage = failure_stage if failure_stage in {"manifest_apply", "rollout", "healthcheck"} else "healthcheck"
 
     return {
         "deployment_id": deployment.id,
@@ -361,6 +374,10 @@ def serialize_kubernetes_diagnostics(deployment):
         "namespace": metadata.get("namespace") or deployment.helm_namespace,
         "deployment_name": metadata.get("deployment_name"),
         "service_name": metadata.get("service_name"),
+        "ingress_name": metadata.get("ingress_name"),
+        "ingress_host": metadata.get("ingress_host"),
+        "ingress_class": metadata.get("ingress_class"),
+        "internal_service_url": metadata.get("internal_service_url"),
         "failure_stage": failure_stage,
         "failure_summary": failure_summary,
         "failure_event_type": failure_event.event_type if failure_event else None,
@@ -370,11 +387,13 @@ def serialize_kubernetes_diagnostics(deployment):
         "configmap_refs_used": metadata.get("configmap_refs_used"),
         "secret_refs_used": metadata.get("secret_refs_used"),
         "image_pull_secret": metadata.get("image_pull_secret"),
-        "pod_names": (
-            metadata.get(f"{failure_stage}_pod_names")
-            if failure_stage in {"manifest_apply", "rollout", "healthcheck"}
-            else None
-        ),
+        "pod_names": metadata.get(f"{pod_stage}_pod_names"),
+        "pod_phase": metadata.get(f"{pod_stage}_pod_phase"),
+        "container_reason": metadata.get(f"{pod_stage}_container_reason"),
+        "restart_count": metadata.get(f"{pod_stage}_restart_count"),
+        "images": metadata.get(f"{pod_stage}_images"),
+        "image_pull_secrets": metadata.get(f"{pod_stage}_image_pull_secrets"),
+        "pod_runtime": metadata.get(f"{pod_stage}_pod_runtime"),
         "pod_describe_summary": (
             metadata.get(f"{failure_stage}_pod_describe_summary")
             if failure_stage in {"manifest_apply", "rollout", "healthcheck"}
@@ -382,6 +401,11 @@ def serialize_kubernetes_diagnostics(deployment):
         ),
         "pod_logs_summary": (
             metadata.get(f"{failure_stage}_pod_logs_summary")
+            if failure_stage in {"manifest_apply", "rollout", "healthcheck"}
+            else None
+        ),
+        "pod_previous_logs_summary": (
+            metadata.get(f"{failure_stage}_pod_previous_logs_summary")
             if failure_stage in {"manifest_apply", "rollout", "healthcheck"}
             else None
         ),

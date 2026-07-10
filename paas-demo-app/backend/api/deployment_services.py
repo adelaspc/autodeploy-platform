@@ -58,6 +58,46 @@ def stop_deployment_runtime(deployment, *, message=None):
     )
 
 
+def cleanup_kubernetes_deployment_runtime(deployment, *, message=None):
+    if deployment.deploy_target != "kubernetes":
+        raise ValueError("Cleanup is available only for Kubernetes deployments")
+
+    executor = create_executor_for_deployment(deployment)
+    create_deployment_event(
+        deployment.id,
+        "deployment.cleanup_started",
+        deployment.status,
+        message or "Cleaning up Kubernetes deployment resources",
+        step="deploy.cleanup",
+    )
+    cleanup_result = executor.stop(deployment)
+    deployment.status = "stopped"
+    deployment.service_url = None
+    deployment.healthcheck_url = None
+    deployment.finished_at = now_utc()
+    persist_helm_runtime_metadata(deployment, cleanup_result.metadata)
+    for event in cleanup_result.events or ():
+        create_deployment_event(
+            deployment.id,
+            event["event_type"],
+            event["status"],
+            event.get("message"),
+            step=event.get("step"),
+            level=event.get("level", "info"),
+            metadata_json=event.get("metadata_json"),
+        )
+    create_deployment_event(
+        deployment.id,
+        "deployment.cleanup_succeeded",
+        "stopped",
+        cleanup_result.message,
+        step="deploy.cleanup",
+        metadata_json=cleanup_result.metadata
+        | {"log_path": cleanup_result.log_path, "summary": cleanup_result.message},
+    )
+    return cleanup_result
+
+
 def create_manual_deployment(project, payload, *, test_command):
     registry = payload.get("registry")
     image_name = payload.get("image_name")

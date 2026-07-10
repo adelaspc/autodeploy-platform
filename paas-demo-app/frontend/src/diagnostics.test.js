@@ -83,8 +83,9 @@ describe("buildDiagnosticsView", () => {
       deployment_name: "paas-demo-1",
       service_name: "paas-demo-1-svc",
       pod_names: ["paas-demo-1-abc"],
-      pod_describe_summary: "Warning FailedScheduling",
+      pod_describe_summary: "Warning FailedScheduling ImagePullBackOff",
       pod_logs_summary: "ModuleNotFoundError",
+      pod_previous_logs_summary: "Previous ModuleNotFoundError",
     });
 
     assert.equal(view.stageLabel, "Rollout");
@@ -94,8 +95,47 @@ describe("buildDiagnosticsView", () => {
       { label: "Service", value: "paas-demo-1-svc" },
     ]);
     assert.deepEqual(view.podNames, ["paas-demo-1-abc"]);
-    assert.equal(view.podDescribeSummary, "Warning FailedScheduling");
+    assert.equal(view.podDescribeSummary, "Warning FailedScheduling ImagePullBackOff");
     assert.equal(view.podLogsSummary, "ModuleNotFoundError");
+    assert.equal(view.podPreviousLogsSummary, "Previous ModuleNotFoundError");
+    assert.deepEqual(view.insights, [
+      {
+        title: "Image pull is failing",
+        detail:
+          "Kubernetes created the pod, but kubelet cannot pull the image. Verify the image reference, Docker Hub repository, namespace, and imagePullSecret.",
+        action:
+          "Set CONTROL_PLANE_K8S_IMAGE_PULL_SECRET to an existing dockerconfigjson secret, recreate the runtime, then start a new deployment.",
+      },
+    ]);
+  });
+
+  it("detects CrashLoopBackOff diagnostics", () => {
+    const view = buildDiagnosticsView({
+      failure_stage: "healthcheck",
+      pod_describe_summary: "Warning BackOff Back-off restarting failed container app",
+      pod_previous_logs_summary: "RuntimeError: DEPLOYMENT_NOTES_DATABASE_URL must be set",
+    });
+
+    assert.equal(view.insights.length, 1);
+    assert.equal(view.insights[0].title, "Container is restarting");
+  });
+
+  it("formats first-class pod runtime fields", () => {
+    const view = buildDiagnosticsView({
+      pod_phase: "Running",
+      container_reason: "CrashLoopBackOff",
+      restart_count: 3,
+      images: ["docker.io/example/app:v1"],
+      image_pull_secrets: ["dockerhub-pull"],
+    });
+
+    assert.deepEqual(view.podFields, [
+      { label: "Pod phase", value: "Running" },
+      { label: "Container reason", value: "CrashLoopBackOff" },
+      { label: "Restart count", value: "3" },
+      { label: "Images", value: "docker.io/example/app:v1" },
+      { label: "Image pull secrets", value: "dockerhub-pull" },
+    ]);
   });
 
   it("uses safe fallback values for empty diagnostics", () => {
@@ -106,6 +146,7 @@ describe("buildDiagnosticsView", () => {
     assert.equal(view.eventType, "not recorded");
     assert.equal(view.hasHelm, false);
     assert.equal(view.hasResourceContext, false);
+    assert.deepEqual(view.insights, []);
     assert.equal(view.rawJson, "");
   });
 });

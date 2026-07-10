@@ -722,7 +722,7 @@ def process_deployment(deployment, executor=None):
     except WorkerExecutionError as exc:
         if exc.log_path:
             deployment.build.log_path = exc.log_path
-        if exc.step in {"image.push", "image.verify"}:
+        if exc.step == "image.push":
             deployment.build.registry_push_status = "failed"
         persist_preflight_failure(deployment, exc)
         try:

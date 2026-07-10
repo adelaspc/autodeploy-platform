@@ -3,6 +3,8 @@ import subprocess
 import base64
 import pytest
 
+from backend.extensions import db
+from backend.models import PlatformDeployment
 from worker.executor import LocalDockerExecutor, WorkerExecutionError
 from worker.service import process_next_pending_deployment
 
@@ -67,6 +69,36 @@ def test_local_docker_executor_processes_deployment_with_stubbed_commands(client
     assert apply_events[0]["metadata_json"]["runtime_log_summary"] == "app booted | ready"
     assert apply_events[0]["metadata_json"]["runtime_log_path"].endswith("/runtime.log")
     assert deployment["service_url"] == "http://127.0.0.1:18080"
+
+
+def test_local_docker_executor_rejects_invalid_persisted_test_command(client, tmp_path):
+    pending = create_pending_deployment(client, name="invalid-persisted-command-app", test_command="pytest -q")
+    deployment = db.session.get(PlatformDeployment, pending["id"])
+    deployment.build.test_command = "pytest -q && curl https://example.test"
+    db.session.commit()
+    commands = []
+
+    def fake_runner(args, capture_output, text, timeout, check):
+        commands.append(args)
+        if args[:2] == ["git", "clone"]:
+            repo_dir = Path(args[-1])
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"{args[0]} ok\n", stderr="")
+
+    executor = LocalDockerExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=fake_runner,
+    )
+
+    processed = process_next_pending_deployment(executor=executor)
+
+    assert processed.id == pending["id"]
+    assert processed.status == "failed"
+    assert processed.build.status == "failed"
+    assert "Shell control" in processed.build.last_error
+    assert not any(command[:3] == ["docker", "run", "--rm"] for command in commands)
 
 
 def test_local_docker_executor_pushes_registry_image_when_enabled(tmp_path):
@@ -154,7 +186,7 @@ def test_local_docker_executor_pushes_registry_image_when_enabled(tmp_path):
     assert build_call["args"][3] == "demo-app:abc123def456"
     assert any(item["args"][:2] == ["docker", "tag"] for item in commands)
     assert any(item["args"][:2] == ["docker", "push"] for item in commands)
-    assert any(item["args"][:3] == ["docker", "manifest", "inspect"] for item in commands)
+    assert any(item["args"][:4] == ["docker", "buildx", "imagetools", "inspect"] for item in commands)
     login_call = next(item for item in commands if item["args"][:2] == ["docker", "login"])
     assert login_call["input"] == "super-secret"
     assert "super-secret" not in " ".join(" ".join(item["args"]) for item in commands)
@@ -162,7 +194,7 @@ def test_local_docker_executor_pushes_registry_image_when_enabled(tmp_path):
 
 def test_local_docker_executor_fails_when_registry_image_verification_fails(tmp_path):
     def verify_runner(args, capture_output, text, timeout, check, input=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
-        if args[:3] == ["docker", "manifest", "inspect"]:
+        if args[:4] == ["docker", "buildx", "imagetools", "inspect"]:
             return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="manifest unknown\n")
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
 
@@ -194,7 +226,7 @@ def test_local_docker_executor_fails_when_registry_image_verification_fails(tmp_
 
     try:
         executor.verify_image(deployment)
-        raise AssertionError("verify_image should fail when manifest inspect fails")
+        raise AssertionError("verify_image should fail when registry image inspection fails")
     except WorkerExecutionError as exc:
         assert exc.step == "image.verify"
         assert "manifest unknown" in exc.metadata["summary"]
@@ -337,6 +369,40 @@ def test_local_docker_executor_clone_fails_when_git_token_env_is_missing(tmp_pat
         executor.clone_repo(deployment)
 
     assert "CONTROL_PLANE_GIT_TOKEN_MISSING_APP" in str(exc_info.value)
+
+
+def test_local_docker_executor_reports_workspace_prepare_failure(tmp_path):
+    workspace_file = tmp_path / "not-a-directory"
+    workspace_file.write_text("blocked\n", encoding="utf-8")
+    executor = LocalDockerExecutor(
+        workspace_root=workspace_file,
+        command_timeout=30,
+        runner=lambda *args, **kwargs: subprocess.CompletedProcess(args=kwargs.get("args", []), returncode=0, stdout="", stderr=""),
+    )
+    deployment = type(
+        "DeploymentStub",
+        (),
+        {
+            "id": 1,
+            "project_id": 2,
+            "project": type(
+                "ProjectStub",
+                (),
+                {
+                    "branch": "main",
+                    "repo_url": "https://github.com/example/private-repo",
+                    "git_auth_type": "none",
+                },
+            )(),
+        },
+    )()
+
+    with pytest.raises(WorkerExecutionError) as exc_info:
+        executor.clone_repo(deployment)
+
+    assert exc_info.value.step == "repository.workspace"
+    assert "Unable to prepare deployment workspace" in exc_info.value.message
+    assert exc_info.value.metadata["workspace_root"] == str(workspace_file)
 
 
 def test_local_docker_executor_redacts_git_token_from_clone_logs(tmp_path, monkeypatch):

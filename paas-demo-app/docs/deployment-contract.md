@@ -53,14 +53,16 @@ The repository has two distinct Helm chart responsibilities:
 - `deploy/helm/paas-control-plane` deploys internal PaaS platform components.
 - `deploy/helm/generic-web-app` deploys stateless user web workloads managed by the PaaS.
 
-The control-plane chart may contain platform-specific API, worker, reconciler, migration, workspace, RBAC, Docker socket, and kubeconfig behavior.
+The control-plane chart may contain platform-specific API, worker, reconciler, migration, workspace, RBAC, Docker socket, and kubeconfig behavior. Its default RBAC is namespace-scoped and optimized for manifest mode; Helm release Secret mutation is an explicit chart value.
 
 The generic web app chart is stack-agnostic. It renders one Deployment, one Service, and an optional Ingress. It does not assume Python, Node, PHP, migrations, framework commands, persistent storage, RBAC, Docker socket access, or kubeconfig access.
 
 The Kubernetes executor supports two workload deployment modes:
 
-- `manifest`: default; generates minimal Deployment and Service manifests directly, then uses `kubectl apply` and `kubectl delete`
+- `manifest`: default; generates minimal Deployment, Service, and optional Ingress manifests directly, then uses `kubectl apply` and `kubectl delete`
 - `helm`: generates `generic-web-app` values, installs or upgrades a stable Helm release, and uninstalls that release on stop
+
+When registry push is enabled, the worker verifies the remote image reference with `docker buildx imagetools inspect` before applying workload resources. Push success and remote verification are separate events; a verification failure does not retroactively change a successful registry push result.
 
 Helm mode uses a generated-values contract. The mapper converts the existing project/deployment/build model into generic chart values before the executor calls Helm.
 
@@ -72,7 +74,7 @@ Current mapping boundaries:
 - ConfigMap and Secret key references map to `env[].valueFrom`
 - whole-resource `envFrom` imports are not generated yet because the model does not expose that concept
 - `Project.healthcheck_path` maps to readiness and liveness probe paths for Helm-managed workloads
-- startup probes and ingress remain disabled by default
+- startup probes remain disabled by default; Ingress follows the platform-wide Kubernetes Ingress configuration
 - test and migration commands are not treated as runtime container command or args
 
 Helm-managed workload naming follows this shape:

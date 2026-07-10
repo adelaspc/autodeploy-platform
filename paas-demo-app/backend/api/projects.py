@@ -4,7 +4,11 @@ from backend.api.audit_service import record_audit_event
 from backend.api.auth import authorize_request, require_api_role
 from backend.api.deployment_orchestration import create_user_facing_deployment, get_deployment_branch, get_latest_project_deployment_record
 from backend.api.deployment_queries import get_project_deployment_or_404, get_project_or_404
-from backend.api.deployment_services import apply_deployment_update, create_manual_deployment
+from backend.api.deployment_services import (
+    apply_deployment_update,
+    cleanup_kubernetes_deployment_runtime,
+    create_manual_deployment,
+)
 from backend.api.request_parsing import parse_bool_arg, parse_limit_arg, parse_optional_int_arg, parse_status_filter_arg
 from backend.api.project_validation import (
     kubernetes_deployment_prereq_error,
@@ -37,6 +41,7 @@ from backend.api.deployment_read_models import (
     serialize_kubernetes_diagnostics,
 )
 from backend.api.platform_read_models import project_activity_payload, project_status_payload
+from backend.api.live_health import probe_deployment_health
 from backend.extensions import db
 from backend.models import Build, DeploymentEvent, PlatformDeployment, Project
 from worker.executor import WorkerExecutionError
@@ -438,6 +443,12 @@ def get_project_deployment_summary(project_id, deployment_id):
     return jsonify(serialize_deployment_summary(deployment, branch=get_deployment_branch(deployment)))
 
 
+@projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/live-health")
+def get_project_deployment_live_health(project_id, deployment_id):
+    deployment = get_project_deployment_or_404(project_id, deployment_id)
+    return jsonify(probe_deployment_health(deployment))
+
+
 @projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/kubernetes-diagnostics")
 def get_project_deployment_kubernetes_diagnostics(project_id, deployment_id):
     deployment = get_project_deployment_or_404(project_id, deployment_id)
@@ -558,6 +569,55 @@ def stop_project_deployment(project_id, deployment_id):
         update_data,
         audit_action="deployment.stop_requested",
     )
+
+
+@projects_bp.post("/<int:project_id>/deployments/<int:deployment_id>/cleanup")
+@require_api_role("deployer")
+def cleanup_project_deployment(project_id, deployment_id):
+    deployment = get_project_deployment_or_404(project_id, deployment_id)
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Invalid cleanup payload. Expected a JSON object"}), 400
+    unsupported_fields = sorted(set(payload) - {"message"})
+    if unsupported_fields:
+        return jsonify({"error": "Unsupported cleanup fields: " + ", ".join(unsupported_fields)}), 400
+    message = payload.get("message")
+    if message is not None and not isinstance(message, str):
+        return jsonify({"error": "Invalid message. Expected a string"}), 400
+    if deployment.deploy_target != "kubernetes":
+        return jsonify({"error": "Cleanup is available only for Kubernetes deployments"}), 409
+
+    try:
+        cleanup_result = cleanup_kubernetes_deployment_runtime(deployment, message=message)
+        db.session.commit()
+    except WorkerExecutionError as exc:
+        db.session.rollback()
+        secret_values = secret_values_from_env_vars(deployment.project.env_vars if deployment.project else [])
+        record_audit_event(
+            action="deployment.cleanup_requested",
+            resource_type="deployment",
+            resource_id=deployment.id,
+            status="failure",
+            metadata={"project_id": project_id, "step": exc.step, "error_message": exc.message},
+        )
+        return jsonify({
+            "error": exc.message,
+            "step": exc.step,
+            "metadata": redact_sensitive_data(exc.metadata, secret_values=secret_values),
+        }), 409
+
+    record_audit_event(
+        action="deployment.cleanup_requested",
+        resource_type="deployment",
+        resource_id=deployment.id,
+        metadata={
+            "project_id": project_id,
+            "status": deployment.status,
+            "deploy_target": deployment.deploy_target,
+            "summary": cleanup_result.message,
+        },
+    )
+    return jsonify(serialize_project_deployment(deployment, include_events=True))
 
 
 @projects_bp.patch("/<int:project_id>/deployments/<int:deployment_id>")

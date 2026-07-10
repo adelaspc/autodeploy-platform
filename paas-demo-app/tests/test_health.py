@@ -43,6 +43,34 @@ def test_health_check(client):
     assert response.get_json() == {"status": "ok"}
 
 
+def test_observability_health_check_reports_safe_runtime_posture(client, app):
+    app.config["CONTROL_PLANE_METRICS_ENABLED"] = True
+    app.config["CONTROL_PLANE_METRICS_TOKEN"] = "must-not-leak"
+    app.config["CONTROL_PLANE_LOG_FORMAT"] = "json"
+
+    response = client.get("/health/observability")
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "status": "ok",
+        "metrics": {
+            "enabled": True,
+            "endpoint": "/metrics",
+            "authentication": "dedicated_bearer_token",
+        },
+        "logging": {
+            "format": "json",
+            "structured": True,
+            "destination": "stdout",
+        },
+        "request_correlation": {
+            "enabled": True,
+            "header": "X-Request-ID",
+        },
+    }
+    assert "must-not-leak" not in response.get_data(as_text=True)
+
+
 def test_frontend_fallback_serves_built_index(client, app):
     dist_dir = Path(app.static_folder)
     dist_dir.mkdir(parents=True, exist_ok=True)
@@ -80,6 +108,31 @@ def test_database_health_check(client):
     assert response.get_json() == {"status": "ok", "database": "reachable"}
 
 
+def test_database_health_check_does_not_expose_internal_error_details(client, monkeypatch):
+    sensitive_error = (
+        "could not connect to mysql+pymysql://control_plane_user:secret@db.internal:3306/control_plane "
+        "from /home/user/app/instance/control_plane.db"
+    )
+
+    def fail_execute(*_args, **_kwargs):
+        raise RuntimeError(sensitive_error)
+
+    monkeypatch.setattr(db.session, "execute", fail_execute)
+
+    response = client.get("/health/db")
+
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "status": "error",
+        "database": "unreachable",
+        "error_code": "database_unreachable",
+    }
+    response_text = response.get_data(as_text=True)
+    assert "secret" not in response_text
+    assert "db.internal" not in response_text
+    assert "/home/user" not in response_text
+
+
 def test_platform_health_check_reports_default_executor_state(client):
     response = client.get("/health/platform")
 
@@ -106,12 +159,14 @@ def test_platform_health_check_reports_default_executor_state(client):
         "api_auth": {
             "enabled": False,
             "configured_roles": [],
+            "auth_disabled_allowed": True,
             "token_transport": "bearer",
             "public_routes": ["/health"],
             "protected_health_routes": [
                 "/health/db",
                 "/health/platform",
                 "/health/activity",
+                "/health/observability",
             ],
             "webhook_auth_mode": "github_signature",
         },
@@ -124,8 +179,12 @@ def test_platform_health_check_reports_default_executor_state(client):
         "kubernetes": {
             "selected": False,
             "namespace": "default",
+            "deployment_mode": "manifest",
             "kubeconfig_configured": False,
             "image_pull_secret_configured": False,
+            "helm_chart_path": "deploy/helm/generic-web-app",
+            "helm_binary": "helm",
+            "helm_timeout": "180s",
             "deployment_prereqs_ready": True,
             "missing_deployment_prereqs": [],
         },
@@ -177,12 +236,14 @@ def test_platform_health_check_reports_local_docker_contract_state(client, app):
         "api_auth": {
             "enabled": False,
             "configured_roles": [],
+            "auth_disabled_allowed": False,
             "token_transport": "bearer",
             "public_routes": ["/health"],
             "protected_health_routes": [
                 "/health/db",
                 "/health/platform",
                 "/health/activity",
+                "/health/observability",
             ],
             "webhook_auth_mode": "github_signature",
         },
@@ -198,8 +259,12 @@ def test_platform_health_check_reports_local_docker_contract_state(client, app):
         "kubernetes": {
             "selected": False,
             "namespace": "default",
+            "deployment_mode": "manifest",
             "kubeconfig_configured": False,
             "image_pull_secret_configured": False,
+            "helm_chart_path": "deploy/helm/generic-web-app",
+            "helm_binary": "helm",
+            "helm_timeout": "180s",
             "deployment_prereqs_ready": True,
             "missing_deployment_prereqs": [],
         },
@@ -233,6 +298,7 @@ def test_platform_health_check_reports_kubernetes_prereq_gaps(client, app):
                 "docker-image",
                 "kubernetes-deployment",
                 "kubernetes-service",
+                "kubernetes-ingress",
             ],
             "required_config": [
                 "CONTROL_PLANE_REGISTRY_ENABLED=true",
@@ -244,6 +310,12 @@ def test_platform_health_check_reports_kubernetes_prereq_gaps(client, app):
                 "CONTROL_PLANE_K8S_NAMESPACE",
                 "CONTROL_PLANE_K8S_IMAGE_PULL_SECRET",
                 "CONTROL_PLANE_K8S_DEPLOYMENT_MODE",
+                "CONTROL_PLANE_K8S_HELM_CHART_PATH",
+                "CONTROL_PLANE_K8S_HELM_BINARY",
+                "CONTROL_PLANE_K8S_HELM_TIMEOUT",
+                "CONTROL_PLANE_K8S_INGRESS_ENABLED",
+                "CONTROL_PLANE_K8S_INGRESS_CLASS_NAME",
+                "CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN",
                 "CONTROL_PLANE_REGISTRY_USERNAME",
                 "CONTROL_PLANE_REGISTRY_PASSWORD",
                 "CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS",
@@ -261,12 +333,14 @@ def test_platform_health_check_reports_kubernetes_prereq_gaps(client, app):
         "api_auth": {
             "enabled": False,
             "configured_roles": [],
+            "auth_disabled_allowed": False,
             "token_transport": "bearer",
             "public_routes": ["/health"],
             "protected_health_routes": [
                 "/health/db",
                 "/health/platform",
                 "/health/activity",
+                "/health/observability",
             ],
             "webhook_auth_mode": "github_signature",
         },
@@ -282,8 +356,12 @@ def test_platform_health_check_reports_kubernetes_prereq_gaps(client, app):
         "kubernetes": {
             "selected": True,
             "namespace": "default",
+            "deployment_mode": "manifest",
             "kubeconfig_configured": False,
             "image_pull_secret_configured": False,
+            "helm_chart_path": "deploy/helm/generic-web-app",
+            "helm_binary": "helm",
+            "helm_timeout": "180s",
             "deployment_prereqs_ready": False,
             "missing_deployment_prereqs": [
                 "CONTROL_PLANE_REGISTRY_ENABLED=true",
@@ -304,6 +382,10 @@ def test_platform_health_check_reports_kubernetes_ready_state(client, app):
     app.config["CONTROL_PLANE_KUBECONFIG"] = "/tmp/kubeconfig"
     app.config["CONTROL_PLANE_K8S_NAMESPACE"] = "apps"
     app.config["CONTROL_PLANE_K8S_IMAGE_PULL_SECRET"] = "regcred"
+    app.config["CONTROL_PLANE_K8S_DEPLOYMENT_MODE"] = "helm"
+    app.config["CONTROL_PLANE_K8S_HELM_CHART_PATH"] = "/opt/charts/generic-web-app"
+    app.config["CONTROL_PLANE_K8S_HELM_BINARY"] = "/usr/local/bin/helm"
+    app.config["CONTROL_PLANE_K8S_HELM_TIMEOUT"] = "240s"
 
     response = client.get("/health/platform")
     payload = response.get_json()
@@ -316,12 +398,14 @@ def test_platform_health_check_reports_kubernetes_ready_state(client, app):
     assert payload["api_auth"] == {
         "enabled": False,
         "configured_roles": [],
+        "auth_disabled_allowed": False,
         "token_transport": "bearer",
         "public_routes": ["/health"],
         "protected_health_routes": [
             "/health/db",
             "/health/platform",
             "/health/activity",
+            "/health/observability",
         ],
         "webhook_auth_mode": "github_signature",
     }
@@ -337,6 +421,7 @@ def test_platform_health_check_reports_kubernetes_ready_state(client, app):
             "docker-image",
             "kubernetes-deployment",
             "kubernetes-service",
+            "kubernetes-ingress",
         ],
         "required_config": [
             "CONTROL_PLANE_REGISTRY_ENABLED=true",
@@ -348,6 +433,12 @@ def test_platform_health_check_reports_kubernetes_ready_state(client, app):
             "CONTROL_PLANE_K8S_NAMESPACE",
             "CONTROL_PLANE_K8S_IMAGE_PULL_SECRET",
             "CONTROL_PLANE_K8S_DEPLOYMENT_MODE",
+            "CONTROL_PLANE_K8S_HELM_CHART_PATH",
+            "CONTROL_PLANE_K8S_HELM_BINARY",
+            "CONTROL_PLANE_K8S_HELM_TIMEOUT",
+            "CONTROL_PLANE_K8S_INGRESS_ENABLED",
+            "CONTROL_PLANE_K8S_INGRESS_CLASS_NAME",
+            "CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN",
             "CONTROL_PLANE_REGISTRY_USERNAME",
             "CONTROL_PLANE_REGISTRY_PASSWORD",
             "CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS",
@@ -365,8 +456,12 @@ def test_platform_health_check_reports_kubernetes_ready_state(client, app):
     assert payload["kubernetes"] == {
         "selected": True,
         "namespace": "apps",
+        "deployment_mode": "helm",
         "kubeconfig_configured": True,
         "image_pull_secret_configured": True,
+        "helm_chart_path": "/opt/charts/generic-web-app",
+        "helm_binary": "/usr/local/bin/helm",
+        "helm_timeout": "240s",
         "deployment_prereqs_ready": True,
         "missing_deployment_prereqs": [],
     }
@@ -387,12 +482,14 @@ def test_platform_health_check_reports_api_auth_posture(client, app):
     assert payload["api_auth"] == {
         "enabled": True,
         "configured_roles": ["read_only", "deployer", "admin"],
+        "auth_disabled_allowed": True,
         "token_transport": "bearer",
         "public_routes": ["/health"],
         "protected_health_routes": [
             "/health/db",
             "/health/platform",
             "/health/activity",
+            "/health/observability",
         ],
         "webhook_auth_mode": "github_signature",
     }

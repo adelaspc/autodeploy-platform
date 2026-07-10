@@ -120,6 +120,7 @@ jobs:
           mkdir -p instance
           rm -f instance/ci-control-plane.db
           export CONTROL_PLANE_ENV=development
+          export CONTROL_PLANE_ALLOW_AUTH_DISABLED=true
           export CONTROL_PLANE_DATABASE_URL="sqlite:////${GITHUB_WORKSPACE}/instance/ci-control-plane.db"
           python -m flask --app wsgi:app db upgrade
 

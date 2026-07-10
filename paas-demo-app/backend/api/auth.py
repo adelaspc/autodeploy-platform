@@ -20,6 +20,7 @@ CONFIG_KEY_BY_ROLE = {
     "admin": "CONTROL_PLANE_API_TOKEN_ADMIN",
 }
 
+LOCAL_AUTH_DISABLED_ENVS = {"development", "local", "test"}
 TOKEN_MISSING = "missing"
 TOKEN_MALFORMED = "malformed"
 TOKEN_PRESENT = "present"
@@ -58,8 +59,23 @@ def _normalize_json_token_entry(entry, index):
     return ApiTokenConfig(role=role, token=token.strip(), name=name.strip() if isinstance(name, str) else None)
 
 
-def _json_configured_api_tokens():
-    raw_value = current_app.config.get("CONTROL_PLANE_API_TOKENS_JSON")
+def _truthy_config_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def api_auth_disabled_allowed_for_config(config):
+    env_name = (config.get("CONTROL_PLANE_ENV") or "").strip().lower()
+    return env_name in LOCAL_AUTH_DISABLED_ENVS and _truthy_config_value(
+        config.get("CONTROL_PLANE_ALLOW_AUTH_DISABLED", False)
+    )
+
+
+def _json_configured_api_tokens(config):
+    raw_value = config.get("CONTROL_PLANE_API_TOKENS_JSON")
     if not isinstance(raw_value, str) or not raw_value.strip():
         return []
 
@@ -74,14 +90,18 @@ def _json_configured_api_tokens():
     return [_normalize_json_token_entry(entry, index) for index, entry in enumerate(parsed)]
 
 
-def configured_api_tokens():
+def api_token_configs_from_config(config):
     configured = []
-    configured.extend(_json_configured_api_tokens())
+    configured.extend(_json_configured_api_tokens(config))
     for role, config_key in CONFIG_KEY_BY_ROLE.items():
-        token = current_app.config.get(config_key)
+        token = config.get(config_key)
         if isinstance(token, str) and token.strip():
             configured.append(ApiTokenConfig(role=role, token=token.strip(), name=config_key))
     return configured
+
+
+def configured_api_tokens():
+    return api_token_configs_from_config(current_app.config)
 
 
 def configured_api_roles():

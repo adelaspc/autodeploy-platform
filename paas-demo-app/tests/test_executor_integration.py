@@ -1,4 +1,3 @@
-from pathlib import Path
 import shutil
 import subprocess
 import textwrap
@@ -7,9 +6,6 @@ import pytest
 
 from worker.executor import LocalDockerExecutor
 from worker.service import process_next_pending_deployment
-
-from tests.test_worker import create_pending_deployment
-
 
 pytestmark = pytest.mark.docker
 

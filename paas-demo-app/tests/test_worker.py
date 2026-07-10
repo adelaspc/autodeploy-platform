@@ -495,7 +495,7 @@ def test_process_next_pending_deployment_stops_after_registry_verification_failu
     assert processed.id == pending["id"]
     assert processed.status == "failed"
     assert processed.build.status == "failed"
-    assert processed.build.registry_push_status == "failed"
+    assert processed.build.registry_push_status == "succeeded"
     assert processed.last_error == "Registry image verification failed"
     assert processed.build.log_path == "/tmp/test-workspaces/verify-image.log"
     assert executor.calls == ["clone_repo", "build_image", "run_tests", "tag_image", "push_image", "verify_image"]

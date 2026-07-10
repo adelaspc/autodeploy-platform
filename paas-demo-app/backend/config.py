@@ -51,11 +51,26 @@ class Config:
     CONTROL_PLANE_API_TOKEN_DEPLOYER = os.getenv("CONTROL_PLANE_API_TOKEN_DEPLOYER")
     CONTROL_PLANE_API_TOKEN_ADMIN = os.getenv("CONTROL_PLANE_API_TOKEN_ADMIN")
     CONTROL_PLANE_API_TOKENS_JSON = os.getenv("CONTROL_PLANE_API_TOKENS_JSON")
+    CONTROL_PLANE_ALLOW_AUTH_DISABLED = env_bool("CONTROL_PLANE_ALLOW_AUTH_DISABLED", False)
     CONTROL_PLANE_GITHUB_WEBHOOK_SECRET = os.getenv("CONTROL_PLANE_GITHUB_WEBHOOK_SECRET")
+    CONTROL_PLANE_METRICS_ENABLED = env_bool("CONTROL_PLANE_METRICS_ENABLED", False)
+    CONTROL_PLANE_METRICS_TOKEN = os.getenv("CONTROL_PLANE_METRICS_TOKEN")
+    CONTROL_PLANE_LOG_FORMAT = os.getenv("CONTROL_PLANE_LOG_FORMAT", "json")
+    CONTROL_PLANE_COMPONENT = os.getenv("CONTROL_PLANE_COMPONENT", "api")
     CONTROL_PLANE_KUBECONFIG = os.getenv("CONTROL_PLANE_KUBECONFIG")
     CONTROL_PLANE_K8S_NAMESPACE = os.getenv("CONTROL_PLANE_K8S_NAMESPACE", "default")
     CONTROL_PLANE_K8S_IMAGE_PULL_SECRET = os.getenv("CONTROL_PLANE_K8S_IMAGE_PULL_SECRET")
     CONTROL_PLANE_K8S_DEPLOYMENT_MODE = os.getenv("CONTROL_PLANE_K8S_DEPLOYMENT_MODE", "manifest")
+    CONTROL_PLANE_K8S_HELM_CHART_PATH = os.getenv(
+        "CONTROL_PLANE_K8S_HELM_CHART_PATH", "deploy/helm/generic-web-app"
+    )
+    CONTROL_PLANE_K8S_HELM_BINARY = os.getenv("CONTROL_PLANE_K8S_HELM_BINARY", "helm")
+    CONTROL_PLANE_K8S_HELM_TIMEOUT = os.getenv("CONTROL_PLANE_K8S_HELM_TIMEOUT", "180s")
+    CONTROL_PLANE_K8S_INGRESS_ENABLED = env_bool("CONTROL_PLANE_K8S_INGRESS_ENABLED", False)
+    CONTROL_PLANE_K8S_INGRESS_CLASS_NAME = os.getenv("CONTROL_PLANE_K8S_INGRESS_CLASS_NAME", "")
+    CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN = os.getenv(
+        "CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN", "127.0.0.1.nip.io"
+    )
     CONTROL_PLANE_DEPLOY_HOST = os.getenv("CONTROL_PLANE_DEPLOY_HOST", "127.0.0.1")
     CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS = int(
         os.getenv("CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS", "30")
@@ -77,5 +92,19 @@ class Config:
 
     @staticmethod
     def init_app(app):
+        from backend.api.auth import api_auth_disabled_allowed_for_config, api_token_configs_from_config
+
         if not app.config.get("SQLALCHEMY_DATABASE_URI"):
             app.config["SQLALCHEMY_DATABASE_URI"] = resolve_database_url(app.instance_path)
+        if app.config.get("CONTROL_PLANE_METRICS_ENABLED"):
+            token = app.config.get("CONTROL_PLANE_METRICS_TOKEN")
+            if not isinstance(token, str) or not token.strip():
+                raise RuntimeError(
+                    "CONTROL_PLANE_METRICS_TOKEN must be set when CONTROL_PLANE_METRICS_ENABLED is true"
+                )
+            app.config["CONTROL_PLANE_METRICS_TOKEN"] = token.strip()
+        if not api_token_configs_from_config(app.config) and not api_auth_disabled_allowed_for_config(app.config):
+            raise RuntimeError(
+                "API bearer tokens must be configured unless CONTROL_PLANE_ALLOW_AUTH_DISABLED=true "
+                "is explicitly set for a local development or test environment"
+            )

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import shlex
 import shutil
+import shlex
 import socket
 import subprocess
 import time
@@ -16,6 +16,7 @@ from urllib.request import urlopen
 
 from flask import current_app
 
+from backend.command_validation import CommandValidationError, parse_optional_command
 from backend.security import env_var_is_secret, redact_sensitive_data, redact_text, secret_values_from_env_vars
 from worker.helm_runner import HelmCommandError, HelmRunner
 from worker.helm_values import GenericWebAppValuesConfig, generic_web_app_values
@@ -374,7 +375,10 @@ class LocalDockerExecutor(DeploymentExecutor):
     def run_tests(self, deployment):
         workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
         log_path = logs_dir / "tests.log"
-        test_command = shlex.split(deployment.build.test_command or "")
+        try:
+            test_command = parse_optional_command(deployment.build.test_command, "test_command")
+        except CommandValidationError as exc:
+            raise WorkerExecutionError("tests", str(exc), metadata={"test_command_valid": False}) from exc
         if not test_command:
             raise WorkerExecutionError("tests", "Configured test command is empty")
 
@@ -469,7 +473,7 @@ class LocalDockerExecutor(DeploymentExecutor):
 
         verify_result = self._run_command(
             "image.verify",
-            ["docker", "manifest", "inspect", registry_image_ref],
+            ["docker", "buildx", "imagetools", "inspect", registry_image_ref],
             log_path=log_path,
         )
         verify_result.image_tag = deployment.build.image_tag
@@ -696,7 +700,17 @@ class LocalDockerExecutor(DeploymentExecutor):
         workspace_dir = self.workspace_root / f"project-{deployment.project_id}" / f"deployment-{deployment.id}"
         repo_dir = workspace_dir / "repo"
         logs_dir = workspace_dir / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise WorkerExecutionError(
+                "repository.workspace",
+                f"Unable to prepare deployment workspace '{workspace_dir}': {exc}",
+                metadata={
+                    "workspace_path": str(workspace_dir),
+                    "workspace_root": str(self.workspace_root),
+                },
+            ) from exc
         return workspace_dir, repo_dir, logs_dir
 
     @staticmethod
@@ -1141,7 +1155,7 @@ class KubernetesExecutor(LocalDockerExecutor):
         requires_registry_push=True,
         supports_runtime_logs=True,
         supports_runtime_reconciliation=True,
-        managed_resources=("docker-image", "kubernetes-deployment", "kubernetes-service"),
+        managed_resources=("docker-image", "kubernetes-deployment", "kubernetes-service", "kubernetes-ingress"),
         required_config=(
             "CONTROL_PLANE_REGISTRY_ENABLED=true",
             "CONTROL_PLANE_REGISTRY_URL",
@@ -1152,6 +1166,12 @@ class KubernetesExecutor(LocalDockerExecutor):
             "CONTROL_PLANE_K8S_NAMESPACE",
             "CONTROL_PLANE_K8S_IMAGE_PULL_SECRET",
             "CONTROL_PLANE_K8S_DEPLOYMENT_MODE",
+            "CONTROL_PLANE_K8S_HELM_CHART_PATH",
+            "CONTROL_PLANE_K8S_HELM_BINARY",
+            "CONTROL_PLANE_K8S_HELM_TIMEOUT",
+            "CONTROL_PLANE_K8S_INGRESS_ENABLED",
+            "CONTROL_PLANE_K8S_INGRESS_CLASS_NAME",
+            "CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN",
             "CONTROL_PLANE_REGISTRY_USERNAME",
             "CONTROL_PLANE_REGISTRY_PASSWORD",
             "CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS",
@@ -1188,6 +1208,9 @@ class KubernetesExecutor(LocalDockerExecutor):
         helm_binary="helm",
         helm_timeout="180s",
         helm_runner_factory=HelmRunner,
+        ingress_enabled=False,
+        ingress_class_name="",
+        ingress_base_domain="127.0.0.1.nip.io",
     ):
         super().__init__(
             workspace_root=workspace_root,
@@ -1217,6 +1240,11 @@ class KubernetesExecutor(LocalDockerExecutor):
         self.helm_binary = helm_binary
         self.helm_timeout = helm_timeout
         self.helm_runner_factory = helm_runner_factory
+        self.ingress_enabled = bool(ingress_enabled)
+        self.ingress_class_name = (ingress_class_name or "").strip()
+        self.ingress_base_domain = (ingress_base_domain or "").strip().strip(".")
+        if self.ingress_enabled and not self.ingress_base_domain:
+            raise ValueError("CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN is required when ingress is enabled")
 
     def deploy(self, deployment):
         if self.deployment_mode == "helm":
@@ -1231,8 +1259,11 @@ class KubernetesExecutor(LocalDockerExecutor):
         port_forward_log_path = logs_dir / "kubernetes-port-forward.log"
         deployment_name = self._k8s_deployment_name(deployment)
         service_name = self._k8s_service_name(deployment)
-        service_url = self._service_url(service_name, deployment.project.port)
-        healthcheck_url = f"{service_url}{deployment.project.healthcheck_path}"
+        internal_service_url = self._service_url(service_name, deployment.project.port)
+        ingress_host = self._ingress_host(deployment.id)
+        service_url = self._ingress_url(ingress_host)
+        effective_url = service_url or internal_service_url
+        healthcheck_url = f"{effective_url}{deployment.project.healthcheck_path}"
         manifest = self._manifest(deployment, deployment_name=deployment_name, service_name=service_name)
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
@@ -1290,6 +1321,10 @@ class KubernetesExecutor(LocalDockerExecutor):
                         "service_name": service_name,
                         "namespace": self.namespace,
                         "service_url": service_url,
+                        "internal_service_url": internal_service_url,
+                        "ingress_name": deployment_name if self.ingress_enabled else None,
+                        "ingress_host": ingress_host,
+                        "ingress_class": self.ingress_class_name or None,
                         "port": deployment.project.port,
                     },
                 ),
@@ -1358,6 +1393,9 @@ class KubernetesExecutor(LocalDockerExecutor):
                 service_name=service_name,
                 log_path=port_forward_log_path,
             )
+            health_metadata |= self._collect_pod_runtime_metadata(
+                deployment_name, prefix="healthcheck", logs_dir=logs_dir
+            )
         except WorkerExecutionError as exc:
             diagnostics = self._collect_healthcheck_diagnostics(
                 deployment_name,
@@ -1374,6 +1412,10 @@ class KubernetesExecutor(LocalDockerExecutor):
                     "service_name": service_name,
                     "namespace": self.namespace,
                     "service_url": service_url,
+                    "internal_service_url": internal_service_url,
+                    "ingress_name": deployment_name if self.ingress_enabled else None,
+                    "ingress_host": ingress_host,
+                    "ingress_class": self.ingress_class_name or None,
                     "healthcheck_url": healthcheck_url,
                     "manifest_path": str(manifest_path),
                 },
@@ -1393,6 +1435,10 @@ class KubernetesExecutor(LocalDockerExecutor):
                             "service_name": service_name,
                             "namespace": self.namespace,
                             "service_url": service_url,
+                            "internal_service_url": internal_service_url,
+                            "ingress_name": deployment_name if self.ingress_enabled else None,
+                            "ingress_host": ingress_host,
+                            "ingress_class": self.ingress_class_name or None,
                             "healthcheck_url": healthcheck_url,
                         },
                     )
@@ -1411,6 +1457,10 @@ class KubernetesExecutor(LocalDockerExecutor):
                     "service_name": service_name,
                     "namespace": self.namespace,
                     "service_url": service_url,
+                    "internal_service_url": internal_service_url,
+                    "ingress_name": deployment_name if self.ingress_enabled else None,
+                    "ingress_host": ingress_host,
+                    "ingress_class": self.ingress_class_name or None,
                     "healthcheck_url": healthcheck_url,
                 },
             )
@@ -1425,6 +1475,10 @@ class KubernetesExecutor(LocalDockerExecutor):
                 "namespace": self.namespace,
                 "manifest_path": str(manifest_path),
                 "service_url": service_url,
+                "internal_service_url": internal_service_url,
+                "ingress_name": deployment_name if self.ingress_enabled else None,
+                "ingress_host": ingress_host,
+                "ingress_class": self.ingress_class_name or None,
                 "healthcheck_url": healthcheck_url,
                 "image_ref": deployment.build.image_ref,
                 **self._env_source_summary(deployment.project.env_vars),
@@ -1445,11 +1499,19 @@ class KubernetesExecutor(LocalDockerExecutor):
         release_name = helm_release_name(deployment.project, deployment)
         service_name = self._helm_resource_name(release_name)
         deployment_name = service_name
-        service_url = self._service_url(service_name, deployment.project.port)
-        healthcheck_url = f"{service_url}{deployment.project.healthcheck_path}"
+        internal_service_url = self._service_url(service_name, deployment.project.port)
+        ingress_host = self._ingress_host(deployment.id)
+        service_url = self._ingress_url(ingress_host)
+        effective_url = service_url or internal_service_url
+        healthcheck_url = f"{effective_url}{deployment.project.healthcheck_path}"
         values = generic_web_app_values(
             deployment,
-            GenericWebAppValuesConfig(image_pull_secret=self.image_pull_secret),
+            GenericWebAppValuesConfig(
+                image_pull_secret=self.image_pull_secret,
+                ingress_enabled=self.ingress_enabled,
+                ingress_host=ingress_host or "",
+                ingress_class_name=self.ingress_class_name,
+            ),
         )
         values_path.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
 
@@ -1459,6 +1521,10 @@ class KubernetesExecutor(LocalDockerExecutor):
             "namespace": self.namespace,
             "chart_path": self.helm_chart_path,
             "values_path": str(values_path),
+            "internal_service_url": internal_service_url,
+            "ingress_name": service_name if self.ingress_enabled else None,
+            "ingress_host": ingress_host,
+            "ingress_class": self.ingress_class_name or None,
         }
         events = [
             self._event(
@@ -1517,6 +1583,7 @@ class KubernetesExecutor(LocalDockerExecutor):
             "service_name": service_name,
             "deployment_name": deployment_name,
             "service_url": service_url,
+            "internal_service_url": internal_service_url,
             "healthcheck_url": healthcheck_url,
         }
         events.append(
@@ -1543,6 +1610,9 @@ class KubernetesExecutor(LocalDockerExecutor):
                 deployment,
                 service_name=service_name,
                 log_path=port_forward_log_path,
+            )
+            health_metadata |= self._collect_pod_runtime_metadata(
+                deployment_name, prefix="healthcheck", logs_dir=logs_dir
             )
         except WorkerExecutionError as exc:
             diagnostics = self._collect_healthcheck_diagnostics(
@@ -1650,7 +1720,7 @@ class KubernetesExecutor(LocalDockerExecutor):
         start_event = self._event(
             "kubernetes.resources_delete_started",
             "stopped",
-            "Deleting Kubernetes Deployment and Service resources",
+            "Deleting Kubernetes Deployment, Service, and Ingress resources",
             step="deploy.kubernetes.delete",
             metadata={"deployment_name": deployment_name, "service_name": service_name, "namespace": self.namespace},
         )
@@ -1660,6 +1730,7 @@ class KubernetesExecutor(LocalDockerExecutor):
                 "delete",
                 f"deployment/{deployment_name}",
                 f"service/{service_name}",
+                f"ingress/{deployment_name}",
                 "--ignore-not-found=true",
                 "--wait=false",
             ),
@@ -1792,12 +1863,15 @@ class KubernetesExecutor(LocalDockerExecutor):
         service_name = self._k8s_service_name(deployment)
         deployment_exists = self._kubectl_resource_exists("deployment", deployment_name)
         service_exists = self._kubectl_resource_exists("service", service_name)
+        ingress_exists = self._kubectl_resource_exists("ingress", deployment_name)
         return {
             "namespace": self.namespace,
             "deployment_name": deployment_name,
             "service_name": service_name,
             "deployment_exists": deployment_exists,
             "service_exists": service_exists,
+            "ingress_name": deployment_name,
+            "ingress_exists": ingress_exists,
         }
 
     def runtime_helm_status(self, deployment):
@@ -1956,6 +2030,29 @@ class KubernetesExecutor(LocalDockerExecutor):
             if not exists:
                 missing_resources.append({"kind": "Secret", "name": name, "usage": "image_pull_secret"})
 
+        if self.ingress_enabled:
+            args = self._kubectl_args(
+                "api-resources", "--api-group=networking.k8s.io", "--output=name"
+            )
+            result = self._execute_command(args, allow_heartbeat=False)
+            commands.append(args)
+            api_resource_names = set((result.stdout or "").split())
+            ingress_api_available = result.returncode == 0 and bool(
+                {"ingresses", "ingresses.networking.k8s.io"} & api_resource_names
+            )
+            checked_resources.append("api/ingresses.networking.k8s.io")
+            log_lines.append(
+                f"api/ingresses.networking.k8s.io: {'found' if ingress_api_available else 'missing'}"
+            )
+            if not ingress_api_available:
+                missing_resources.append({"kind": "APIResource", "name": "ingresses.networking.k8s.io"})
+            if self.ingress_class_name:
+                exists = self._kubectl_resource_exists_for_preflight("ingressclass", self.ingress_class_name)
+                checked_resources.append(f"ingressclass/{self.ingress_class_name}")
+                log_lines.append(f"ingressclass/{self.ingress_class_name}: {'found' if exists else 'missing'}")
+                if not exists:
+                    missing_resources.append({"kind": "IngressClass", "name": self.ingress_class_name})
+
         self._write_log(log_path, commands, "\n".join(log_lines) + ("\n" if log_lines else ""))
 
         metadata = {
@@ -1966,6 +2063,9 @@ class KubernetesExecutor(LocalDockerExecutor):
             "missing_resource_names": [item["name"] for item in missing_resources],
             "missing_resource_types": sorted({item["kind"] for item in missing_resources}),
             "image_pull_secret": references.get("image_pull_secret"),
+            "ingress_enabled": self.ingress_enabled,
+            "ingress_class": self.ingress_class_name or None,
+            "ingress_base_domain": self.ingress_base_domain if self.ingress_enabled else None,
             **self._env_source_summary(deployment.project.env_vars),
         }
 
@@ -2039,40 +2139,74 @@ class KubernetesExecutor(LocalDockerExecutor):
         if self.image_pull_secret:
             pod_spec["imagePullSecrets"] = [{"name": self.image_pull_secret}]
 
+        items = [
+            {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "metadata": {"name": deployment_name, "namespace": self.namespace, "labels": labels},
+                "spec": {
+                    "replicas": 1,
+                    "selector": {"matchLabels": labels},
+                    "template": {
+                        "metadata": {"labels": labels},
+                        "spec": pod_spec,
+                    },
+                },
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "Service",
+                "metadata": {"name": service_name, "namespace": self.namespace, "labels": labels},
+                "spec": {
+                    "selector": labels,
+                    "ports": [
+                        {
+                            "name": "http",
+                            "port": deployment.project.port,
+                            "targetPort": deployment.project.port,
+                        }
+                    ],
+                    "type": "ClusterIP",
+                },
+            },
+        ]
+        if self.ingress_enabled:
+            ingress_spec = {
+                "rules": [
+                    {
+                        "host": self._ingress_host(deployment.id),
+                        "http": {
+                            "paths": [
+                                {
+                                    "path": "/",
+                                    "pathType": "Prefix",
+                                    "backend": {
+                                        "service": {
+                                            "name": service_name,
+                                            "port": {"number": deployment.project.port},
+                                        }
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+            if self.ingress_class_name:
+                ingress_spec["ingressClassName"] = self.ingress_class_name
+            items.append(
+                {
+                    "apiVersion": "networking.k8s.io/v1",
+                    "kind": "Ingress",
+                    "metadata": {"name": deployment_name, "namespace": self.namespace, "labels": labels},
+                    "spec": ingress_spec,
+                }
+            )
+
         return {
             "apiVersion": "v1",
             "kind": "List",
-            "items": [
-                {
-                    "apiVersion": "apps/v1",
-                    "kind": "Deployment",
-                    "metadata": {"name": deployment_name, "namespace": self.namespace, "labels": labels},
-                    "spec": {
-                        "replicas": 1,
-                        "selector": {"matchLabels": labels},
-                        "template": {
-                            "metadata": {"labels": labels},
-                            "spec": pod_spec,
-                        },
-                    },
-                },
-                {
-                    "apiVersion": "v1",
-                    "kind": "Service",
-                    "metadata": {"name": service_name, "namespace": self.namespace, "labels": labels},
-                    "spec": {
-                        "selector": labels,
-                        "ports": [
-                            {
-                                "name": "http",
-                                "port": deployment.project.port,
-                                "targetPort": deployment.project.port,
-                            }
-                        ],
-                        "type": "ClusterIP",
-                    },
-                },
-            ],
+            "items": items,
         }
 
     def _kubernetes_env_vars(self, env_vars):
@@ -2219,6 +2353,26 @@ class KubernetesExecutor(LocalDockerExecutor):
     def _service_url(self, service_name, port):
         return f"http://{service_name}.{self.namespace}.svc.cluster.local:{port}"
 
+    def _ingress_host(self, deployment_id):
+        if not self.ingress_enabled:
+            return None
+        return f"paas-deployment-{self._alphabetic_id(deployment_id)}.{self.ingress_base_domain}"
+
+    @staticmethod
+    def _alphabetic_id(value):
+        number = int(value)
+        if number < 1:
+            raise ValueError("deployment_id must be a positive integer")
+        encoded = []
+        while number:
+            number, remainder = divmod(number - 1, 26)
+            encoded.append(chr(ord("a") + remainder))
+        return "".join(reversed(encoded))
+
+    @staticmethod
+    def _ingress_url(host):
+        return f"http://{host}" if host else None
+
     @staticmethod
     def _normalize_deployment_mode(value):
         normalized = (value or "manifest").strip().lower()
@@ -2341,11 +2495,14 @@ class KubernetesExecutor(LocalDockerExecutor):
 
         describe_summaries = []
         logs_summaries = []
+        previous_logs_summaries = []
         describe_log_paths = []
         logs_log_paths = []
+        previous_logs_log_paths = []
         for pod_name in pod_names:
             describe_log_path = logs_dir / f"kubernetes-{prefix}-describe-{pod_name}.log"
             logs_log_path = logs_dir / f"kubernetes-{prefix}-logs-{pod_name}.log"
+            previous_logs_log_path = logs_dir / f"kubernetes-{prefix}-logs-previous-{pod_name}.log"
             describe_output = self._run_diagnostic_command(
                 self._kubectl_args("describe", f"pod/{pod_name}"),
                 log_path=describe_log_path,
@@ -2354,14 +2511,22 @@ class KubernetesExecutor(LocalDockerExecutor):
                 self._kubectl_args("logs", f"pod/{pod_name}", "--tail", "50"),
                 log_path=logs_log_path,
             )
+            previous_logs_output = self._run_diagnostic_command(
+                self._kubectl_args("logs", f"pod/{pod_name}", "--previous", "--tail", "50"),
+                log_path=previous_logs_log_path,
+            )
             describe_log_paths.append(str(describe_log_path))
             logs_log_paths.append(str(logs_log_path))
+            previous_logs_log_paths.append(str(previous_logs_log_path))
             describe_summary = self._summarize_output(describe_output)
             logs_summary = self._summarize_output(logs_output)
+            previous_logs_summary = self._summarize_output(previous_logs_output)
             if describe_summary:
                 describe_summaries.append(f"{pod_name}: {describe_summary}")
             if logs_summary:
                 logs_summaries.append(f"{pod_name}: {logs_summary}")
+            if previous_logs_summary:
+                previous_logs_summaries.append(f"{pod_name}: {previous_logs_summary}")
 
         return {
             f"{prefix}_pod_names_log_path": str(pod_names_log_path),
@@ -2370,6 +2535,82 @@ class KubernetesExecutor(LocalDockerExecutor):
             f"{prefix}_pod_describe_summary": " | ".join(describe_summaries)[:1000] if describe_summaries else None,
             f"{prefix}_pod_logs_log_paths": logs_log_paths,
             f"{prefix}_pod_logs_summary": " | ".join(logs_summaries)[:1000] if logs_summaries else None,
+            f"{prefix}_pod_previous_logs_log_paths": previous_logs_log_paths,
+            f"{prefix}_pod_previous_logs_summary": " | ".join(previous_logs_summaries)[:1000]
+            if previous_logs_summaries
+            else None,
+        } | self._collect_pod_runtime_metadata(deployment_name, prefix=prefix, logs_dir=logs_dir)
+
+    def _collect_pod_runtime_metadata(self, deployment_name, *, prefix, logs_dir):
+        if not deployment_name:
+            return {}
+        pod_json_log_path = logs_dir / f"kubernetes-{prefix}-pods.json.log"
+        try:
+            output = self._run_diagnostic_command(
+                self._kubectl_args(
+                    "get",
+                    "pods",
+                    "-l",
+                    f"app.kubernetes.io/instance={deployment_name}",
+                    "-o",
+                    "json",
+                ),
+                log_path=pod_json_log_path,
+            )
+        except Exception:
+            return {}
+        try:
+            items = json.loads(output).get("items", [])
+        except (AttributeError, json.JSONDecodeError):
+            items = []
+        if not items:
+            return {}
+
+        pods = []
+        for item in items[:3]:
+            spec = item.get("spec") or {}
+            status = item.get("status") or {}
+            containers_by_name = {
+                container.get("name"): container for container in spec.get("containers") or []
+            }
+            container_details = []
+            for container_status in status.get("containerStatuses") or []:
+                state = container_status.get("state") or {}
+                state_name = next((name for name in ("waiting", "terminated", "running") if state.get(name)), None)
+                state_detail = state.get(state_name) or {} if state_name else {}
+                spec_container = containers_by_name.get(container_status.get("name")) or {}
+                container_details.append(
+                    {
+                        "name": container_status.get("name"),
+                        "image": container_status.get("image") or spec_container.get("image"),
+                        "ready": bool(container_status.get("ready")),
+                        "restart_count": int(container_status.get("restartCount") or 0),
+                        "reason": state_detail.get("reason") or (state_name.title() if state_name else None),
+                    }
+                )
+            pods.append(
+                {
+                    "name": (item.get("metadata") or {}).get("name"),
+                    "phase": status.get("phase"),
+                    "containers": container_details,
+                    "images": [container.get("image") for container in spec.get("containers") or [] if container.get("image")],
+                    "image_pull_secrets": [
+                        secret.get("name") for secret in spec.get("imagePullSecrets") or [] if secret.get("name")
+                    ],
+                }
+            )
+
+        primary = pods[0] if pods else {}
+        primary_containers = primary.get("containers") or []
+        return {
+            f"{prefix}_pod_runtime_log_path": str(pod_json_log_path),
+            f"{prefix}_pod_runtime": pods,
+            f"{prefix}_pod_names": [pod.get("name") for pod in pods if pod.get("name")],
+            f"{prefix}_pod_phase": primary.get("phase"),
+            f"{prefix}_container_reason": primary_containers[0].get("reason") if primary_containers else None,
+            f"{prefix}_restart_count": sum(item.get("restart_count", 0) for item in primary_containers),
+            f"{prefix}_images": primary.get("images") or [],
+            f"{prefix}_image_pull_secrets": primary.get("image_pull_secrets") or [],
         }
 
     def _run_diagnostic_command(self, args, *, log_path):
@@ -2470,6 +2711,14 @@ def _build_kubernetes_executor():
         namespace=current_app.config.get("CONTROL_PLANE_K8S_NAMESPACE", "default"),
         image_pull_secret=current_app.config.get("CONTROL_PLANE_K8S_IMAGE_PULL_SECRET"),
         deployment_mode=current_app.config.get("CONTROL_PLANE_K8S_DEPLOYMENT_MODE", "manifest"),
+        helm_chart_path=current_app.config.get("CONTROL_PLANE_K8S_HELM_CHART_PATH", "deploy/helm/generic-web-app"),
+        helm_binary=current_app.config.get("CONTROL_PLANE_K8S_HELM_BINARY", "helm"),
+        helm_timeout=current_app.config.get("CONTROL_PLANE_K8S_HELM_TIMEOUT", "180s"),
+        ingress_enabled=current_app.config.get("CONTROL_PLANE_K8S_INGRESS_ENABLED", False),
+        ingress_class_name=current_app.config.get("CONTROL_PLANE_K8S_INGRESS_CLASS_NAME", ""),
+        ingress_base_domain=current_app.config.get(
+            "CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN", "127.0.0.1.nip.io"
+        ),
     )
 
 

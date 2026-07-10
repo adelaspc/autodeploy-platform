@@ -4,16 +4,21 @@ x-control-plane-env: &control-plane-env
   FLASK_APP: wsgi.py
   PORT: ${PORT:-5000}
   CONTROL_PLANE_DEPLOY_HOST: ${CONTROL_PLANE_DEPLOY_HOST:-host.docker.internal}
+  DOCKER_BUILDKIT: ${DOCKER_BUILDKIT:-1}
 
 x-control-plane-base: &control-plane-base
   build:
     context: .
   env_file:
-    - .env
+    - path: ${CONTROL_PLANE_ENV_FILE:-.env.demo}
+      required: false
+    - path: .env.secrets
+      required: false
   environment:
     <<: *control-plane-env
   volumes:
     - control_plane_workspaces:/tmp/paas-workspaces
+    - ${CONTROL_PLANE_KUBECONFIG_HOST:-/dev/null}:${CONTROL_PLANE_KUBECONFIG:-/tmp/paas-kubeconfig}:ro
   extra_hosts:
     - "host.docker.internal:host-gateway"
 
@@ -35,6 +40,9 @@ services:
         condition: service_completed_successfully
     ports:
       - "${CONTROL_PLANE_APP_PORT:-5000}:${PORT:-5000}"
+    environment:
+      <<: *control-plane-env
+      CONTROL_PLANE_COMPONENT: api
     healthcheck:
       test:
         [
@@ -49,34 +57,47 @@ services:
 
   control-plane-worker:
     <<: *control-plane-base
+    group_add:
+      - "${CONTROL_PLANE_KUBECONFIG_GID:-0}"
     volumes:
       - control_plane_workspaces:/tmp/paas-workspaces
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${CONTROL_PLANE_KUBECONFIG_HOST:-/dev/null}:${CONTROL_PLANE_KUBECONFIG:-/tmp/paas-kubeconfig}:ro
     depends_on:
       db:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
     command: ["python", "-m", "flask", "--app", "wsgi:app", "run-worker"]
+    environment:
+      <<: *control-plane-env
+      CONTROL_PLANE_COMPONENT: worker
     restart: unless-stopped
 
   control-plane-reconciler:
     <<: *control-plane-base
+    group_add:
+      - "${CONTROL_PLANE_KUBECONFIG_GID:-0}"
     volumes:
       - control_plane_workspaces:/tmp/paas-workspaces
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${CONTROL_PLANE_KUBECONFIG_HOST:-/dev/null}:${CONTROL_PLANE_KUBECONFIG:-/tmp/paas-kubeconfig}:ro
     depends_on:
       db:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
     command: ["python", "-m", "flask", "--app", "wsgi:app", "run-reconciler-loop"]
+    environment:
+      <<: *control-plane-env
+      CONTROL_PLANE_COMPONENT: reconciler
     restart: unless-stopped
 
   db:
     image: mysql:8.4
     env_file:
-      - .env
+      - path: ${CONTROL_PLANE_ENV_FILE:-.env.demo}
+        required: false
+      - path: .env.secrets
+        required: false
     environment:
       MYSQL_DATABASE: ${CONTROL_PLANE_MYSQL_DATABASE:-control_plane}
       MYSQL_USER: ${CONTROL_PLANE_MYSQL_USER:-control_plane_user}

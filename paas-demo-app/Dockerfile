@@ -11,6 +11,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         docker.io \
+        docker-cli \
+        docker-buildx \
         git \
         kubernetes-client \
     && rm -rf /var/lib/apt/lists/* \
@@ -27,7 +29,8 @@ COPY --chown=appuser:appuser worker ./worker
 COPY --chown=appuser:appuser wsgi.py ./
 COPY --chown=appuser:appuser --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-RUN mkdir -p /app/instance /app/frontend && chown -R appuser:appuser /app
+RUN mkdir -p /app/instance /app/frontend /tmp/paas-workspaces \
+    && chown -R appuser:appuser /app /tmp/paas-workspaces
 
 USER appuser
 

@@ -2,7 +2,6 @@ import hashlib
 import hmac
 import json
 
-from backend.extensions import db
 from backend.models import PlatformDeployment, WebhookDelivery
 
 

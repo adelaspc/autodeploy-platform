@@ -273,6 +273,82 @@ def test_kubernetes_manifest_generation_includes_image_pull_secret_when_configur
     ]
 
 
+def test_kubernetes_manifest_generation_includes_ingress_when_enabled():
+    executor = KubernetesExecutor(
+        workspace_root="/tmp/test-k8s",
+        command_timeout=30,
+        registry_enabled=True,
+        namespace="apps",
+        ingress_enabled=True,
+        ingress_class_name="nginx",
+        ingress_base_domain="127.0.0.1.nip.io",
+    )
+    deployment = make_kubernetes_deployment_stub(deployment_id=8, name="Demo App")
+
+    manifest = executor._manifest(
+        deployment,
+        deployment_name="paas-demo-app-8",
+        service_name="paas-demo-app-8-svc",
+    )
+
+    ingress = manifest["items"][2]
+    assert ingress["kind"] == "Ingress"
+    assert ingress["spec"]["ingressClassName"] == "nginx"
+    rule = ingress["spec"]["rules"][0]
+    assert rule["host"] == "paas-deployment-h.127.0.0.1.nip.io"
+    assert rule["http"]["paths"][0]["backend"]["service"] == {
+        "name": "paas-demo-app-8-svc",
+        "port": {"number": 3000},
+    }
+
+
+def test_ingress_hostname_encodes_deployment_id_without_digits():
+    executor = KubernetesExecutor(
+        workspace_root="/tmp/test-k8s",
+        command_timeout=30,
+        ingress_enabled=True,
+        ingress_base_domain="127.0.0.1.nip.io",
+    )
+
+    assert executor._ingress_host(1) == "paas-deployment-a.127.0.0.1.nip.io"
+    assert executor._ingress_host(26) == "paas-deployment-z.127.0.0.1.nip.io"
+    assert executor._ingress_host(27) == "paas-deployment-aa.127.0.0.1.nip.io"
+
+
+def test_collect_pod_runtime_metadata_returns_first_class_fields(tmp_path):
+    pod_payload = {
+        "items": [{
+            "metadata": {"name": "demo-pod"},
+            "spec": {
+                "containers": [{"name": "app", "image": "docker.io/example/app:v1"}],
+                "imagePullSecrets": [{"name": "dockerhub-pull"}],
+            },
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{
+                    "name": "app",
+                    "image": "docker.io/example/app:v1",
+                    "ready": False,
+                    "restartCount": 3,
+                    "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                }],
+            },
+        }]
+    }
+
+    def runner(args, **_kwargs):
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=json.dumps(pod_payload), stderr="")
+
+    executor = KubernetesExecutor(workspace_root=tmp_path, command_timeout=30, runner=runner)
+    metadata = executor._collect_pod_runtime_metadata("paas-demo-1", prefix="healthcheck", logs_dir=tmp_path)
+
+    assert metadata["healthcheck_pod_phase"] == "Running"
+    assert metadata["healthcheck_container_reason"] == "CrashLoopBackOff"
+    assert metadata["healthcheck_restart_count"] == 3
+    assert metadata["healthcheck_images"] == ["docker.io/example/app:v1"]
+    assert metadata["healthcheck_image_pull_secrets"] == ["dockerhub-pull"]
+
+
 def test_kubernetes_manifest_generation_supports_configmap_and_secret_env_refs():
     executor = KubernetesExecutor(
         workspace_root="/tmp/test-k8s",
@@ -344,12 +420,20 @@ def test_kubernetes_executor_processes_mixed_env_sources_and_records_summary(cli
             repo_dir.mkdir(parents=True, exist_ok=True)
             (repo_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="clone ok\n", stderr="")
-        if args[:2] in (["docker", "build"], ["docker", "tag"], ["docker", "push"]) or args[:3] == [
+        if args[:2] in (["docker", "build"], ["docker", "tag"], ["docker", "push"]) or args[:4] == [
             "docker",
-            "manifest",
+            "buildx",
+            "imagetools",
             "inspect",
         ]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
+        if "api-resources" in args:
+            return subprocess.CompletedProcess(
+                args=args,
+                returncode=0,
+                stdout="ingressclasses.networking.k8s.io\ningresses.networking.k8s.io\n",
+                stderr="",
+            )
         if args[:3] == ["kubectl", "--namespace", "default"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="kubectl ok\n", stderr="")
         raise AssertionError(f"Unexpected command: {args}")
@@ -364,18 +448,30 @@ def test_kubernetes_executor_processes_mixed_env_sources_and_records_summary(cli
         registry_enabled=True,
         registry_url="docker.io",
         registry_namespace="example",
+        ingress_enabled=True,
+        ingress_base_domain="127.0.0.1.nip.io",
         popen_factory=DummyPopen,
     )
 
     processed = process_next_pending_deployment(executor=executor)
 
     assert processed is not None
+    assert processed.service_url == f"http://paas-deployment-{executor._alphabetic_id(processed.id)}.127.0.0.1.nip.io"
     deployment = client.get(f"/api/projects/{processed.project_id}/deployments/{processed.id}").get_json()
     apply_event = next(event for event in deployment["events"] if event["event_type"] == "deployment.apply_succeeded")
     assert apply_event["metadata_json"]["env_var_count"] == 3
     assert apply_event["metadata_json"]["literal_env_count"] == 1
     assert apply_event["metadata_json"]["configmap_refs_used"] == ["my-app-config"]
     assert apply_event["metadata_json"]["secret_refs_used"] == ["my-app-secret"]
+    summary = client.get(
+        f"/api/projects/{processed.project_id}/deployments/{processed.id}/summary"
+    ).get_json()
+    assert summary["kubernetes_ingress_host"] == (
+        f"paas-deployment-{executor._alphabetic_id(processed.id)}.127.0.0.1.nip.io"
+    )
+    assert summary["internal_service_url"] == (
+        f"http://paas-k8s-env-success-{processed.id}-svc.default.svc.cluster.local:5000"
+    )
 
 
 def test_create_executor_returns_kubernetes_executor(app):
@@ -384,12 +480,25 @@ def test_create_executor_returns_kubernetes_executor(app):
         app.config["CONTROL_PLANE_REGISTRY_ENABLED"] = True
         app.config["CONTROL_PLANE_KUBECONFIG"] = "/tmp/kubeconfig"
         app.config["CONTROL_PLANE_K8S_NAMESPACE"] = "microk8s"
+        app.config["CONTROL_PLANE_K8S_DEPLOYMENT_MODE"] = "helm"
+        app.config["CONTROL_PLANE_K8S_HELM_CHART_PATH"] = "/opt/charts/generic-web-app"
+        app.config["CONTROL_PLANE_K8S_HELM_BINARY"] = "/usr/local/bin/helm"
+        app.config["CONTROL_PLANE_K8S_HELM_TIMEOUT"] = "240s"
+        app.config["CONTROL_PLANE_K8S_INGRESS_ENABLED"] = True
+        app.config["CONTROL_PLANE_K8S_INGRESS_CLASS_NAME"] = "nginx"
+        app.config["CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN"] = "127.0.0.1.nip.io"
         executor = create_executor()
 
     assert isinstance(executor, KubernetesExecutor)
     assert executor.kubeconfig == "/tmp/kubeconfig"
     assert executor.namespace == "microk8s"
-    assert executor.deployment_mode == "manifest"
+    assert executor.deployment_mode == "helm"
+    assert executor.helm_chart_path == "/opt/charts/generic-web-app"
+    assert executor.helm_binary == "/usr/local/bin/helm"
+    assert executor.helm_timeout == "240s"
+    assert executor.ingress_enabled is True
+    assert executor.ingress_class_name == "nginx"
+    assert executor.ingress_base_domain == "127.0.0.1.nip.io"
 
 
 def test_create_executor_rejects_invalid_kubernetes_deployment_mode(app):
@@ -412,12 +521,29 @@ def test_executor_contract_for_kubernetes_is_explicit():
         "docker-image",
         "kubernetes-deployment",
         "kubernetes-service",
+        "kubernetes-ingress",
     )
     assert contract.required_config == (
         "CONTROL_PLANE_REGISTRY_ENABLED=true",
         "CONTROL_PLANE_REGISTRY_URL",
         "CONTROL_PLANE_REGISTRY_NAMESPACE",
         "CONTROL_PLANE_KUBECONFIG",
+    )
+    assert contract.optional_config == (
+        "CONTROL_PLANE_K8S_NAMESPACE",
+        "CONTROL_PLANE_K8S_IMAGE_PULL_SECRET",
+        "CONTROL_PLANE_K8S_DEPLOYMENT_MODE",
+        "CONTROL_PLANE_K8S_HELM_CHART_PATH",
+        "CONTROL_PLANE_K8S_HELM_BINARY",
+        "CONTROL_PLANE_K8S_HELM_TIMEOUT",
+        "CONTROL_PLANE_K8S_INGRESS_ENABLED",
+        "CONTROL_PLANE_K8S_INGRESS_CLASS_NAME",
+        "CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN",
+        "CONTROL_PLANE_REGISTRY_USERNAME",
+        "CONTROL_PLANE_REGISTRY_PASSWORD",
+        "CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS",
+        "CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS",
+        "CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS",
     )
 
 
@@ -487,12 +613,16 @@ def test_kubernetes_executor_helm_mode_deploys_with_generated_values_and_release
     assert result.metadata["helm_release_name"] == "paas-helm-app-production-3"
     assert result.metadata["namespace"] == "apps"
     assert result.metadata["chart_path"] == "deploy/helm/generic-web-app"
-    assert result.service_url == "http://paas-helm-app-production-3-generic-web-app.apps.svc.cluster.local:3000"
+    assert result.service_url is None
+    assert result.metadata["internal_service_url"] == "http://paas-helm-app-production-3-generic-web-app.apps.svc.cluster.local:3000"
     event_types = [event["event_type"] for event in result.events]
     assert "kubernetes.helm_deploy_started" in event_types
     assert "kubernetes.helm_deploy_succeeded" in event_types
     assert "kubernetes.healthcheck_succeeded" in event_types
-    assert not kubectl_commands
+    assert len(kubectl_commands) == 1
+    assert "get" in kubectl_commands[0]
+    assert "pods" in kubectl_commands[0]
+    assert "json" in kubectl_commands[0]
 
 
 def test_kubernetes_executor_helm_mode_failure_raises_worker_execution_error(tmp_path):
@@ -763,7 +893,7 @@ def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, t
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="tag ok\n", stderr="")
         if args[:2] == ["docker", "push"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="push ok\n", stderr="")
-        if args[:3] == ["docker", "manifest", "inspect"]:
+        if args[:4] == ["docker", "buildx", "imagetools", "inspect"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="manifest ok\n", stderr="")
         if args[:3] == ["kubectl", "--namespace", "default"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="kubectl ok\n", stderr="")
@@ -788,7 +918,7 @@ def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, t
     assert processed.id == pending["id"]
     assert processed.status == "running"
     assert processed.deploy_target == "kubernetes"
-    assert processed.service_url == f"http://paas-k8s-success-{processed.id}-svc.default.svc.cluster.local:5000"
+    assert processed.service_url is None
 
     deployment = client.get(f"/api/projects/{processed.project_id}/deployments/{processed.id}").get_json()
     event_types = [event["event_type"] for event in deployment["events"]]
@@ -964,6 +1094,13 @@ def test_kubernetes_executor_fails_when_rollout_fails(tmp_path):
                     stderr="",
                 )
             if "logs" in args and "pod/app-123" in args:
+                if "--previous" in args:
+                    return subprocess.CompletedProcess(
+                        args=args,
+                        returncode=0,
+                        stdout="Previous error: missing DATABASE_URL\n",
+                        stderr="",
+                    )
                 return subprocess.CompletedProcess(
                     args=args,
                     returncode=0,
@@ -1026,10 +1163,15 @@ def test_kubernetes_executor_fails_when_rollout_fails(tmp_path):
         assert failed_event["metadata_json"]["rollout_pod_names"] == ["app-123"]
         assert failed_event["metadata_json"]["rollout_pod_describe_summary"] == "app-123: Pod Events: | Warning  Failed  15s  kubelet  Back-off pulling image"
         assert failed_event["metadata_json"]["rollout_pod_logs_summary"] == "app-123: Error: failed to start application"
+        assert (
+            failed_event["metadata_json"]["rollout_pod_previous_logs_summary"]
+            == "app-123: Previous error: missing DATABASE_URL"
+        )
         assert exc.metadata["rollout_pods_summary"] == "NAME READY STATUS RESTARTS AGE | app-123 0/1 ImagePullBackOff 0 15s"
         assert exc.metadata["rollout_describe_summary"] == "Events: | Warning  Failed  15s  kubelet  Failed to pull image"
         assert exc.metadata["rollout_pod_describe_summary"] == "app-123: Pod Events: | Warning  Failed  15s  kubelet  Back-off pulling image"
         assert exc.metadata["rollout_pod_logs_summary"] == "app-123: Error: failed to start application"
+        assert exc.metadata["rollout_pod_previous_logs_summary"] == "app-123: Previous error: missing DATABASE_URL"
 
 
 def test_kubernetes_executor_fails_when_manifest_apply_fails(tmp_path):

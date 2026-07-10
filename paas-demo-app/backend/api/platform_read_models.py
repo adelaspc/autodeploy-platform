@@ -1,6 +1,6 @@
 from sqlalchemy.orm import selectinload
 
-from backend.api.auth import api_auth_enabled, configured_api_roles
+from backend.api.auth import api_auth_disabled_allowed_for_config, api_auth_enabled, configured_api_roles
 from backend.api.project_validation import (
     kubernetes_deployment_prereq_error,
     kubernetes_deployment_prereq_missing_settings,
@@ -48,6 +48,7 @@ def platform_status_payload():
     registry_enabled = bool(current_app.config.get("CONTROL_PLANE_REGISTRY_ENABLED", False))
     registry_missing = registry_missing_settings()
     configured_roles = configured_api_roles()
+    auth_disabled_allowed = api_auth_disabled_allowed_for_config(current_app.config)
 
     deployment_creation_ready = deployment_prereq_error is None
     status = "ok" if deployment_creation_ready else "degraded"
@@ -63,12 +64,14 @@ def platform_status_payload():
         "api_auth": {
             "enabled": api_auth_enabled(),
             "configured_roles": configured_roles,
+            "auth_disabled_allowed": auth_disabled_allowed,
             "token_transport": "bearer",
             "public_routes": ["/health"],
             "protected_health_routes": [
                 "/health/db",
                 "/health/platform",
                 "/health/activity",
+                "/health/observability",
             ],
             "webhook_auth_mode": "github_signature",
         },
@@ -81,10 +84,20 @@ def platform_status_payload():
         "kubernetes": {
             "selected": kubernetes_selected,
             "namespace": (current_app.config.get("CONTROL_PLANE_K8S_NAMESPACE", "default") or "").strip() or None,
+            "deployment_mode": (
+                current_app.config.get("CONTROL_PLANE_K8S_DEPLOYMENT_MODE", "manifest") or ""
+            ).strip()
+            or None,
             "kubeconfig_configured": bool((current_app.config.get("CONTROL_PLANE_KUBECONFIG") or "").strip()),
             "image_pull_secret_configured": bool(
                 (current_app.config.get("CONTROL_PLANE_K8S_IMAGE_PULL_SECRET") or "").strip()
             ),
+            "helm_chart_path": (
+                current_app.config.get("CONTROL_PLANE_K8S_HELM_CHART_PATH", "deploy/helm/generic-web-app") or ""
+            ).strip()
+            or None,
+            "helm_binary": (current_app.config.get("CONTROL_PLANE_K8S_HELM_BINARY", "helm") or "").strip() or None,
+            "helm_timeout": (current_app.config.get("CONTROL_PLANE_K8S_HELM_TIMEOUT", "180s") or "").strip() or None,
             "deployment_prereqs_ready": not kubernetes_missing,
             "missing_deployment_prereqs": kubernetes_missing,
         },

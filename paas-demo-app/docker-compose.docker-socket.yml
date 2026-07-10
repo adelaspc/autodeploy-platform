@@ -1,0 +1,12 @@
+services:
+  control-plane-worker:
+    group_add:
+      - "${CONTROL_PLANE_DOCKER_SOCKET_GID:-1002}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  control-plane-reconciler:
+    group_add:
+      - "${CONTROL_PLANE_DOCKER_SOCKET_GID:-1002}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

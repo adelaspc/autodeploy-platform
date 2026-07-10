@@ -315,6 +315,8 @@ def reconcile_kubernetes_nonrunning_resources(deployment):
         leftovers.append("Deployment")
     if resource_status.get("service_exists", False):
         leftovers.append("Service")
+    if resource_status.get("ingress_exists", False):
+        leftovers.append("Ingress")
     if not leftovers:
         return False
 

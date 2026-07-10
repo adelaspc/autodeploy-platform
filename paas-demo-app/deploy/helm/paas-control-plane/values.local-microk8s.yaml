@@ -7,6 +7,7 @@ config:
   CONTROL_PLANE_ENV: development
   CONTROL_PLANE_EXECUTOR: fake
   CONTROL_PLANE_WORKSPACE_ROOT: /tmp/paas-workspaces
+  CONTROL_PLANE_ALLOW_AUTH_DISABLED: "true"
 
 secrets:
   CONTROL_PLANE_DATABASE_URL: sqlite:////tmp/paas-workspaces/control_plane.db
@@ -18,4 +19,4 @@ workspace:
     enabled: true
 
 dockerSocket:
-  enabled: false
+  enabled: true

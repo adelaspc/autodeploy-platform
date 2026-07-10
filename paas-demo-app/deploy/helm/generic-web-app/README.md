@@ -16,7 +16,7 @@ It does not render jobs, migrations, PVCs, RBAC, service accounts, Docker socket
 
 ## Relationship To The PaaS
 
-`deploy/helm/paas-control-plane` deploys internal platform components such as the API, worker, reconciler, migration hook, workspace volume, RBAC, Docker socket, and optional kubeconfig.
+`deploy/helm/paas-control-plane` deploys internal platform components such as the API, worker, reconciler, migration hook, workspace volume, RBAC, optional Docker socket access, and optional kubeconfig.
 
 `deploy/helm/generic-web-app` is the desired workload abstraction for user applications managed by the PaaS.
 
@@ -42,7 +42,7 @@ Helm-managed user workloads use one stable release per project/environment workl
 paas-<project-slug>-<environment-slug>-<project-id-suffix>
 ```
 
-Redeploys upgrade the same release. Stop behavior uninstalls the release, and diagnostics/reconciliation can later move to `helm status` plus common PaaS workload labels/selectors.
+Redeploys upgrade the same release. Stop behavior uninstalls the release. Diagnostics and reconciliation are Helm-aware when persisted release metadata is available: running releases are checked with `helm status`, and failed or stopped deployments with leftover releases are cleaned up with `helm uninstall`.
 
 ## Validation
 

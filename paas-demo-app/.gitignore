@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+!.env.local-docker.example
+!.env.local-kubernetes.example
+!.env.secrets.example
 .venv/
 
 # Python caches and tooling
@@ -10,14 +13,22 @@ __pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
+.ruff_cache/
 htmlcov/
 .coverage
 .coverage.*
 
 # Local app data
 instance/
+.runtime/
 
-context.txt 
+context.txt
+UI.jpeg
+*.Zone.Identifier
+*:Zone.Identifier
+
+# Local example workloads
+demo-app/
 
 # Frontend dependencies and build output
 frontend/node_modules/

@@ -3,6 +3,10 @@ import hmac
 import json
 
 import backend.api.deployment_orchestration as deployment_orchestration_api
+import pytest
+
+from backend import create_app
+from tests.conftest import TestConfig
 
 
 def bearer_headers(token):
@@ -64,6 +68,69 @@ def github_headers(app, payload, *, event="push", delivery_id="delivery-123"):
 
 def assert_bearer_challenge(response):
     assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_auth_can_be_disabled_only_with_explicit_local_opt_in():
+    class LocalAuthDisabledConfig(TestConfig):
+        CONTROL_PLANE_ENV = "development"
+        CONTROL_PLANE_ALLOW_AUTH_DISABLED = True
+
+        @staticmethod
+        def init_app(app):
+            from backend.config import Config
+
+            Config.init_app(app)
+
+    app = create_app(LocalAuthDisabledConfig)
+
+    assert app.config["CONTROL_PLANE_ALLOW_AUTH_DISABLED"] is True
+
+
+def test_auth_disabled_without_explicit_opt_in_fails_fast():
+    class MissingAuthConfig(TestConfig):
+        CONTROL_PLANE_ENV = "development"
+        CONTROL_PLANE_ALLOW_AUTH_DISABLED = False
+
+        @staticmethod
+        def init_app(app):
+            from backend.config import Config
+
+            Config.init_app(app)
+
+    with pytest.raises(RuntimeError, match="API bearer tokens must be configured"):
+        create_app(MissingAuthConfig)
+
+
+def test_auth_disabled_opt_in_is_rejected_outside_local_envs():
+    class ProductionAuthDisabledConfig(TestConfig):
+        CONTROL_PLANE_ENV = "production"
+        CONTROL_PLANE_ALLOW_AUTH_DISABLED = True
+
+        @staticmethod
+        def init_app(app):
+            from backend.config import Config
+
+            Config.init_app(app)
+
+    with pytest.raises(RuntimeError, match="API bearer tokens must be configured"):
+        create_app(ProductionAuthDisabledConfig)
+
+
+def test_token_config_allows_production_startup():
+    class ProductionTokenConfig(TestConfig):
+        CONTROL_PLANE_ENV = "production"
+        CONTROL_PLANE_ALLOW_AUTH_DISABLED = False
+        CONTROL_PLANE_API_TOKEN_ADMIN = "admin-token"
+
+        @staticmethod
+        def init_app(app):
+            from backend.config import Config
+
+            Config.init_app(app)
+
+    app = create_app(ProductionTokenConfig)
+
+    assert app.config["CONTROL_PLANE_API_TOKEN_ADMIN"] == "admin-token"
 
 
 def test_public_health_endpoint_remains_open(client, app):

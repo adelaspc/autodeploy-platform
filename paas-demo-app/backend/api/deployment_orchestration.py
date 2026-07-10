@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import base64
+import os
 import subprocess
 
 from flask import current_app
@@ -52,12 +54,50 @@ def registry_prefix_from_config():
     return f"{registry_url}/{registry_namespace}" if registry_namespace else registry_url
 
 
+def git_auth_environment(project):
+    git_auth_type = (getattr(project, "git_auth_type", None) or "none").strip().lower()
+    if git_auth_type == "none":
+        return None
+    if git_auth_type != "token":
+        raise ValueError(f"Unsupported git auth type '{git_auth_type}'")
+
+    secret_ref = (getattr(project, "git_secret_ref", None) or "").strip()
+    if not secret_ref:
+        raise ValueError("git_secret_ref is required when git_auth_type is 'token'")
+
+    token_env_name = f"CONTROL_PLANE_GIT_TOKEN_{secret_ref}"
+    token = os.getenv(token_env_name)
+    if not token:
+        raise ValueError(f"Git token environment variable '{token_env_name}' is not set")
+
+    repo_url = project.repo_url or ""
+    if not repo_url.startswith("https://github.com/"):
+        raise ValueError("Token-based git auth currently supports only https://github.com/ repository URLs")
+
+    auth_header = "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
+    env = os.environ.copy()
+    env.update(
+        {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.extraheader",
+            "GIT_CONFIG_VALUE_0": auth_header,
+        }
+    )
+    return env
+
+
 def resolve_project_commit_sha(project, branch):
     repo_path = Path(project.repo_url)
     if repo_path.exists():
         command = ["git", "-C", str(repo_path), "rev-parse", branch]
+        env = None
     else:
         command = ["git", "ls-remote", project.repo_url, f"refs/heads/{branch}"]
+        try:
+            env = git_auth_environment(project)
+        except ValueError as exc:
+            raise ValueError(f"Unable to resolve commit for branch '{branch}': {exc}") from exc
 
     result = subprocess.run(
         command,
@@ -65,6 +105,7 @@ def resolve_project_commit_sha(project, branch):
         text=True,
         timeout=30,
         check=False,
+        env=env,
     )
     if result.returncode != 0:
         error_output = (result.stderr or result.stdout).strip() or "Unknown git error"

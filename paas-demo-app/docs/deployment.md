@@ -85,6 +85,8 @@ Platform Worker optionally runs tests
         ↓
 Platform Worker pushes image to registry
         ↓
+Platform Worker verifies remote image with Docker Buildx
+        ↓
 Control Plane deploys image_ref to Kubernetes
         ↓
 Kubernetes rolls out application
@@ -112,6 +114,9 @@ Example events:
 - `image.push_started`
 - `image.push_failed`
 - `image.push_succeeded`
+- `image.verify_started`
+- `image.verify.failed`
+- `image.verify_succeeded`
 - `kubernetes.apply_started`
 - `kubernetes.apply_failed`
 - `rollout.started`

@@ -9,6 +9,9 @@ from backend.security import env_var_is_secret
 class GenericWebAppValuesConfig:
     image_pull_policy: str = "IfNotPresent"
     image_pull_secret: str | None = None
+    ingress_enabled: bool = False
+    ingress_host: str = ""
+    ingress_class_name: str = ""
 
 
 def generic_web_app_values(deployment, config: GenericWebAppValuesConfig | None = None):
@@ -40,9 +43,17 @@ def generic_web_app_values(deployment, config: GenericWebAppValuesConfig | None 
         },
         "resources": _resource_values(project),
         "probes": _probe_values(project.healthcheck_path),
-        "ingress": {
-            "enabled": False,
-        },
+        "ingress": (
+            {
+                "enabled": True,
+                "className": config.ingress_class_name,
+                "host": config.ingress_host,
+                "path": "/",
+                "tls": [],
+            }
+            if config.ingress_enabled
+            else {"enabled": False}
+        ),
     }
 
     return values

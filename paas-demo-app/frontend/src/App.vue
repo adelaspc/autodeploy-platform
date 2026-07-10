@@ -1,7 +1,9 @@
 <script setup>
-import { computed, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { apiRequest, storeToken, storedToken } from "./api";
 import { buildDiagnosticsView } from "./diagnostics";
+import { diagnosticsBundleFilename, diagnosticsBundleText } from "./diagnosticsBundle";
+import { canCleanupDeployment } from "./serviceReachability";
 
 const EMPTY_PROJECT_FORM = {
   name: "",
@@ -26,6 +28,7 @@ const projects = ref([]);
 const selectedProjectId = ref(null);
 const platformHealth = ref(null);
 const platformActivity = ref(null);
+const observabilityHealth = ref(null);
 const projectStatus = ref(null);
 const projectActivity = ref(null);
 const selectedDeployment = ref(null);
@@ -41,11 +44,16 @@ const isLoading = ref(false);
 const isDeploying = ref(false);
 const isSavingProject = ref(false);
 const isDeletingProject = ref(false);
+const isCleaningDeployment = ref(false);
+const serviceReachability = ref(null);
 const formMode = ref("create");
 const projectForm = ref(blankProjectForm());
 const branchOverride = ref("");
 const testCommandOverride = ref("");
 const logTailLines = ref(200);
+let liveHealthTimer = null;
+let liveHealthRequestInFlight = false;
+const LIVE_HEALTH_INTERVAL_MS = 2000;
 
 const selectedProject = computed(() =>
   projects.value.find((project) => project.id === selectedProjectId.value) || null,
@@ -96,12 +104,14 @@ async function initialize() {
 }
 
 async function loadPlatform() {
-  const [health, activity] = await Promise.all([
+  const [health, activity, observability] = await Promise.all([
     apiRequest("/health/platform"),
     apiRequest("/health/activity?latest_limit=8&active_limit=8&failed_limit=8"),
+    apiRequest("/health/observability"),
   ]);
   platformHealth.value = health;
   platformActivity.value = activity;
+  observabilityHealth.value = observability;
 }
 
 async function loadProjects() {
@@ -112,6 +122,7 @@ async function loadProjects() {
 }
 
 async function selectProject(projectId) {
+  stopLiveHealthMonitor();
   selectedProjectId.value = projectId;
   selectedDeployment.value = null;
   deploymentSummary.value = null;
@@ -139,7 +150,9 @@ async function refreshProject() {
     ]);
     projectStatus.value = status;
     projectActivity.value = activity;
-    if (!selectedDeployment.value && latestDeployment.value) {
+    if (selectedDeployment.value) {
+      await selectDeployment(selectedDeployment.value);
+    } else if (latestDeployment.value) {
       await selectDeployment(latestDeployment.value);
     }
   } catch (error) {
@@ -377,6 +390,22 @@ async function stopDeployment(deployment) {
   );
 }
 
+async function cleanupDeployment(deployment) {
+  if (!deployment?.deployment_id || !selectedProjectId.value || isCleaningDeployment.value) return;
+  if (!window.confirm(`Delete Kubernetes resources for deployment #${deployment.deployment_id}?`)) return;
+  isCleaningDeployment.value = true;
+  try {
+    await runDeploymentAction(
+      `/api/projects/${selectedProjectId.value}/deployments/${deployment.deployment_id}/cleanup`,
+      "POST",
+      null,
+      "Kubernetes resources cleaned up",
+    );
+  } finally {
+    isCleaningDeployment.value = false;
+  }
+}
+
 async function runDeploymentAction(path, method, payload = null, successMessage = "Action completed") {
   globalError.value = "";
   try {
@@ -405,11 +434,17 @@ async function selectDeployment(deployment) {
   buildLog.value = null;
   runtimeLog.value = null;
   diagnostics.value = null;
+  serviceReachability.value = null;
+  stopLiveHealthMonitor();
   try {
     const deploymentId = deployment.deployment_id;
     const summary = await apiRequest(`/api/projects/${selectedProjectId.value}/deployments/${deploymentId}/summary`);
     const events = await apiRequest(`/api/projects/${selectedProjectId.value}/deployments/${deploymentId}/events`);
     deploymentSummary.value = summary;
+    if (summary.service_url && (summary.deploy_target !== "kubernetes" || summary.kubernetes_ingress_host)) {
+      await checkSelectedDeploymentHealth();
+      startLiveHealthMonitor();
+    }
     deploymentEvents.value = events;
     selectedDeployment.value = {
       ...deployment,
@@ -426,6 +461,48 @@ async function selectDeployment(deployment) {
     await loadLogsAndDiagnostics(summary);
   } catch (error) {
     setError(error);
+  }
+}
+
+async function checkSelectedDeploymentHealth() {
+  const summary = deploymentSummary.value;
+  if (!summary || !selectedProjectId.value || liveHealthRequestInFlight) {
+    return;
+  }
+  if (summary.deployment_status !== "running") {
+    serviceReachability.value = null;
+    return;
+  }
+  liveHealthRequestInFlight = true;
+  if (!serviceReachability.value) {
+    serviceReachability.value = { status: "checking", message: "Checking workload health..." };
+  }
+  try {
+    serviceReachability.value = await apiRequest(
+      `/api/projects/${selectedProjectId.value}/deployments/${summary.deployment_id}/live-health`,
+    );
+  } catch (error) {
+    serviceReachability.value = {
+      status: "unavailable",
+      message: `Health monitor unavailable: ${error.message}`,
+      checked_at: new Date().toISOString(),
+    };
+  } finally {
+    liveHealthRequestInFlight = false;
+  }
+}
+
+function startLiveHealthMonitor() {
+  stopLiveHealthMonitor();
+  if (deploymentSummary.value?.deployment_status === "running") {
+    liveHealthTimer = window.setInterval(checkSelectedDeploymentHealth, LIVE_HEALTH_INTERVAL_MS);
+  }
+}
+
+function stopLiveHealthMonitor() {
+  if (liveHealthTimer !== null) {
+    window.clearInterval(liveHealthTimer);
+    liveHealthTimer = null;
   }
 }
 
@@ -448,6 +525,36 @@ async function loadLogsAndDiagnostics(summary = deploymentSummary.value) {
   } catch (error) {
     setError(error);
   }
+}
+
+function currentDiagnosticsBundleText() {
+  return diagnosticsBundleText({
+    summary: deploymentSummary.value,
+    diagnostics: diagnostics.value,
+    events: deploymentEvents.value,
+    buildLog: buildLog.value,
+    runtimeLog: runtimeLog.value,
+  });
+}
+
+async function copyDiagnosticsBundle() {
+  try {
+    await navigator.clipboard.writeText(currentDiagnosticsBundleText());
+    setNotice("Diagnostics bundle copied");
+  } catch (error) {
+    setError(new Error(`Unable to copy diagnostics bundle: ${error?.message || error}`));
+  }
+}
+
+function downloadDiagnosticsBundle() {
+  const blob = new Blob([currentDiagnosticsBundleText()], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = diagnosticsBundleFilename(deploymentSummary.value);
+  link.click();
+  URL.revokeObjectURL(url);
+  setNotice("Diagnostics bundle downloaded");
 }
 
 async function optionalRequest(path) {
@@ -481,7 +588,7 @@ function shortSha(value) {
 }
 
 function statusTone(status) {
-  if (["ok", "running", "succeeded", "reachable"].includes(status)) {
+  if (["ok", "running", "succeeded", "reachable", "healthy"].includes(status)) {
     return "success";
   }
   if (["pending", "cloning", "building", "testing", "pushing_image", "deploying"].includes(status)) {
@@ -501,92 +608,202 @@ function canRetry(deployment) {
   return deployment?.status === "failed";
 }
 
+function canCleanup(deployment) {
+  return canCleanupDeployment(deployment);
+}
+
 onMounted(initialize);
+onBeforeUnmount(stopLiveHealthMonitor);
 </script>
 
 <template>
-  <main class="screen">
-    <section class="topbar">
-      <div>
-        <p class="eyebrow">operator console</p>
-        <h1>PaaS Control Plane</h1>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#overview">
+        <span class="prompt-mark">&gt;_</span>
+        <span>PaaS Console</span>
+      </a>
+      <nav class="side-nav" aria-label="Dashboard sections">
+        <a class="active" href="#overview"><span class="nav-icon">01</span>Overview</a>
+        <a href="#projects"><span class="nav-icon">02</span>Projects</a>
+        <a href="#deployments"><span class="nav-icon">03</span>Deployments</a>
+        <a href="#events"><span class="nav-icon">04</span>Events</a>
+        <a href="#logs"><span class="nav-icon">05</span>Logs</a>
+        <a href="#diagnostics"><span class="nav-icon">06</span>Diagnostics</a>
+        <a href="#observability"><span class="nav-icon">07</span>Observability</a>
+      </nav>
+      <div class="system-card">
+        <span class="status-dot" :data-tone="statusTone(platformHealth?.status)"></span>
+        <strong>{{ platformHealth?.status === "ok" ? "All Systems Operational" : "Platform Status" }}</strong>
+        <small>{{ platformHealth?.executor || "executor unknown" }}</small>
       </div>
-      <form class="token-form" @submit.prevent="saveToken">
-        <input v-model="apiToken" type="password" placeholder="Bearer token" autocomplete="off" />
-        <button type="submit">Save</button>
-        <button type="button" @click="clearToken">Clear</button>
-      </form>
-    </section>
+      <small class="version">local control plane</small>
+    </aside>
 
-    <p v-if="globalError" class="alert">Error: {{ globalError }}</p>
-    <p v-if="globalMessage" class="notice">{{ globalMessage }}</p>
+    <main class="screen">
+      <section class="topbar">
+        <button class="icon-button" type="button" aria-label="Dashboard menu">=</button>
+        <div class="search-shell">
+          <span>Search apps, deployments, logs...</span>
+          <kbd>/</kbd>
+        </div>
+        <form class="token-form" @submit.prevent="saveToken">
+          <input v-model="apiToken" type="password" placeholder="Bearer token" autocomplete="off" />
+          <button type="submit">Save</button>
+          <button type="button" @click="clearToken">Clear</button>
+        </form>
+      </section>
 
-    <section class="status-grid">
-      <article class="panel">
-        <div class="panel-head">
-          <span>platform</span>
-          <button type="button" @click="initialize">{{ isLoading ? "Refreshing" : "Refresh" }}</button>
+      <section class="hero-strip" id="overview">
+        <div>
+          <p class="eyebrow">operator console</p>
+          <h1>PaaS Control Plane</h1>
         </div>
-        <div class="metric-row">
-          <span>API</span>
-          <strong :data-tone="statusTone(platformHealth?.status)">{{ platformHealth?.status || "unknown" }}</strong>
-        </div>
-        <div class="metric-row">
-          <span>Executor</span>
-          <strong>{{ platformHealth?.executor || "unknown" }}</strong>
-        </div>
-        <div class="metric-row">
-          <span>Deploy ready</span>
-          <strong :data-tone="deploymentCreationReady ? 'success' : 'danger'">
-            {{ deploymentCreationReady ? "yes" : "no" }}
+        <button type="button" @click="initialize">{{ isLoading ? "Refreshing" : "Refresh" }}</button>
+      </section>
+
+      <p v-if="globalError" class="alert">Error: {{ globalError }}</p>
+      <p v-if="globalMessage" class="notice">{{ globalMessage }}</p>
+
+      <section class="status-grid">
+        <article class="panel stat-card">
+          <div class="panel-head">
+            <span>api health</span>
+            <span class="panel-glyph">API</span>
+          </div>
+          <strong class="stat-value" :data-tone="statusTone(platformHealth?.status)">
+            {{ platformHealth?.status || "unknown" }}
           </strong>
-        </div>
-        <p v-if="platformHealth?.deployment_creation_error" class="muted">
-          {{ platformHealth.deployment_creation_error }}
-        </p>
-      </article>
+          <small>{{ deploymentCreationReady ? "deployment creation ready" : "deployment creation blocked" }}</small>
+          <p v-if="platformHealth?.deployment_creation_error" class="muted">
+            {{ platformHealth.deployment_creation_error }}
+          </p>
+        </article>
 
-      <article class="panel">
+        <article class="panel stat-card">
+          <div class="panel-head">
+            <span>active deployments</span>
+            <span class="panel-glyph">RUN</span>
+          </div>
+          <strong class="stat-value" data-tone="warning">{{ platformActivity?.active_deployment_count ?? 0 }}</strong>
+          <small>{{ platformActivity?.latest_deployment_at ? "latest activity recorded" : "idle" }}</small>
+        </article>
+
+        <article class="panel stat-card">
+          <div class="panel-head">
+            <span>failed deployments</span>
+            <span class="panel-glyph">ERR</span>
+          </div>
+          <strong class="stat-value" :data-tone="(platformActivity?.failed_deployment_count ?? 0) ? 'danger' : 'success'">
+            {{ platformActivity?.failed_deployment_count ?? 0 }}
+          </strong>
+          <small>{{ platformActivity?.recent_webhook_delivery_count ?? 0 }} recent webhooks</small>
+        </article>
+
+        <article class="panel stat-card">
+          <div class="panel-head">
+            <span>executor</span>
+            <span class="panel-glyph">CPU</span>
+          </div>
+          <strong class="stat-value compact-value">{{ platformHealth?.executor || "unknown" }}</strong>
+          <small>{{ deploymentCreationReady ? "ready" : "not ready" }}</small>
+        </article>
+      </section>
+
+      <section class="observability-panel panel" id="observability">
         <div class="panel-head">
-          <span>activity</span>
-          <span class="subtle">{{ platformActivity?.latest_deployment_at ? "live" : "idle" }}</span>
+          <span>observability</span>
+          <span class="subtle">lightweight operational signals</span>
         </div>
-        <div class="metric-row">
-          <span>Active</span>
-          <strong>{{ platformActivity?.active_deployment_count ?? 0 }}</strong>
+        <div class="observability-grid">
+          <article class="observability-card">
+            <span>Metrics endpoint</span>
+            <strong :data-tone="observabilityHealth?.metrics?.enabled ? 'success' : 'neutral'">
+              {{ observabilityHealth?.metrics?.enabled ? "enabled" : "disabled" }}
+            </strong>
+            <small>{{ observabilityHealth?.metrics?.endpoint || "/metrics" }} · dedicated bearer token</small>
+          </article>
+          <article class="observability-card">
+            <span>Structured logs</span>
+            <strong :data-tone="observabilityHealth?.logging?.structured ? 'success' : 'neutral'">
+              {{ observabilityHealth?.logging?.format || "unknown" }}
+            </strong>
+            <small>{{ observabilityHealth?.logging?.destination || "stdout" }} · API / worker / reconciler</small>
+          </article>
+          <article class="observability-card">
+            <span>Request correlation</span>
+            <strong data-tone="success">enabled</strong>
+            <small>{{ observabilityHealth?.request_correlation?.header || "X-Request-ID" }}</small>
+          </article>
+          <article class="observability-card">
+            <span>Operational activity</span>
+            <strong :data-tone="(platformActivity?.failed_deployment_count ?? 0) ? 'danger' : 'success'">
+              {{ platformActivity?.active_deployment_count ?? 0 }} active / {{ platformActivity?.failed_deployment_count ?? 0 }} failed
+            </strong>
+            <small>events, audit, logs and diagnostics retained</small>
+          </article>
         </div>
-        <div class="metric-row">
-          <span>Failed</span>
-          <strong>{{ platformActivity?.failed_deployment_count ?? 0 }}</strong>
-        </div>
-        <div class="metric-row">
-          <span>Webhooks</span>
-          <strong>{{ platformActivity?.recent_webhook_delivery_count ?? 0 }}</strong>
-        </div>
-      </article>
+      </section>
 
-      <article class="panel project-picker">
-        <div class="panel-head">
-          <span>projects</span>
-          <button type="button" @click="newProject">New</button>
-        </div>
-        <button
-          v-for="project in projects"
-          :key="project.id"
-          class="project-button"
-          :data-active="project.id === selectedProjectId"
-          type="button"
-          @click="selectProject(project.id)"
-        >
-          <span>{{ project.name }}</span>
-          <small>{{ project.branch }} - {{ project.runtime }}</small>
-        </button>
-        <p v-if="!projects.length" class="muted">No projects returned by the API.</p>
-      </article>
-    </section>
+      <section class="dashboard-grid">
+        <article class="panel project-picker" id="projects">
+          <div class="panel-head">
+            <span>projects</span>
+            <button type="button" @click="newProject">New</button>
+          </div>
+          <button
+            v-for="project in projects"
+            :key="project.id"
+            class="project-button"
+            :data-active="project.id === selectedProjectId"
+            type="button"
+            @click="selectProject(project.id)"
+          >
+            <span>{{ project.name }}</span>
+            <small>{{ project.branch }} / {{ project.runtime }}</small>
+          </button>
+          <p v-if="!projects.length" class="muted">No projects returned by the API.</p>
+        </article>
 
-    <section class="project-editor">
-      <article class="panel">
+        <article class="panel deploy-panel" id="deployments">
+          <div class="panel-head">
+            <span>run deploy / test</span>
+            <span v-if="selectedProject" class="subtle">project #{{ selectedProject.id }}</span>
+          </div>
+          <template v-if="selectedProject">
+            <div class="project-summary">
+              <h2>{{ selectedProject.name }}</h2>
+              <p>{{ selectedProject.repo_url }}</p>
+            </div>
+            <form class="deploy-form" @submit.prevent="triggerDeploy">
+              <label>
+                <span>Branch</span>
+                <input v-model.trim="branchOverride" placeholder="main" />
+              </label>
+              <label>
+                <span>Test command</span>
+                <input v-model="testCommandOverride" placeholder="pytest, npm test, or leave empty" />
+              </label>
+              <button type="submit" :disabled="isDeploying || !deploymentCreationReady">
+                {{ deployButtonLabel }}
+              </button>
+            </form>
+            <div class="actions-row">
+              <button type="button" :disabled="!latestDeployment" @click="redeployLatest">Redeploy latest</button>
+              <button type="button" :disabled="!canRetry(latestFailedDeployment)" @click="retryDeployment(latestFailedDeployment)">
+                Retry failed
+              </button>
+              <button type="button" :disabled="!canStop(activeDeployment)" @click="stopDeployment(activeDeployment)">
+                Stop running
+              </button>
+            </div>
+          </template>
+          <p v-else class="muted">Select a project to run deployments.</p>
+        </article>
+      </section>
+
+      <section class="project-editor">
+        <article class="panel">
         <div class="panel-head">
           <span>{{ formMode === "edit" ? "edit project" : "create project" }}</span>
           <button type="button" :disabled="!selectedProject" @click="editSelectedProject">Use selected</button>
@@ -717,45 +934,9 @@ onMounted(initialize);
           </div>
         </form>
       </article>
-    </section>
+      </section>
 
-    <section class="workspace">
-      <article class="panel deploy-panel">
-        <div class="panel-head">
-          <span>run deploy / test</span>
-          <span v-if="selectedProject" class="subtle">project #{{ selectedProject.id }}</span>
-        </div>
-        <template v-if="selectedProject">
-          <div class="project-summary">
-            <h2>{{ selectedProject.name }}</h2>
-            <p>{{ selectedProject.repo_url }}</p>
-          </div>
-          <form class="deploy-form" @submit.prevent="triggerDeploy">
-            <label>
-              <span>Branch</span>
-              <input v-model.trim="branchOverride" placeholder="main" />
-            </label>
-            <label>
-              <span>Test command</span>
-              <input v-model="testCommandOverride" placeholder="pytest, npm test, or leave empty" />
-            </label>
-            <button type="submit" :disabled="isDeploying || !deploymentCreationReady">
-              {{ deployButtonLabel }}
-            </button>
-          </form>
-          <div class="actions-row">
-            <button type="button" :disabled="!latestDeployment" @click="redeployLatest">Redeploy latest</button>
-            <button type="button" :disabled="!canRetry(latestFailedDeployment)" @click="retryDeployment(latestFailedDeployment)">
-              Retry failed
-            </button>
-            <button type="button" :disabled="!canStop(activeDeployment)" @click="stopDeployment(activeDeployment)">
-              Stop running
-            </button>
-          </div>
-        </template>
-        <p v-else class="muted">Select a project to run deployments.</p>
-      </article>
-
+      <section class="workspace">
       <article class="panel">
         <div class="panel-head">
           <span>deployment history</span>
@@ -805,15 +986,55 @@ onMounted(initialize);
             <span>Image</span>
             <strong>{{ deploymentSummary.image_ref || "not built" }}</strong>
           </div>
-          <a v-if="deploymentSummary.service_url" class="service-link" :href="deploymentSummary.service_url" target="_blank">
+          <a
+            v-if="
+              deploymentSummary.service_url &&
+              (deploymentSummary.deploy_target !== 'kubernetes' || deploymentSummary.kubernetes_ingress_host)
+            "
+            class="service-link"
+            :href="deploymentSummary.service_url"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             Open service
           </a>
+          <div
+            v-if="serviceReachability"
+            class="live-health"
+            :data-health="serviceReachability.status"
+          >
+            <span>Live health</span>
+            <strong :data-tone="statusTone(serviceReachability.status)">{{ serviceReachability.status }}</strong>
+            <small>{{ serviceReachability.message }}</small>
+            <small v-if="serviceReachability.checked_at">checked {{ formatTime(serviceReachability.checked_at) }}</small>
+          </div>
+          <button
+            v-if="canCleanup(deploymentSummary)"
+            class="danger-button"
+            type="button"
+            :disabled="isCleaningDeployment"
+            @click="cleanupDeployment(deploymentSummary)"
+          >
+            {{ isCleaningDeployment ? "Cleaning up" : "Cleanup Kubernetes resources" }}
+          </button>
+          <div
+            v-if="
+              deploymentSummary.internal_service_url ||
+              (deploymentSummary.deploy_target === 'kubernetes' &&
+                !deploymentSummary.kubernetes_ingress_host &&
+                deploymentSummary.service_url)
+            "
+            class="metric-row"
+          >
+            <span>Internal service</span>
+            <strong>{{ deploymentSummary.internal_service_url || deploymentSummary.service_url }}</strong>
+          </div>
           <p v-if="deploymentSummary.last_error" class="alert compact">{{ deploymentSummary.last_error }}</p>
         </template>
         <p v-else class="muted">Select a deployment to inspect it.</p>
       </article>
 
-      <article class="panel events-panel">
+      <article class="panel events-panel" id="events">
         <div class="panel-head">
           <span>events</span>
           <span class="subtle">{{ deploymentEvents.length }}</span>
@@ -830,7 +1051,7 @@ onMounted(initialize);
       </article>
     </section>
 
-    <section class="log-grid">
+    <section class="log-grid" id="logs">
       <article class="panel log-panel">
         <div class="panel-head">
           <span>build log</span>
@@ -853,10 +1074,14 @@ onMounted(initialize);
       </article>
     </section>
 
-    <section v-if="diagnostics" class="panel diagnostics-panel">
+    <section v-if="diagnostics" class="panel diagnostics-panel" id="diagnostics">
       <div class="panel-head">
         <span>kubernetes diagnostics</span>
-        <span class="subtle">{{ diagnosticsView.stageLabel }}</span>
+        <div class="actions-row">
+          <button type="button" @click="copyDiagnosticsBundle">Copy bundle</button>
+          <button type="button" @click="downloadDiagnosticsBundle">Download bundle</button>
+          <span class="subtle">{{ diagnosticsView.stageLabel }}</span>
+        </div>
       </div>
       <div class="diagnostics-summary" :data-stage="diagnosticsView.stage || 'none'">
         <span>{{ diagnosticsView.stageLabel }}</span>
@@ -865,6 +1090,14 @@ onMounted(initialize);
           {{ diagnosticsView.eventType }}
           <template v-if="diagnosticsView.eventAt"> - {{ formatTime(diagnosticsView.eventAt) }}</template>
         </small>
+      </div>
+      <div v-if="diagnosticsView.insights.length" class="diagnostics-insights">
+        <article v-for="insight in diagnosticsView.insights" :key="insight.title" class="diagnostics-insight">
+          <span>Likely cause</span>
+          <strong>{{ insight.title }}</strong>
+          <p>{{ insight.detail }}</p>
+          <small>{{ insight.action }}</small>
+        </article>
       </div>
 
       <div class="diagnostics-grid">
@@ -882,6 +1115,12 @@ onMounted(initialize);
 
         <article v-if="diagnosticsView.hasResourceContext" class="diagnostics-section">
           <h2>Kubernetes</h2>
+          <div v-if="diagnosticsView.podFields.length" class="diagnostics-fields">
+            <div v-for="field in diagnosticsView.podFields" :key="field.label" class="metric-row">
+              <span>{{ field.label }}</span>
+              <strong>{{ field.value }}</strong>
+            </div>
+          </div>
           <div v-if="diagnosticsView.resourceFields.length" class="diagnostics-fields">
             <div v-for="field in diagnosticsView.resourceFields" :key="field.label" class="metric-row">
               <span>{{ field.label }}</span>
@@ -902,6 +1141,7 @@ onMounted(initialize);
           </div>
           <pre v-if="diagnosticsView.podDescribeSummary" class="diagnostics-snippet">{{ diagnosticsView.podDescribeSummary }}</pre>
           <pre v-if="diagnosticsView.podLogsSummary" class="diagnostics-snippet">{{ diagnosticsView.podLogsSummary }}</pre>
+          <pre v-if="diagnosticsView.podPreviousLogsSummary" class="diagnostics-snippet">{{ diagnosticsView.podPreviousLogsSummary }}</pre>
         </article>
       </div>
 
@@ -910,5 +1150,6 @@ onMounted(initialize);
         <pre>{{ diagnosticsView.rawJson }}</pre>
       </details>
     </section>
-  </main>
+    </main>
+  </div>
 </template>

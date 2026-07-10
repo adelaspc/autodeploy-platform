@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, current_app, jsonify
 from sqlalchemy import text
 
 from backend.api.auth import require_api_role
@@ -22,7 +22,8 @@ def database_health_check():
     try:
         db.session.execute(text("SELECT 1"))
     except Exception as exc:
-        return jsonify({"status": "error", "database": "unreachable", "details": str(exc)}), 503
+        current_app.logger.warning("Database health check failed", exc_info=exc)
+        return jsonify({"status": "error", "database": "unreachable", "error_code": "database_unreachable"}), 503
 
     return jsonify({"status": "ok", "database": "reachable"}), 200
 
@@ -31,6 +32,33 @@ def database_health_check():
 @require_api_role("read_only")
 def platform_health_check():
     return jsonify(platform_status_payload()), 200
+
+
+@health_bp.get("/health/observability")
+@require_api_role("read_only")
+def observability_health_check():
+    from flask import current_app
+
+    log_format = (current_app.config.get("CONTROL_PLANE_LOG_FORMAT", "json") or "").strip().lower()
+    return jsonify(
+        {
+            "status": "ok",
+            "metrics": {
+                "enabled": bool(current_app.config.get("CONTROL_PLANE_METRICS_ENABLED", False)),
+                "endpoint": "/metrics",
+                "authentication": "dedicated_bearer_token",
+            },
+            "logging": {
+                "format": log_format or "text",
+                "structured": log_format == "json",
+                "destination": "stdout",
+            },
+            "request_correlation": {
+                "enabled": True,
+                "header": "X-Request-ID",
+            },
+        }
+    ), 200
 
 
 @health_bp.get("/health/activity")

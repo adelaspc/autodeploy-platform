@@ -19,6 +19,7 @@ class TestConfig:
         "poolclass": StaticPool,
     }
     CONTROL_PLANE_ENV = "development"
+    CONTROL_PLANE_ALLOW_AUTH_DISABLED = True
     CONTROL_PLANE_REGISTRY_ENABLED = False
     CONTROL_PLANE_GITHUB_WEBHOOK_SECRET = "test-github-webhook-secret"
     CONTROL_PLANE_REGISTRY_URL = "registry.example.com"

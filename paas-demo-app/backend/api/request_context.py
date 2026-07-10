@@ -1,4 +1,5 @@
 import re
+from time import perf_counter
 from uuid import uuid4
 
 from flask import current_app, has_request_context, request
@@ -8,6 +9,7 @@ REQUEST_ID_HEADER = "X-Request-ID"
 REQUEST_ID_ENV_KEY = "control_plane.request_id"
 REQUEST_ID_MAX_LENGTH = 128
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+REQUEST_STARTED_ENV_KEY = "control_plane.request_started"
 
 
 def generate_request_id():
@@ -33,6 +35,7 @@ def set_request_id_for_current_request():
     incoming = request.headers.get(REQUEST_ID_HEADER)
     request_id = normalize_request_id(incoming)
     request.environ[REQUEST_ID_ENV_KEY] = request_id
+    request.environ[REQUEST_STARTED_ENV_KEY] = perf_counter()
     return request_id
 
 
@@ -67,6 +70,8 @@ def install_request_logging(app):
 
 def log_request_completed(response):
     request_id = current_request_id()
+    started_at = request.environ.get(REQUEST_STARTED_ENV_KEY)
+    duration_ms = round((perf_counter() - started_at) * 1000, 3) if started_at is not None else None
     current_app.logger.info(
         "request_completed request_id=%s method=%s path=%s status=%s",
         request_id,
@@ -74,10 +79,13 @@ def log_request_completed(response):
         request.path,
         response.status_code,
         extra={
+            "event": "request_completed",
+            "component": current_app.config.get("CONTROL_PLANE_COMPONENT", "api"),
             "request_id": request_id,
             "method": request.method,
             "path": request.path,
             "status_code": response.status_code,
+            "duration_ms": duration_ms,
         },
     )
     return response

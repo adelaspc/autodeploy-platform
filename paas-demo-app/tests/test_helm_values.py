@@ -179,6 +179,25 @@ def test_ingress_is_disabled_by_default():
     assert values["ingress"] == {"enabled": False}
 
 
+def test_ingress_values_are_generated_when_enabled():
+    values = generic_web_app_values(
+        make_deployment(),
+        GenericWebAppValuesConfig(
+            ingress_enabled=True,
+            ingress_host="paas-demo.127.0.0.1.nip.io",
+            ingress_class_name="nginx",
+        ),
+    )
+
+    assert values["ingress"] == {
+        "enabled": True,
+        "className": "nginx",
+        "host": "paas-demo.127.0.0.1.nip.io",
+        "path": "/",
+        "tls": [],
+    }
+
+
 def test_service_target_port_is_empty_so_chart_default_applies():
     values = generic_web_app_values(make_deployment(port=5000))
 
