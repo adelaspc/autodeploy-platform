@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "autodeploy-control-plane.fullname" . }}-api
+  labels:
+    {{- include "autodeploy-control-plane.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "autodeploy-control-plane.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "autodeploy-control-plane.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+    spec:
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if .Values.workspace.initPermissions.enabled }}
+      initContainers:
+        {{- include "autodeploy-control-plane.workspaceInitContainer" . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 5000
+          envFrom:
+            - configMapRef:
+                name: {{ include "autodeploy-control-plane.fullname" . }}-config
+            - secretRef:
+                name: {{ include "autodeploy-control-plane.fullname" . }}-secret
+          env:
+            - name: CONTROL_PLANE_COMPONENT
+              value: api
+          {{- if .Values.kubeconfig.existingSecret }}
+            - name: CONTROL_PLANE_KUBECONFIG
+              value: {{ printf "%s/%s" .Values.kubeconfig.mountPath .Values.kubeconfig.fileName | quote }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: workspace
+              mountPath: {{ include "autodeploy-control-plane.workspaceMountPath" . }}
+            {{- if .Values.kubeconfig.existingSecret }}
+            - name: kubeconfig
+              mountPath: {{ .Values.kubeconfig.mountPath }}
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: workspace
+          {{- include "autodeploy-control-plane.workspaceVolume" . | nindent 10 }}
+        {{- if .Values.kubeconfig.existingSecret }}
+        - name: kubeconfig
+          secret:
+            secretName: {{ .Values.kubeconfig.existingSecret }}
+        {{- end }}

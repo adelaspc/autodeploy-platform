@@ -1,0 +1,28 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+exclude = [
+  ".venv",
+  "instance",
+]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = [
+  ".git",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".venv",
+  ".runtime",
+  "demo-app",
+  "frontend/dist",
+  "frontend/node_modules",
+  "instance",
+]
+markers = [
+  "docker: tests that require a local Docker daemon and are skipped unless Docker is available",
+]
