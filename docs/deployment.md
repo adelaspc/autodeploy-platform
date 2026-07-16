@@ -1,3 +1,7 @@
+# Deployment Model
+
+This page is the canonical source for deployment states, transitions, failure reasons, and persisted event names. Execution ownership and claim behavior are documented in [Architecture](architecture.md).
+
 ## Deployment Lifecycle
 
 ### States

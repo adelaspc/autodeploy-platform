@@ -162,7 +162,7 @@ In Kubernetes:
 
 ## Metrics and Structured Logs
 
-Application logs use JSON on stdout by default. `CONTROL_PLANE_COMPONENT` identifies API, worker, and reconciler records in Docker Compose. Request completion records also contain `request_id`, method, path, status, and duration.
+Application logs use JSON on stdout by default. `CONTROL_PLANE_COMPONENT` identifies API, worker, and reconciler records in Docker Compose. The long-running worker and reconciler lifecycle and result messages use the same structured logger; one-shot CLI commands retain human-readable terminal output. Request completion records also contain `request_id`, method, path, status, and duration.
 
 The Prometheus-compatible metrics endpoint is optional and disabled by default:
 
@@ -193,6 +193,22 @@ Operational behavior:
 - metric labels use only bounded status/result/level values
 
 For a Helm deployment, set `config.CONTROL_PLANE_METRICS_ENABLED` and provide `secrets.values.CONTROL_PLANE_METRICS_TOKEN` when the chart creates the runtime Secret. The chart does not install Prometheus or create a `ServiceMonitor`.
+
+## Observability Retention
+
+Retention is an explicit operator action. Preview cleanup candidates older than 30 days:
+
+```bash
+.venv/bin/python -m flask --app wsgi:app cleanup-observability --older-than-days 30
+```
+
+Apply the cleanup after reviewing the dry-run:
+
+```bash
+.venv/bin/python -m flask --app wsgi:app cleanup-observability --older-than-days 30 --apply
+```
+
+The default cleanup removes workspace/build-log artifacts for old `failed` and `stopped` deployments and prunes only disposable `claim_*` and `reconcile.*` events. It preserves deployment lifecycle events, deployment/build rows, and webhook delivery records. Audit events are retained unless `--include-audit-events` is supplied explicitly together with `--apply`.
 
 ## Production-Like Kubernetes Deployment
 
@@ -807,7 +823,7 @@ newgrp microk8s
 This means a Dockerfile uses BuildKit-only syntax such as:
 
 ```dockerfile
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip pip install --require-hashes -r requirements.lock.txt
 ```
 
 Check from inside the worker:
