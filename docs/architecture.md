@@ -55,6 +55,12 @@ sequenceDiagram
 
 Pending deployments are claimed atomically. Claims are renewed during long commands, and ownership is checked before important state writes. A lost claim stops processing without overwriting another worker's result.
 
+Deployment execution reads a versioned project-spec snapshot stored with the deployment rather than the mutable Project row. Project edits therefore configure future deployments only. Retry preserves the original build's explicit test-command choice, including an explicit decision to disable tests.
+
+Deployment and build status changes go through their model transition methods in the API application layer, worker, command processor, and reconciler. Invalid internal transitions fail instead of silently creating an impossible lifecycle combination. Cleanup is the explicit exception that permits a failed deployment to become stopped after its runtime resources are removed.
+
+The reconciler creates one context per deployment, lazily constructs at most one executor, and reuses it across its ordered reconciliation actions. Each action still owns its transaction and event semantics, while the orchestration loop is declarative rather than a chain of repeated conditionals.
+
 ## Kubernetes Runtime
 
 The Kubernetes executor supports two workload deployment modes:
@@ -65,6 +71,8 @@ The Kubernetes executor supports two workload deployment modes:
 Ingress configuration is platform-wide. Public hostnames use an alphabetic deployment ID so dotted `nip.io` IPs are not misparsed. Under WSL2, the public base domain must use the current WSL address because the Windows browser and Linux runtime have different loopback interfaces.
 
 The worker healthcheck intentionally uses a temporary Service port-forward instead of the public Ingress. This separates application readiness from external DNS and controller routing. After deployment, the selected running workload has a separate live signal: the browser polls the control-plane API, which probes the recorded public URL plus the project healthcheck path and returns the real HTTP result.
+
+Local Docker publication and Kubernetes port-forwarding retry a newly allocated local port only when the runtime reports a recognized bind collision. Other startup and healthcheck failures are not retried as port conflicts.
 
 Stop or cleanup removes Deployment, Service, and Ingress resources; Helm workloads are uninstalled as a release. Cleanup preserves database, event, log, and audit history.
 

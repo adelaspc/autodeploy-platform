@@ -1,5 +1,6 @@
 import shlex
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -176,36 +177,48 @@ class CommandExecutionMixin:
                 env=env,
             )
 
-        process = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-        )
-        deadline = time.monotonic() + self.command_timeout
-        last_heartbeat = time.monotonic()
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8") as stdout_handle, tempfile.TemporaryFile(
+            mode="w+", encoding="utf-8"
+        ) as stderr_handle:
+            process = subprocess.Popen(
+                args,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                text=True,
+                env=env,
+            )
+            deadline = time.monotonic() + self.command_timeout
+            last_heartbeat = time.monotonic()
 
-        while True:
-            returncode = process.poll()
-            if returncode is not None:
-                stdout, stderr = process.communicate()
-                return subprocess.CompletedProcess(args=args, returncode=returncode, stdout=stdout, stderr=stderr)
+            while True:
+                returncode = process.poll()
+                if returncode is not None:
+                    stdout, stderr = self._read_captured_output(stdout_handle, stderr_handle)
+                    return subprocess.CompletedProcess(args=args, returncode=returncode, stdout=stdout, stderr=stderr)
 
-            now = time.monotonic()
-            if now >= deadline:
-                process.kill()
-                stdout, stderr = process.communicate()
-                raise subprocess.TimeoutExpired(args, self.command_timeout, output=stdout, stderr=stderr)
+                now = time.monotonic()
+                if now >= deadline:
+                    process.kill()
+                    process.wait()
+                    stdout, stderr = self._read_captured_output(stdout_handle, stderr_handle)
+                    raise subprocess.TimeoutExpired(args, self.command_timeout, output=stdout, stderr=stderr)
 
-            try:
-                last_heartbeat = self._heartbeat_if_due(last_heartbeat, heartbeat=heartbeat_cb)
-            except Exception:
-                process.kill()
-                process.wait(timeout=5)
-                raise
+                try:
+                    last_heartbeat = self._heartbeat_if_due(last_heartbeat, heartbeat=heartbeat_cb)
+                except Exception:
+                    process.kill()
+                    process.wait(timeout=5)
+                    raise
 
-            self.sleep_fn(min(0.5, max(0.05, deadline - now)))
+                self.sleep_fn(min(0.5, max(0.05, deadline - now)))
+
+    @staticmethod
+    def _read_captured_output(stdout_handle, stderr_handle):
+        stdout_handle.flush()
+        stderr_handle.flush()
+        stdout_handle.seek(0)
+        stderr_handle.seek(0)
+        return stdout_handle.read(), stderr_handle.read()
 
     def _heartbeat_if_due(self, last_heartbeat, *, heartbeat=None):
         heartbeat = self.heartbeat if heartbeat is None else heartbeat
@@ -300,4 +313,3 @@ class CommandExecutionMixin:
             "level": level,
             "metadata_json": redact_sensitive_data(metadata),
         }
-

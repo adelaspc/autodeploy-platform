@@ -1,5 +1,6 @@
 import json
 
+from control_plane.deployment_spec import project_for_deployment
 from worker.execution.contracts import ExecutionResult, WorkerExecutionError
 from worker.executors.kubernetes.names import helm_release_name
 from worker.helm.runner import HelmCommandError
@@ -8,18 +9,19 @@ from worker.helm.values import GenericWebAppValuesConfig, generic_web_app_values
 
 class HelmDeploymentMixin:
     def _deploy_with_helm(self, deployment):
+        project = project_for_deployment(deployment)
         _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
         values_path = logs_dir / "generic-web-app-values.yaml"
         helm_log_path = logs_dir / "helm-upgrade-install.log"
         port_forward_log_path = logs_dir / "kubernetes-port-forward.log"
-        release_name = helm_release_name(deployment.project, deployment)
+        release_name = helm_release_name(project, deployment)
         service_name = self._helm_resource_name(release_name)
         deployment_name = service_name
-        internal_service_url = self._service_url(service_name, deployment.project.port)
+        internal_service_url = self._service_url(service_name, project.port)
         ingress_host = self._ingress_host(deployment.id)
         service_url = self._ingress_url(ingress_host)
         effective_url = service_url or internal_service_url
-        healthcheck_url = f"{effective_url}{deployment.project.healthcheck_path}"
+        healthcheck_url = f"{effective_url}{project.healthcheck_path}"
         values = generic_web_app_values(
             deployment,
             GenericWebAppValuesConfig(
@@ -194,7 +196,7 @@ class HelmDeploymentMixin:
                 "executor": self.deploy_target,
                 **helm_metadata,
                 "image_ref": deployment.build.image_ref,
-                **self._env_source_summary(deployment.project.env_vars),
+                **self._env_source_summary(project.env_vars),
                 **health_metadata,
             },
             events=events,
@@ -373,7 +375,7 @@ class HelmDeploymentMixin:
             release_name = metadata.get("helm_release_name") if isinstance(metadata, dict) else None
             if release_name:
                 return str(release_name)
-        return helm_release_name(deployment.project, deployment)
+        return helm_release_name(project_for_deployment(deployment), deployment)
 
     def _deployment_has_helm_release_metadata(self, deployment):
         if getattr(deployment, "helm_release_name", None):

@@ -1,10 +1,11 @@
 from control_plane.extensions import db
+from control_plane.deployment_spec import project_for_deployment
 from control_plane.models import DeploymentEvent
 from control_plane.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
 
 
 def deployment_secret_values(deployment):
-    return secret_values_from_env_vars(deployment.project.env_vars if deployment and deployment.project else [])
+    return secret_values_from_env_vars(project_for_deployment(deployment).env_vars if deployment else [])
 
 
 def record_event(deployment, event_type, status, message, *, step=None, level="info", metadata=None):

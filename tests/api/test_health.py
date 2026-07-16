@@ -43,6 +43,35 @@ def test_health_check(client):
     assert response.get_json() == {"status": "ok"}
 
 
+def test_readiness_health_check_verifies_database_without_authentication(client):
+    response = client.get("/health/ready")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "ok"}
+
+
+def test_readiness_health_check_returns_safe_failure(client, monkeypatch):
+    def fail_execute(*_args, **_kwargs):
+        raise RuntimeError("mysql://user:sensitive-password@internal-db/control-plane")
+
+    monkeypatch.setattr(db.session, "execute", fail_execute)
+
+    response = client.get("/health/ready")
+
+    assert response.status_code == 503
+    assert response.get_json() == {"status": "error", "error_code": "not_ready"}
+    assert "sensitive-password" not in response.get_data(as_text=True)
+
+
+def test_responses_include_browser_security_headers(client):
+    response = client.get("/health")
+
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
+
+
 def test_observability_health_check_reports_safe_runtime_posture(client, app):
     app.config["CONTROL_PLANE_METRICS_ENABLED"] = True
     app.config["CONTROL_PLANE_METRICS_TOKEN"] = "must-not-leak"
@@ -161,7 +190,7 @@ def test_platform_health_check_reports_default_executor_state(client):
             "configured_roles": [],
             "auth_disabled_allowed": True,
             "token_transport": "bearer",
-            "public_routes": ["/health"],
+            "public_routes": ["/health", "/health/ready"],
             "protected_health_routes": [
                 "/health/db",
                 "/health/platform",
@@ -238,7 +267,7 @@ def test_platform_health_check_reports_local_docker_contract_state(client, app):
             "configured_roles": [],
             "auth_disabled_allowed": False,
             "token_transport": "bearer",
-            "public_routes": ["/health"],
+            "public_routes": ["/health", "/health/ready"],
             "protected_health_routes": [
                 "/health/db",
                 "/health/platform",
@@ -335,7 +364,7 @@ def test_platform_health_check_reports_kubernetes_prereq_gaps(client, app):
             "configured_roles": [],
             "auth_disabled_allowed": False,
             "token_transport": "bearer",
-            "public_routes": ["/health"],
+            "public_routes": ["/health", "/health/ready"],
             "protected_health_routes": [
                 "/health/db",
                 "/health/platform",
@@ -400,7 +429,7 @@ def test_platform_health_check_reports_kubernetes_ready_state(client, app):
         "configured_roles": [],
         "auth_disabled_allowed": False,
         "token_transport": "bearer",
-        "public_routes": ["/health"],
+        "public_routes": ["/health", "/health/ready"],
         "protected_health_routes": [
             "/health/db",
             "/health/platform",
@@ -484,7 +513,7 @@ def test_platform_health_check_reports_api_auth_posture(client, app):
         "configured_roles": ["read_only", "deployer", "admin"],
         "auth_disabled_allowed": True,
         "token_transport": "bearer",
-        "public_routes": ["/health"],
+        "public_routes": ["/health", "/health/ready"],
         "protected_health_routes": [
             "/health/db",
             "/health/platform",

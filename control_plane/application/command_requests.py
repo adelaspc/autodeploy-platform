@@ -1,4 +1,5 @@
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from control_plane.application.deployments.orchestration import create_deployment_event
 from control_plane.extensions import db
@@ -25,6 +26,7 @@ def request_deployment_command(deployment, command_type, *, message=None):
         deployment=deployment,
         command_type=command_type,
         status="pending",
+        active_key="active",
         message=message,
     )
     db.session.add(command)
@@ -36,5 +38,20 @@ def request_deployment_command(deployment, command_type, *, message=None):
         step=f"deploy.{command_type}",
         metadata_json={"command_type": command_type},
     )
-    db.session.flush()
+    try:
+        db.session.flush()
+    except IntegrityError:
+        db.session.rollback()
+        existing = db.session.scalar(
+            select(DeploymentCommand)
+            .where(
+                DeploymentCommand.deployment_id == deployment.id,
+                DeploymentCommand.command_type == command_type,
+                DeploymentCommand.active_key == "active",
+            )
+            .order_by(DeploymentCommand.requested_at.asc())
+        )
+        if existing is None:
+            raise
+        return existing, False
     return command, True

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from control_plane.deployment_spec import project_for_deployment
 from control_plane.security import env_var_is_secret
 
 
@@ -16,7 +17,7 @@ class GenericWebAppValuesConfig:
 
 def generic_web_app_values(deployment, config: GenericWebAppValuesConfig | None = None):
     config = config or GenericWebAppValuesConfig()
-    project = deployment.project
+    project = project_for_deployment(deployment)
     build = deployment.build
     repository, tag = _image_repository_and_tag(build)
 

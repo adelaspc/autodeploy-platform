@@ -6,6 +6,7 @@
 !.env.local-docker.example
 !.env.local-kubernetes.example
 !.env.secrets.example
+values.secrets.local.yaml
 .venv/
 
 # Python caches and tooling

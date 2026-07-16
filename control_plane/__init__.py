@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from flask import Flask, send_from_directory
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from control_plane.api import register_blueprints
 from control_plane.api.request_context import (
@@ -9,10 +10,17 @@ from control_plane.api.request_context import (
     log_request_completed,
     set_request_id_for_current_request,
 )
-from control_plane.config import Config
+from control_plane.config import Config, validate_numeric_config
 from control_plane.extensions import db, migrate
 from control_plane.logging_config import install_structured_logging
-from worker import run_reconciler, run_reconciler_loop_command, run_reconciler_once, run_worker, run_worker_once
+from worker import (
+    check_worker_readiness,
+    run_reconciler,
+    run_reconciler_loop_command,
+    run_reconciler_once,
+    run_worker,
+    run_worker_once,
+)
 
 
 def create_app(config_class=Config):
@@ -21,6 +29,10 @@ def create_app(config_class=Config):
     init_app = getattr(config_class, "init_app", None)
     if callable(init_app):
         init_app(app)
+    validate_numeric_config(app)
+    trusted_proxy_count = app.config.get("CONTROL_PLANE_TRUSTED_PROXY_COUNT", 0)
+    if trusted_proxy_count:
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=trusted_proxy_count)
 
     db.init_app(app)
     migrate.init_app(app, db)
@@ -33,12 +45,21 @@ def create_app(config_class=Config):
 
     @app.after_request
     def apply_request_context(response):
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+            "connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        )
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("X-Frame-Options", "DENY")
         response = attach_request_id_header(response)
         return log_request_completed(response)
 
     register_blueprints(app)
     app.cli.add_command(run_worker)
     app.cli.add_command(run_worker_once)
+    app.cli.add_command(check_worker_readiness)
     app.cli.add_command(run_reconciler_once)
     app.cli.add_command(run_reconciler)
     app.cli.add_command(run_reconciler_loop_command)

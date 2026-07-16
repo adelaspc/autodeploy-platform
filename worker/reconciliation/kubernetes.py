@@ -55,10 +55,10 @@ def reconcile_running_missing_kubernetes_resource(deployment, *, executor_factor
         )
 
     missing_message = ", ".join(missing)
-    deployment.status = "failed"
+    deployment.transition_to("failed")
     deployment.finished_at = now_utc()
     deployment.last_error = f"Reconciler detected missing Kubernetes resource(s): {missing_message}"
-    deployment.build.status = "failed"
+    deployment.build.transition_to("failed")
     deployment.build.finished_at = deployment.finished_at
     deployment.build.last_error = deployment.last_error
     deployment.service_url = None
@@ -180,8 +180,5 @@ def reconcile_kubernetes_nonrunning_resources(deployment, *, executor_factory):
             },
         )
 
-    if changed:
-        db.session.commit()
-    else:
-        db.session.flush()
+    db.session.commit()
     return changed

@@ -20,7 +20,7 @@ Confirm:
 - the current WSL `nip.io` domain is configured;
 - the Docker Hub workload repository is public or otherwise writable under the active plan;
 - the selected demo workload uses its configured port and healthcheck path;
-- the operator API token is saved in the UI if API authentication is enabled;
+- the operator API token is kept for the current browser session in the UI if API authentication is enabled;
 - no terminal, browser tab, or editor view exposes `.env.secrets`, tokens, passwords, or Secret values.
 
 Use these healthy workload variables:

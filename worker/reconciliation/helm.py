@@ -47,10 +47,10 @@ def reconcile_running_missing_helm_release(deployment, *, executor_factory):
     if helm_status is None or helm_status.get("release_exists", False):
         return False
 
-    deployment.status = "failed"
+    deployment.transition_to("failed")
     deployment.finished_at = now_utc()
     deployment.last_error = "Reconciler detected missing Helm release for running deployment"
-    deployment.build.status = "failed"
+    deployment.build.transition_to("failed")
     deployment.build.finished_at = deployment.finished_at
     deployment.build.last_error = deployment.last_error
     deployment.service_url = None
@@ -144,5 +144,5 @@ def reconcile_helm_nonrunning_release(deployment, *, executor_factory):
             },
         )
 
-    db.session.flush()
+    db.session.commit()
     return False

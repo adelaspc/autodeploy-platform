@@ -16,6 +16,17 @@ def health_check():
     return jsonify({"status": "ok"}), 200
 
 
+@health_bp.get("/health/ready")
+def readiness_health_check():
+    try:
+        db.session.execute(text("SELECT 1"))
+    except Exception as exc:
+        current_app.logger.warning("API readiness check failed", exc_info=exc)
+        return jsonify({"status": "error", "error_code": "not_ready"}), 503
+
+    return jsonify({"status": "ok"}), 200
+
+
 @health_bp.get("/health/db")
 @require_api_role("read_only")
 def database_health_check():

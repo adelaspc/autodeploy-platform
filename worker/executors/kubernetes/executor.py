@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from control_plane.deployment_spec import project_for_deployment
 from worker.execution.contracts import ExecutorContract
 from worker.executors.local_docker import LocalDockerExecutor
 from worker.executors.kubernetes.diagnostics import KubernetesDiagnosticsMixin
@@ -153,7 +154,7 @@ class KubernetesExecutor(
         return args
 
     def _k8s_deployment_name(self, deployment):
-        base = self._sanitize_image_component(deployment.project.name)
+        base = self._sanitize_image_component(project_for_deployment(deployment).name)
         return f"paas-{base}-{deployment.id}"
 
     def _k8s_service_name(self, deployment):

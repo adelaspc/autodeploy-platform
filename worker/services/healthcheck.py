@@ -1,9 +1,17 @@
 import time
 from urllib.error import HTTPError
-from urllib.request import urlopen
+from urllib.request import HTTPRedirectHandler, build_opener
 
 from control_plane.security import redact_text
 from worker.execution.contracts import WorkerExecutionError
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler()).open
 
 
 class DockerHealthcheckServiceMixin:
@@ -32,7 +40,7 @@ class DockerHealthcheckServiceMixin:
                 "healthcheck_status_code": probe_result["status_code"],
                 "healthcheck_summary": summary,
             }
-            if 200 <= probe_result["status_code"] < 400:
+            if 200 <= probe_result["status_code"] < 300:
                 with log_path.open("a", encoding="utf-8") as handle:
                     handle.write(
                         f"Healthcheck attempt {attempts} succeeded: {probe_result['status_code']} {summary}\n"
@@ -58,9 +66,9 @@ class DockerHealthcheckServiceMixin:
         )
 
     @staticmethod
-    def _default_health_probe(url):
+    def _default_health_probe(url, *, opener=_NO_REDIRECT_OPENER):
         try:
-            with urlopen(url, timeout=5) as response:  # nosec B310
+            with opener(url, timeout=5) as response:  # nosec B310
                 body = response.read(512).decode("utf-8", errors="replace")
                 return {
                     "status_code": response.status,

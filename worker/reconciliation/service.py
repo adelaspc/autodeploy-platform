@@ -18,32 +18,44 @@ from worker.reconciliation.kubernetes import (
 )
 
 
+class ReconciliationContext:
+    def __init__(self, deployment, *, executor_factory=create_executor_for_deployment):
+        self.deployment_id = deployment.id
+        self._executor_factory = executor_factory
+        self._executor = None
+
+    def executor_for(self, deployment):
+        if self._executor is None:
+            self._executor = self._executor_factory(deployment)
+        return self._executor
+
+
 def iter_reconcilable_deployments():
     return PlatformDeployment.query.order_by(PlatformDeployment.created_at.asc()).all()
 
 
-def reconcile_running_missing_container(deployment):
-    return handle_running_missing_container(deployment, executor_factory=create_executor_for_deployment)
+def reconcile_running_missing_container(deployment, *, executor_factory=create_executor_for_deployment):
+    return handle_running_missing_container(deployment, executor_factory=executor_factory)
 
 
-def reconcile_running_missing_helm_release(deployment):
-    return handle_running_missing_helm_release(deployment, executor_factory=create_executor_for_deployment)
+def reconcile_running_missing_helm_release(deployment, *, executor_factory=create_executor_for_deployment):
+    return handle_running_missing_helm_release(deployment, executor_factory=executor_factory)
 
 
-def reconcile_helm_nonrunning_release(deployment):
-    return handle_helm_nonrunning_release(deployment, executor_factory=create_executor_for_deployment)
+def reconcile_helm_nonrunning_release(deployment, *, executor_factory=create_executor_for_deployment):
+    return handle_helm_nonrunning_release(deployment, executor_factory=executor_factory)
 
 
-def reconcile_failed_artifacts(deployment):
-    return handle_failed_artifacts(deployment, executor_factory=create_executor_for_deployment)
+def reconcile_failed_artifacts(deployment, *, executor_factory=create_executor_for_deployment):
+    return handle_failed_artifacts(deployment, executor_factory=executor_factory)
 
 
-def reconcile_running_missing_kubernetes_resource(deployment):
-    return handle_running_missing_kubernetes_resource(deployment, executor_factory=create_executor_for_deployment)
+def reconcile_running_missing_kubernetes_resource(deployment, *, executor_factory=create_executor_for_deployment):
+    return handle_running_missing_kubernetes_resource(deployment, executor_factory=executor_factory)
 
 
-def reconcile_kubernetes_nonrunning_resources(deployment):
-    return handle_kubernetes_nonrunning_resources(deployment, executor_factory=create_executor_for_deployment)
+def reconcile_kubernetes_nonrunning_resources(deployment, *, executor_factory=create_executor_for_deployment):
+    return handle_kubernetes_nonrunning_resources(deployment, executor_factory=executor_factory)
 
 
 
@@ -53,26 +65,22 @@ def reconcile_kubernetes_nonrunning_resources(deployment):
 
 def reconcile_deployment(deployment):
     changes = 0
+    context = ReconciliationContext(deployment, executor_factory=create_executor_for_deployment)
     if reconcile_stale_claim(deployment):
         deployment = db.session.get(PlatformDeployment, deployment.id)
         changes += 1
-    if reconcile_running_missing_container(deployment):
-        deployment = db.session.get(PlatformDeployment, deployment.id)
-        changes += 1
-    if reconcile_running_missing_helm_release(deployment):
-        deployment = db.session.get(PlatformDeployment, deployment.id)
-        changes += 1
-    if reconcile_running_missing_kubernetes_resource(deployment):
-        deployment = db.session.get(PlatformDeployment, deployment.id)
-        changes += 1
-    if reconcile_helm_nonrunning_release(deployment):
-        deployment = db.session.get(PlatformDeployment, deployment.id)
-        changes += 1
-    if reconcile_kubernetes_nonrunning_resources(deployment):
-        deployment = db.session.get(PlatformDeployment, deployment.id)
-        changes += 1
-    if reconcile_failed_artifacts(deployment):
-        changes += 1
+    handlers = (
+        reconcile_running_missing_container,
+        reconcile_running_missing_helm_release,
+        reconcile_running_missing_kubernetes_resource,
+        reconcile_helm_nonrunning_release,
+        reconcile_kubernetes_nonrunning_resources,
+        reconcile_failed_artifacts,
+    )
+    for handler in handlers:
+        if handler(deployment, executor_factory=context.executor_for):
+            deployment = db.session.get(PlatformDeployment, deployment.id)
+            changes += 1
     return changes
 
 

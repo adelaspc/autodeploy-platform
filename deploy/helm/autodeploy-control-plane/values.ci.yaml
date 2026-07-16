@@ -7,5 +7,5 @@ config:
   CONTROL_PLANE_EXECUTOR: fake
 
 secrets:
-  CONTROL_PLANE_DATABASE_URL: sqlite:////app/instance/control_plane.db
-
+  values:
+    CONTROL_PLANE_DATABASE_URL: sqlite:////app/instance/control_plane.db

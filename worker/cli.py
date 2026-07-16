@@ -3,7 +3,9 @@ import time
 
 import click
 from flask import current_app
+from sqlalchemy import text
 
+from control_plane.extensions import db
 from worker.reconciliation.service import reconcile_deployments
 from worker.work_items import process_next_work_item
 
@@ -46,8 +48,28 @@ def run_worker_once():
     click.echo(f"Processed deployment {deployment.id} with final status '{deployment.status}'")
 
 
+@click.command("check-worker-readiness")
+def check_worker_readiness():
+    """Verify that the worker can reach its database and has a usable executor configuration."""
+    try:
+        db.session.execute(text("SELECT 1"))
+    except Exception as exc:
+        current_app.logger.warning("Worker readiness database check failed", exc_info=exc)
+        raise click.ClickException("worker database is unreachable") from exc
+
+    try:
+        from control_plane.application.projects.read_models import platform_status_payload
+
+        status = platform_status_payload()
+    except Exception as exc:
+        current_app.logger.warning("Worker readiness executor check failed", exc_info=exc)
+        raise click.ClickException("worker executor configuration is not ready") from exc
+    if not status.get("deployment_creation_ready"):
+        raise click.ClickException("worker executor configuration is not ready")
+
+
 @click.command("run-worker")
-@click.option("--poll-interval", type=float, default=None, help="Seconds to sleep between polling iterations.")
+@click.option("--poll-interval", type=click.FloatRange(min=0, min_open=True), default=None, help="Seconds to sleep between polling iterations.")
 def run_worker(poll_interval):
     global _keep_running
     _keep_running = True
@@ -81,7 +103,7 @@ def run_reconciler():
 
 
 @click.command("run-reconciler-loop")
-@click.option("--poll-interval", type=float, default=None, help="Seconds to sleep between reconciliation runs.")
+@click.option("--poll-interval", type=click.FloatRange(min=0, min_open=True), default=None, help="Seconds to sleep between reconciliation runs.")
 def run_reconciler_loop_command(poll_interval):
     global _keep_running
     _keep_running = True

@@ -1,20 +1,45 @@
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from control_plane.deployment_spec import project_for_deployment
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler()).open
 
 
 def deployment_healthcheck_url(deployment):
     service_url = (deployment.service_url or "").strip().rstrip("/")
-    healthcheck_path = (deployment.project.healthcheck_path or "/").strip()
-    if not service_url or urlsplit(service_url).scheme not in {"http", "https"}:
+    healthcheck_path = (project_for_deployment(deployment).healthcheck_path or "/").strip()
+    parsed = urlsplit(service_url)
+    if (
+        not service_url
+        or parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        return None
+    try:
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            return None
+    except ValueError:
         return None
     if not healthcheck_path.startswith("/"):
         healthcheck_path = f"/{healthcheck_path}"
     return f"{service_url}{healthcheck_path}"
 
 
-def probe_deployment_health(deployment, *, timeout=3, opener=urlopen):
+def probe_deployment_health(deployment, *, timeout=3, opener=_NO_REDIRECT_OPENER):
     checked_at = datetime.now(timezone.utc).isoformat()
     healthcheck_url = deployment_healthcheck_url(deployment)
     if deployment.status != "running":
@@ -51,7 +76,7 @@ def probe_deployment_health(deployment, *, timeout=3, opener=urlopen):
             "checked_at": checked_at,
         }
 
-    healthy = 200 <= http_status < 400
+    healthy = 200 <= http_status < 300
     return {
         "status": "healthy" if healthy else "unhealthy",
         "message": (

@@ -300,6 +300,8 @@ def test_process_next_pending_deployment_runs_to_completion(client):
     assert processed.build.started_at is not None
     assert processed.build.finished_at is not None
     assert processed.build.registry_push_status == "skipped"
+    assert processed.build.build_log_path == "/tmp/test-workspaces/build.log"
+    assert processed.build.log_path == "/tmp/test-workspaces/deploy.log"
     assert processed.preflight_status == "succeeded"
     assert processed.preflight_summary == "Preflight simulated"
     assert processed.preflight_metadata_json["status"] == "succeeded"
@@ -572,6 +574,34 @@ def test_reconciler_cli_exposes_explicit_once_and_loop_commands(app):
     assert commands["run-reconciler"].hidden is True
 
 
+def test_worker_readiness_cli_is_registered_and_succeeds(app):
+    result = app.test_cli_runner().invoke(args=["check-worker-readiness"])
+
+    assert result.exit_code == 0
+
+
+def test_worker_readiness_cli_fails_when_database_is_unreachable(app, monkeypatch):
+    def fail_execute(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(db.session, "execute", fail_execute)
+
+    result = app.test_cli_runner().invoke(args=["check-worker-readiness"])
+
+    assert result.exit_code == 1
+    assert "worker database is unreachable" in result.output
+
+
+def test_worker_readiness_cli_fails_when_executor_configuration_is_incomplete(app):
+    app.config["CONTROL_PLANE_EXECUTOR"] = "kubernetes"
+    app.config["CONTROL_PLANE_REGISTRY_ENABLED"] = False
+
+    result = app.test_cli_runner().invoke(args=["check-worker-readiness"])
+
+    assert result.exit_code == 1
+    assert "worker executor configuration is not ready" in result.output
+
+
 def test_legacy_reconciler_cli_alias_remains_compatible(app):
     result = app.test_cli_runner().invoke(args=["run-reconciler"])
 
@@ -747,3 +777,24 @@ def test_local_docker_executor_heartbeats_during_long_command(client, app, tmp_p
     assert processed.id == pending["id"]
     assert processed.status == "running"
     assert heartbeat_calls["count"] == 1
+
+
+def test_unexpected_worker_exception_marks_deployment_failed(client):
+    pending = create_pending_deployment(client, name="unexpected-worker-error", test_command=None)
+
+    class UnexpectedFailureExecutor:
+        def clone_repo(self, _deployment):
+            raise RuntimeError("sensitive internal implementation detail")
+
+    processed = process_next_pending_deployment(executor=UnexpectedFailureExecutor())
+
+    assert processed is not None
+    assert processed.id == pending["id"]
+    assert processed.status == "failed"
+    assert processed.build.status == "failed"
+    assert processed.claimed_by is None
+    assert processed.claimed_at is None
+    assert processed.last_error == "Worker encountered an unexpected internal error"
+    failure_event = next(event for event in processed.events if event.event_type == "worker.internal.failed")
+    assert failure_event.metadata_json["error_type"] == "RuntimeError"
+    assert "sensitive internal implementation detail" not in failure_event.message

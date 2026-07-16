@@ -31,6 +31,7 @@ RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 COPY --chown=appuser:appuser control_plane ./control_plane
 COPY --chown=appuser:appuser migrations ./migrations
 COPY --chown=appuser:appuser worker ./worker
+COPY --chown=appuser:appuser deploy/helm/generic-web-app ./deploy/helm/generic-web-app
 COPY --chown=appuser:appuser wsgi.py ./
 COPY --chown=appuser:appuser --from=frontend-builder /app/frontend/dist ./frontend/dist
 

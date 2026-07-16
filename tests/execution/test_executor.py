@@ -1,14 +1,19 @@
 from pathlib import Path
 import subprocess
 import base64
+import sys
+from io import BytesIO
+from urllib.error import HTTPError
 import pytest
 
 from control_plane.extensions import db
 from control_plane.models import PlatformDeployment
 from worker.execution.contracts import WorkerExecutionError
 from worker.executors.local_docker import LocalDockerExecutor
+from worker.services.healthcheck import _NoRedirectHandler
 from worker.processing.pipeline import process_next_pending_deployment
 
+from tests.api.test_projects import create_project
 from tests.execution.test_worker import create_pending_deployment
 
 
@@ -52,11 +57,15 @@ def test_local_docker_executor_processes_deployment_with_stubbed_commands(client
     assert processed.build.image_tag == "local-executor-app:abc123def456"
     assert processed.build.image_ref == "local-executor-app:abc123def456"
 
-    assert [command[:2] for command in commands[:2]] == [["git", "clone"], ["docker", "build"]]
-    assert commands[2][:3] == ["docker", "run", "--rm"]
-    assert commands[3][:3] == ["docker", "rm", "--force"]
-    assert commands[4][:3] == ["docker", "run", "--detach"]
-    assert commands[5][:2] == ["docker", "logs"]
+    assert [command[:2] for command in commands[:3]] == [
+        ["git", "clone"],
+        ["git", "-C"],
+        ["docker", "build"],
+    ]
+    assert commands[3][:3] == ["docker", "run", "--rm"]
+    assert commands[4][:3] == ["docker", "rm", "--force"]
+    assert commands[5][:3] == ["docker", "run", "--detach"]
+    assert commands[6][:2] == ["docker", "logs"]
 
     deployment_response = client.get(f"/api/projects/{processed.project_id}/deployments/{processed.id}")
     deployment = deployment_response.get_json()
@@ -70,6 +79,135 @@ def test_local_docker_executor_processes_deployment_with_stubbed_commands(client
     assert apply_events[0]["metadata_json"]["runtime_log_summary"] == "app booted | ready"
     assert apply_events[0]["metadata_json"]["runtime_log_path"].endswith("/runtime.log")
     assert deployment["service_url"] == "http://127.0.0.1:18080"
+
+
+def test_worker_uses_deployment_snapshot_after_project_is_edited(client, app, tmp_path):
+    project_id = create_project(
+        client,
+        name="snapshot-app",
+        repo_url="https://github.com/example/original-repo",
+        branch="main",
+        dockerfile_path="Dockerfile",
+        build_context=".",
+        port=5000,
+        healthcheck_path="/health",
+        env_vars=[{"name": "APP_MODE", "value": "original"}],
+    ).get_json()["id"]
+    deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "abc123def456",
+            "image_name": "snapshot-app",
+            "image_tag": "abc123def456",
+            "status": "pending",
+            "build_status": "pending",
+            "test_command": None,
+        },
+    ).get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.project.name = "edited-app"
+        deployment.project.repo_url = "https://github.com/example/edited-repo"
+        deployment.project.branch = "edited"
+        deployment.project.dockerfile_path = "docker/Edited.Dockerfile"
+        deployment.project.build_context = "edited-context"
+        deployment.project.port = 9000
+        deployment.project.healthcheck_path = "/edited-health"
+        deployment.project.env_vars = [{"name": "APP_MODE", "value": "edited"}]
+        db.session.commit()
+
+    commands = []
+    health_urls = []
+
+    def fake_runner(args, capture_output, text, timeout, check, input=None, env=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
+        commands.append(args)
+        if args[:2] == ["git", "clone"]:
+            repo_dir = Path(args[-1])
+            repo_dir.mkdir(parents=True, exist_ok=True)
+            (repo_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="clone ok\n", stderr="")
+        if args[:3] == ["docker", "run", "--detach"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="container123\n", stderr="")
+        if args[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="ready\n", stderr="")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
+
+    def health_probe(url):
+        health_urls.append(url)
+        return {"status_code": 200, "summary": "ok"}
+
+    executor = LocalDockerExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=fake_runner,
+        port_allocator=lambda: 18080,
+        health_probe=health_probe,
+    )
+
+    processed = process_next_pending_deployment(executor=executor)
+
+    clone_command = next(command for command in commands if command[:2] == ["git", "clone"])
+    build_command = next(command for command in commands if command[:2] == ["docker", "build"])
+    run_command = next(command for command in commands if command[:3] == ["docker", "run", "--detach"])
+    assert processed.id == deployment_id
+    assert processed.status == "running"
+    assert clone_command[3] == "main"
+    assert clone_command[5] == "https://github.com/example/original-repo.git"
+    assert build_command[5].endswith("/repo/Dockerfile")
+    assert build_command[6].endswith("/repo")
+    assert f"paas-snapshot-app-{deployment_id}" in run_command
+    assert "127.0.0.1:18080:5000" in run_command
+    assert "APP_MODE=original" in run_command
+    assert health_urls == ["http://127.0.0.1:18080/health"]
+
+
+def test_local_docker_healthcheck_rejects_redirect_status(tmp_path):
+    executor = LocalDockerExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        health_probe=lambda _url: {"status_code": 302, "summary": "redirect"},
+        healthcheck_timeout=0.001,
+        healthcheck_interval=0,
+        sleep_fn=lambda _seconds: None,
+    )
+    log_path = tmp_path / "healthcheck.log"
+
+    with pytest.raises(WorkerExecutionError) as exc_info:
+        executor._wait_for_healthcheck("http://demo.example/health", log_path)
+
+    assert exc_info.value.step == "deploy.healthcheck"
+    assert exc_info.value.metadata["healthcheck_last_error"] == "HTTP 302"
+    assert "failed: 302 redirect" in log_path.read_text(encoding="utf-8")
+
+
+def test_default_health_probe_does_not_follow_redirects(tmp_path):
+    def redirecting_opener(url, *, timeout):
+        raise HTTPError(url, 302, "Found", {"Location": "/healthy"}, BytesIO(b""))
+
+    executor = LocalDockerExecutor(workspace_root=tmp_path, command_timeout=30)
+    result = executor._default_health_probe(
+        "http://demo.example/redirect",
+        opener=redirecting_opener,
+    )
+
+    assert _NoRedirectHandler().redirect_request(None, None, 302, "Found", {}, "/healthy") is None
+    assert result["status_code"] == 302
+    assert result["summary"] == "HTTP 302"
+
+
+def test_cleanup_workspace_rejects_paths_outside_workspace_root(tmp_path):
+    executor = LocalDockerExecutor(workspace_root=tmp_path / "workspaces", command_timeout=30)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    build = type("BuildStub", (), {"workspace_path": str(outside), "log_path": None})()
+    deployment = type("DeploymentStub", (), {"build": build})()
+
+    with pytest.raises(WorkerExecutionError) as exc_info:
+        executor.cleanup_workspace(deployment)
+
+    assert exc_info.value.step == "deployment.cleanup"
+    assert outside.exists()
 
 
 def test_local_docker_executor_rejects_invalid_persisted_test_command(client, tmp_path):
@@ -281,12 +419,17 @@ def test_local_docker_executor_retries_retryable_steps(tmp_path):
     deployment = type(
         "DeploymentStub",
         (),
-        {"id": 1, "project_id": 2, "project": type("ProjectStub", (), {"branch": "main", "repo_url": "/tmp/repo"})()},
+        {
+            "id": 1,
+            "project_id": 2,
+            "build": type("BuildStub", (), {"commit_sha": "abc123def456"})(),
+            "project": type("ProjectStub", (), {"branch": "main", "repo_url": "/tmp/repo"})(),
+        },
     )()
 
     result = executor.clone_repo(deployment)
 
-    assert attempts["count"] == 2
+    assert attempts["count"] == 3
     assert result.metadata["attempt"] == 2
     assert result.metadata["total_attempts"] == 2
     log_contents = (tmp_path / "project-2" / "deployment-1" / "logs" / "clone.log").read_text(encoding="utf-8")
@@ -315,6 +458,7 @@ def test_local_docker_executor_clones_private_github_repo_with_token_env(tmp_pat
         {
             "id": 1,
             "project_id": 2,
+            "build": type("BuildStub", (), {"commit_sha": "abc123def456"})(),
             "project": type(
                 "ProjectStub",
                 (),
@@ -339,6 +483,98 @@ def test_local_docker_executor_clones_private_github_repo_with_token_env(tmp_pat
     assert clone_call["env"]["GIT_CONFIG_VALUE_0"].startswith("AUTHORIZATION: basic ")
     encoded = clone_call["env"]["GIT_CONFIG_VALUE_0"].split("basic ", 1)[1]
     assert base64.b64decode(encoded).decode("utf-8") == "x-access-token:unit-test-github-token"
+
+
+def test_local_docker_executor_clones_recorded_branch_and_checks_out_recorded_commit(tmp_path):
+    source_repo = tmp_path / "source"
+    source_repo.mkdir()
+    subprocess.run(["git", "init", "--initial-branch=main"], cwd=source_repo, check=True, capture_output=True)
+
+    def commit_file(contents, message):
+        (source_repo / "version.txt").write_text(contents, encoding="utf-8")
+        subprocess.run(["git", "add", "version.txt"], cwd=source_repo, check=True, capture_output=True)
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=AutoDeploy Tests",
+                "-c",
+                "user.email=autodeploy-tests@example.invalid",
+                "commit",
+                "-m",
+                message,
+            ],
+            cwd=source_repo,
+            check=True,
+            capture_output=True,
+        )
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=source_repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    commit_file("main\n", "main")
+    subprocess.run(["git", "switch", "-c", "feature"], cwd=source_repo, check=True, capture_output=True)
+    recorded_commit = commit_file("recorded\n", "recorded")
+    commit_file("newer\n", "newer")
+
+    deployment = type(
+        "DeploymentStub",
+        (),
+        {
+            "id": 1,
+            "project_id": 2,
+            "build": type("BuildStub", (), {"commit_sha": recorded_commit})(),
+            "project": type(
+                "ProjectStub",
+                (),
+                {"branch": "main", "repo_url": str(source_repo), "git_auth_type": "none"},
+            )(),
+            "events": [
+                type(
+                    "EventStub",
+                    (),
+                    {"event_type": "deployment.created", "metadata_json": {"branch": "feature"}},
+                )()
+            ],
+        },
+    )()
+    workspace_root = tmp_path / "workspaces"
+    executor = LocalDockerExecutor(workspace_root=workspace_root, command_timeout=30)
+
+    result = executor.clone_repo(deployment)
+
+    repo_dir = workspace_root / "project-2" / "deployment-1" / "repo"
+    checked_out_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert checked_out_commit == recorded_commit
+    assert (repo_dir / "version.txt").read_text(encoding="utf-8") == "recorded\n"
+    assert result.metadata["branch"] == "feature"
+    assert result.metadata["commit_sha"] == recorded_commit
+
+
+def test_command_runner_handles_output_larger_than_pipe_buffers(tmp_path):
+    executor = LocalDockerExecutor(workspace_root=tmp_path, command_timeout=10)
+
+    completed = executor._execute_command(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdout.write('x' * 2_000_000); sys.stderr.write('y' * 2_000_000)",
+        ]
+    )
+
+    assert completed.returncode == 0
+    assert len(completed.stdout) == 2_000_000
+    assert len(completed.stderr) == 2_000_000
 
 
 def test_local_docker_executor_clone_fails_when_git_token_env_is_missing(tmp_path):
@@ -503,3 +739,53 @@ def test_local_docker_executor_injects_secret_env_values_without_logging_them(tm
     assert "[REDACTED]" in runtime_log
     assert result.metadata["runtime_log_summary"] == "booted with [REDACTED]"
     assert result.metadata["healthcheck_summary"] == "[REDACTED]"
+
+
+def test_local_docker_executor_retries_host_port_collision(tmp_path):
+    run_attempts = []
+    ports = iter((18080, 18081))
+
+    def runner(args, capture_output, text, timeout, check, input=None, env=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
+        if args[:3] == ["docker", "run", "--detach"]:
+            run_attempts.append(args)
+            if len(run_attempts) == 1:
+                return subprocess.CompletedProcess(
+                    args=args,
+                    returncode=1,
+                    stdout="",
+                    stderr="Bind for 127.0.0.1:18080 failed: port is already allocated\n",
+                )
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="container123\n", stderr="")
+        if args[:2] == ["docker", "logs"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="ready\n", stderr="")
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    executor = LocalDockerExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=runner,
+        port_allocator=lambda: next(ports),
+        health_probe=lambda _url: {"status_code": 200, "summary": "ok"},
+    )
+    deployment = type(
+        "DeploymentStub",
+        (),
+        {
+            "id": 1,
+            "project_id": 2,
+            "build": type("BuildStub", (), {"image_tag": "demo:abc"})(),
+            "project": type(
+                "ProjectStub",
+                (),
+                {"name": "demo", "port": 5000, "healthcheck_path": "/health", "env_vars": []},
+            )(),
+        },
+    )()
+
+    result = executor.deploy(deployment)
+
+    assert len(run_attempts) == 2
+    assert "127.0.0.1:18080:5000" in run_attempts[0]
+    assert "127.0.0.1:18081:5000" in run_attempts[1]
+    assert result.host_port == 18081
+    assert result.metadata["port_allocation_attempts"] == 2

@@ -158,10 +158,10 @@ def set_deployment_status(deployment, status, *, event_type, message):
     if deployment.build.started_at is None and status in BUILD_STATUS_BY_DEPLOYMENT_STATUS:
         deployment.build.started_at = now_utc()
 
-    deployment.status = status
+    deployment.transition_to(status)
     build_status = BUILD_STATUS_BY_DEPLOYMENT_STATUS.get(status)
     if build_status:
-        deployment.build.status = build_status
+        deployment.build.transition_to(build_status)
     record_event(deployment, event_type, status, message, step=status)
     db.session.flush()
 
@@ -179,10 +179,10 @@ def mark_failed(deployment, step, message, *, metadata=None):
     secret_values = deployment_secret_values(deployment)
     sanitized_message = redact_text(message, secret_values=secret_values)
     sanitized_metadata = redact_sensitive_data(metadata, secret_values=secret_values)
-    deployment.status = "failed"
+    deployment.transition_to("failed")
     deployment.finished_at = now_utc()
     deployment.last_error = sanitized_message
-    deployment.build.status = "failed"
+    deployment.build.transition_to("failed")
     deployment.build.finished_at = now_utc()
     deployment.build.last_error = sanitized_message
     record_event(

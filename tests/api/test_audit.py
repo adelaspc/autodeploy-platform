@@ -1,4 +1,8 @@
 import control_plane.application.deployments.orchestration as deployment_orchestration_api
+from sqlalchemy.pool import StaticPool
+
+from control_plane import create_app
+from control_plane.api.audit_service import client_ip_address
 
 
 def bearer_headers(token):
@@ -33,6 +37,19 @@ def create_project_payload(name="audit-app", **overrides):
     return payload
 
 
+class TrustedProxyTestConfig:
+    TESTING = True
+    SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        "connect_args": {"check_same_thread": False},
+        "poolclass": StaticPool,
+    }
+    CONTROL_PLANE_ENV = "development"
+    CONTROL_PLANE_ALLOW_AUTH_DISABLED = True
+    CONTROL_PLANE_TRUSTED_PROXY_COUNT = 1
+
+
 def test_audit_endpoint_requires_authentication(client, app):
     configure_api_tokens(app)
 
@@ -55,6 +72,35 @@ def test_read_only_token_can_view_audit_events(client, app):
     assert payload["pagination"]["limit"] == 20
     assert len(payload["items"]) >= 1
     assert payload["items"][0]["action"] == "project.created"
+
+
+def test_audit_ignores_untrusted_forwarded_for(client, app):
+    headers = configure_api_tokens(app)
+    headers["admin"]["X-Forwarded-For"] = "203.0.113.99"
+
+    client.post(
+        "/api/projects",
+        json=create_project_payload(name="audit-client-ip-app"),
+        headers=headers["admin"],
+        environ_base={"REMOTE_ADDR": "192.0.2.10"},
+    )
+    response = client.get("/api/audit-events", headers=headers["read_only"])
+    created = next(item for item in response.get_json()["items"] if item["action"] == "project.created")
+
+    assert created["ip_address"] == "192.0.2.10"
+
+
+def test_configured_trusted_proxy_resolves_forwarded_client_address():
+    proxy_app = create_app(TrustedProxyTestConfig)
+    proxy_app.add_url_rule("/test-client-ip", view_func=lambda: {"ip_address": client_ip_address()})
+
+    response = proxy_app.test_client().get(
+        "/test-client-ip",
+        headers={"X-Forwarded-For": "198.51.100.25"},
+        environ_base={"REMOTE_ADDR": "192.0.2.20"},
+    )
+
+    assert response.get_json() == {"ip_address": "198.51.100.25"}
 
 
 def test_mutating_actions_create_audit_events(client, app, monkeypatch):

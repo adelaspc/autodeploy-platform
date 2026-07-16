@@ -34,9 +34,38 @@ def env_bool(name, default=False):
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def validate_numeric_config(app):
+    positive_settings = {
+        "MAX_CONTENT_LENGTH": 2 * 1024 * 1024,
+        "CONTROL_PLANE_COMMAND_TIMEOUT_SECONDS": 600,
+        "CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS": 30,
+        "CONTROL_PLANE_HEALTHCHECK_INTERVAL_SECONDS": 1,
+        "CONTROL_PLANE_WORKER_POLL_INTERVAL_SECONDS": 5,
+        "CONTROL_PLANE_RECONCILER_POLL_INTERVAL_SECONDS": 60,
+        "CONTROL_PLANE_CLAIM_TTL_SECONDS": 300,
+    }
+    for name, default in positive_settings.items():
+        value = app.config.get(name)
+        if value is None:
+            value = default
+        if value <= 0:
+            raise RuntimeError(f"{name} must be greater than zero")
+    if app.config.get("CONTROL_PLANE_COMMAND_RETRY_COUNT", 0) < 0:
+        raise RuntimeError("CONTROL_PLANE_COMMAND_RETRY_COUNT cannot be negative")
+    refresh_interval = app.config.get("CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS", 30)
+    claim_ttl = app.config.get("CONTROL_PLANE_CLAIM_TTL_SECONDS", 300)
+    if refresh_interval < 0:
+        raise RuntimeError("CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS cannot be negative")
+    if refresh_interval >= claim_ttl:
+        raise RuntimeError(
+            "CONTROL_PLANE_CLAIM_REFRESH_INTERVAL_SECONDS must be less than CONTROL_PLANE_CLAIM_TTL_SECONDS"
+        )
+
+
 class Config:
     SQLALCHEMY_DATABASE_URI = os.getenv("CONTROL_PLANE_DATABASE_URL")
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    MAX_CONTENT_LENGTH = int(os.getenv("CONTROL_PLANE_MAX_CONTENT_LENGTH", str(2 * 1024 * 1024)))
     CONTROL_PLANE_ENV = os.getenv("CONTROL_PLANE_ENV", "").strip().lower()
     CONTROL_PLANE_EXECUTOR = os.getenv("CONTROL_PLANE_EXECUTOR", "fake")
     CONTROL_PLANE_WORKSPACE_ROOT = os.getenv("CONTROL_PLANE_WORKSPACE_ROOT", "/tmp/paas-workspaces")
@@ -57,6 +86,7 @@ class Config:
     CONTROL_PLANE_METRICS_TOKEN = os.getenv("CONTROL_PLANE_METRICS_TOKEN")
     CONTROL_PLANE_LOG_FORMAT = os.getenv("CONTROL_PLANE_LOG_FORMAT", "json")
     CONTROL_PLANE_COMPONENT = os.getenv("CONTROL_PLANE_COMPONENT", "api")
+    CONTROL_PLANE_TRUSTED_PROXY_COUNT = int(os.getenv("CONTROL_PLANE_TRUSTED_PROXY_COUNT", "0"))
     CONTROL_PLANE_KUBECONFIG = os.getenv("CONTROL_PLANE_KUBECONFIG")
     CONTROL_PLANE_K8S_NAMESPACE = os.getenv("CONTROL_PLANE_K8S_NAMESPACE", "default")
     CONTROL_PLANE_K8S_IMAGE_PULL_SECRET = os.getenv("CONTROL_PLANE_K8S_IMAGE_PULL_SECRET")
@@ -96,6 +126,9 @@ class Config:
 
         if not app.config.get("SQLALCHEMY_DATABASE_URI"):
             app.config["SQLALCHEMY_DATABASE_URI"] = resolve_database_url(app.instance_path)
+        validate_numeric_config(app)
+        if app.config.get("CONTROL_PLANE_TRUSTED_PROXY_COUNT", 0) < 0:
+            raise RuntimeError("CONTROL_PLANE_TRUSTED_PROXY_COUNT cannot be negative")
         if app.config.get("CONTROL_PLANE_METRICS_ENABLED"):
             token = app.config.get("CONTROL_PLANE_METRICS_TOKEN")
             if not isinstance(token, str) or not token.strip():

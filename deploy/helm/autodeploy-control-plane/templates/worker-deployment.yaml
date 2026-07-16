@@ -1,3 +1,4 @@
+{{- include "autodeploy-control-plane.validateRuntime" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,12 +19,13 @@ spec:
         app.kubernetes.io/component: worker
     spec:
       serviceAccountName: {{ include "autodeploy-control-plane.serviceAccountName" . }}
+      automountServiceAccountToken: {{ empty .Values.kubeconfig.existingSecret }}
       {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.imagePullSecrets | nindent 8 }}
       {{- end }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- include "autodeploy-control-plane.runtimePodSecurityContext" . | nindent 8 }}
       {{- if .Values.workspace.initPermissions.enabled }}
       initContainers:
         {{- include "autodeploy-control-plane.workspaceInitContainer" . | nindent 8 }}
@@ -37,7 +39,7 @@ spec:
             - configMapRef:
                 name: {{ include "autodeploy-control-plane.fullname" . }}-config
             - secretRef:
-                name: {{ include "autodeploy-control-plane.fullname" . }}-secret
+                name: {{ include "autodeploy-control-plane.runtimeSecretName" . }}
           env:
             - name: CONTROL_PLANE_COMPONENT
               value: worker
@@ -52,7 +54,7 @@ spec:
             periodSeconds: 20
           readinessProbe:
             exec:
-              command: ["python", "-c", "import os; os.kill(1, 0)"]
+              command: ["python", "-m", "flask", "--app", "wsgi:app", "check-worker-readiness"]
             initialDelaySeconds: 5
             periodSeconds: 15
           resources:

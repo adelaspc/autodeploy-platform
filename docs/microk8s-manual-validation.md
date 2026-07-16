@@ -56,7 +56,7 @@ Expected:
 
 ## Scenario A — Control Plane Installed With Helm
 
-This scenario validates the platform chart itself. The local values file uses the fake executor, a hostPath workspace, SQLite, and explicit Docker socket access for a trusted single-node demo.
+This scenario validates the platform chart itself. The local values file uses the fake executor, a hostPath workspace, and SQLite. It does not mount the Docker socket because the fake executor does not build or clean real containers.
 
 ### A1. Validate deployment assets
 
@@ -249,9 +249,19 @@ POST /api/projects/<project-id>/deployments/<deployment-id>/stop
 
 Expected immediate result: HTTP `202` with a pending or existing `DeploymentCommand`. The HTTP request does not execute Helm directly.
 
-Allow the Compose worker loop to process the command, then poll the deployment and events. For a host-run one-shot worker, run:
+Allow the Compose worker loop to process the command, then poll the deployment and events. To run one worker iteration with the Makefile-managed profile and secrets, use:
 
 ```bash
+make worker-once PROFILE=local-kubernetes
+```
+
+Alternatively, load the same profile and secrets into the current shell before invoking Flask directly:
+
+```bash
+set -a
+source .env.local-kubernetes
+source .env.secrets
+set +a
 .venv/bin/python -m flask --app wsgi:app run-worker-once
 ```
 

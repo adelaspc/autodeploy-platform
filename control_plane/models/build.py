@@ -8,6 +8,15 @@ class Build(db.Model):
     __tablename__ = "builds"
     VALID_STATUSES = ("pending", "cloning", "building", "testing", "pushing_image", "succeeded", "failed")
     VALID_REGISTRY_PUSH_STATUSES = ("skipped", "succeeded", "failed")
+    STATUS_TRANSITIONS = {
+        "pending": ("cloning", "failed"),
+        "cloning": ("building", "failed"),
+        "building": ("testing", "pushing_image", "failed"),
+        "testing": ("pushing_image", "failed"),
+        "pushing_image": ("succeeded", "failed"),
+        "succeeded": ("failed",),
+        "failed": (),
+    }
 
     id = db.Column(db.Integer, primary_key=True)
     project_id = db.Column(db.Integer, db.ForeignKey("projects.id"), nullable=False, index=True)
@@ -20,6 +29,7 @@ class Build(db.Model):
     registry_push_status = db.Column(db.String(32), nullable=True)
     test_command = db.Column(db.String(255), nullable=True)
     workspace_path = db.Column(db.String(1024), nullable=True)
+    build_log_path = db.Column(db.String(1024), nullable=True)
     log_path = db.Column(db.String(1024), nullable=True)
     last_error = db.Column(db.Text, nullable=True)
     started_at = db.Column(db.DateTime, nullable=True)
@@ -35,6 +45,14 @@ class Build(db.Model):
     project = db.relationship("Project", back_populates="builds")
     deployments = db.relationship("PlatformDeployment", back_populates="build", cascade="all, delete-orphan")
 
+    def can_transition_to(self, next_status):
+        return next_status == self.status or next_status in self.STATUS_TRANSITIONS.get(self.status, ())
+
+    def transition_to(self, next_status):
+        if not self.can_transition_to(next_status):
+            raise ValueError(f"Invalid build transition from {self.status} to {next_status}")
+        self.status = next_status
+
     def to_dict(self):
         secret_values = secret_values_from_env_vars(self.project.env_vars if self.project else [])
         return {
@@ -49,6 +67,7 @@ class Build(db.Model):
             "registry_push_status": self.registry_push_status,
             "test_command": self.test_command,
             "workspace_path": self.workspace_path,
+            "build_log_path": self.build_log_path,
             "log_path": self.log_path,
             "last_error": redact_text(self.last_error, secret_values=secret_values) if self.last_error else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,

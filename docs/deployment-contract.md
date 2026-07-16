@@ -5,12 +5,18 @@ A deployable user application must:
 - be hosted in a GitHub repository
 - have a valid Dockerfile
 - build into a container image
-- push successfully to the configured container registry
+- push successfully to the configured container registry when using the Kubernetes executor
 - expose exactly one HTTP port
 - provide a healthcheck endpoint
 - be stateless
 - use environment variables for runtime configuration
 - store persistent data externally
+
+Registry publishing is optional for the `local-docker` executor, which can deploy the locally built image directly. The Kubernetes executor requires registry publishing because it deploys the pushed `image_ref`, not the worker's local image tag.
+
+When a deployment record is created, the control plane stores a versioned snapshot of the project settings used by execution: repository and branch, Git auth reference, Dockerfile and build context, port and healthcheck path, environment definitions, resource requests, runtime, and project identity. Editing the project afterward affects future deployments, not work already queued. The worker also checks out the recorded commit SHA explicitly, so a moving branch cannot change the source being built.
+
+For records created before snapshot support was introduced, the database migration freezes the best available project configuration at upgrade time; it cannot reconstruct older configuration that was never persisted.
 
 ## Development-Only Exception
 
@@ -69,11 +75,11 @@ Helm mode uses a generated-values contract. The mapper converts the existing pro
 Current mapping boundaries:
 
 - `Build.image_ref` is the preferred source for `image.repository` and `image.tag`
-- `Project.port` maps to `container.port` and `service.port`
-- literal project env vars map to `env[].value`
+- the deployment's project snapshot `port` maps to `container.port` and `service.port`
+- literal env vars from the deployment snapshot map to `env[].value`
 - ConfigMap and Secret key references map to `env[].valueFrom`
 - whole-resource `envFrom` imports are not generated yet because the model does not expose that concept
-- `Project.healthcheck_path` maps to readiness and liveness probe paths for Helm-managed workloads
+- the deployment snapshot `healthcheck_path` maps to readiness and liveness probe paths for Helm-managed workloads
 - startup probes remain disabled by default; Ingress follows the platform-wide Kubernetes Ingress configuration
 - test and migration commands are not treated as runtime container command or args
 

@@ -13,7 +13,7 @@ COMPOSE_DOCKER_SOCKET_OVERRIDE := docker-compose.docker-socket.yml
 GITLEAKS_VERSION := 8.30.1
 export DOCKER_BUILDKIT ?= 1
 
-.PHONY: help env-init require-env api db-upgrade worker-once worker reconciler reconciler-once reconciler-loop compose-up compose-recreate-runtime compose-config compose-toolcheck k8s-demo-check wsl-ingress-domain health-platform test lint secret-scan secret-scan-history frontend-test frontend-build
+.PHONY: help env-init require-env api db-upgrade worker-once worker reconciler reconciler-once reconciler-loop compose-up compose-recreate-runtime compose-config compose-toolcheck compose-down compose-logs compose-reset runtime-clean k8s-demo-check wsl-ingress-domain health-platform test lint secret-scan secret-scan-history frontend-test frontend-build
 
 help:
 	@printf '%s\n' \
@@ -37,6 +37,10 @@ help:
 		'  compose-recreate-runtime Rebuild and recreate worker/reconciler with the selected profile' \
 		'  compose-config    Render Compose config with the selected profile and secrets' \
 		'  compose-toolcheck Verify required worker container CLIs are available' \
+		'  compose-down      Stop the Compose stack and preserve its data volumes' \
+		'  compose-logs      Follow API, worker, reconciler, and database logs' \
+		'  compose-reset     Delete the Compose stack and data volumes (CONFIRM=reset)' \
+		'  runtime-clean     Delete generated files under .runtime' \
 		'  k8s-demo-check    Verify local Kubernetes demo readiness from the worker' \
 		'  wsl-ingress-domain Print the nip.io base domain for the current WSL IP' \
 		'' \
@@ -167,6 +171,23 @@ compose-config: require-env
 	export CONTROL_PLANE_KUBECONFIG_GID="$$(if [[ -n "$${CONTROL_PLANE_KUBECONFIG_HOST:-}" && -e "$${CONTROL_PLANE_KUBECONFIG_HOST}" ]]; then stat -c '%g' "$${CONTROL_PLANE_KUBECONFIG_HOST}"; else printf '0'; fi)"; \
 	$(COMPOSE) "$${compose_files[@]}" --env-file "$(ENV_PROFILE)" --env-file "$(ENV_SECRETS)" config
 
+compose-down: require-env
+	@CONTROL_PLANE_ENV_FILE="$(ENV_PROFILE)" $(COMPOSE) --env-file "$(ENV_PROFILE)" --env-file "$(ENV_SECRETS)" down --remove-orphans
+
+compose-logs: require-env
+	@CONTROL_PLANE_ENV_FILE="$(ENV_PROFILE)" $(COMPOSE) --env-file "$(ENV_PROFILE)" --env-file "$(ENV_SECRETS)" logs --follow --tail=100 db control-plane-api control-plane-worker control-plane-reconciler
+
+compose-reset: require-env
+	@if [[ "$(CONFIRM)" != "reset" ]]; then \
+		printf 'This deletes the Compose database and workspace volumes. Re-run with CONFIRM=reset\n' >&2; \
+		exit 1; \
+	fi
+	@CONTROL_PLANE_ENV_FILE="$(ENV_PROFILE)" $(COMPOSE) --env-file "$(ENV_PROFILE)" --env-file "$(ENV_SECRETS)" down --volumes --remove-orphans
+	@$(MAKE) runtime-clean
+
+runtime-clean:
+	@if [[ -d .runtime ]]; then rm -rf -- .runtime; fi
+
 compose-toolcheck: require-env
 	@set -a; source "$(ENV_PROFILE)"; source "$(ENV_SECRETS)"; set +a; \
 	compose_files=(-f docker-compose.yml); \
@@ -175,7 +196,7 @@ compose-toolcheck: require-env
 		export CONTROL_PLANE_DOCKER_SOCKET_GID="$(DOCKER_SOCKET_GID)"; \
 		;; \
 	esac; \
-	$(COMPOSE) "$${compose_files[@]}" --env-file "$(ENV_PROFILE)" --env-file "$(ENV_SECRETS)" exec control-plane-worker sh -lc 'set -eu; id; command -v git; command -v kubectl; kubectl version --client=true; case "$${CONTROL_PLANE_COMPOSE_DOCKER_SOCKET_ENABLED:-false}" in 1|true|yes|on) ls -ln /var/run/docker.sock; command -v docker; docker --version; docker buildx version; test "$${DOCKER_BUILDKIT:-}" = "1";; *) test ! -S /var/run/docker.sock;; esac; if test "$${CONTROL_PLANE_EXECUTOR:-}" = "kubernetes"; then test -n "$${CONTROL_PLANE_KUBECONFIG:-}" && test -s "$${CONTROL_PLANE_KUBECONFIG}" && grep -q "^apiVersion:" "$${CONTROL_PLANE_KUBECONFIG}"; if test "$${CONTROL_PLANE_K8S_DEPLOYMENT_MODE:-manifest}" = "helm"; then command -v helm; helm version --short; fi; fi'
+	$(COMPOSE) "$${compose_files[@]}" --env-file "$(ENV_PROFILE)" --env-file "$(ENV_SECRETS)" exec control-plane-worker sh -lc 'set -eu; id; command -v git; command -v kubectl; kubectl version --client=true; case "$${CONTROL_PLANE_COMPOSE_DOCKER_SOCKET_ENABLED:-false}" in 1|true|yes|on) ls -ln /var/run/docker.sock; command -v docker; docker --version; docker buildx version; test "$${DOCKER_BUILDKIT:-}" = "1";; *) test ! -S /var/run/docker.sock;; esac; if test "$${CONTROL_PLANE_EXECUTOR:-}" = "kubernetes"; then test -n "$${CONTROL_PLANE_KUBECONFIG:-}" && test -s "$${CONTROL_PLANE_KUBECONFIG}" && grep -q "^apiVersion:" "$${CONTROL_PLANE_KUBECONFIG}"; if test "$${CONTROL_PLANE_K8S_DEPLOYMENT_MODE:-manifest}" = "helm"; then command -v helm; helm version --short; test -f "$${CONTROL_PLANE_K8S_HELM_CHART_PATH:-deploy/helm/generic-web-app}/Chart.yaml"; fi; fi'
 
 wsl-ingress-domain:
 	@ip="$$(hostname -I | awk '{print $$1}')"; \
@@ -206,6 +227,7 @@ k8s-demo-check: require-env
 		command -v docker >/dev/null; \
 		command -v kubectl >/dev/null; \
 		if test "$${CONTROL_PLANE_K8S_DEPLOYMENT_MODE:-manifest}" = "helm"; then command -v helm >/dev/null; helm version --short >/dev/null; fi; \
+		if test "$${CONTROL_PLANE_K8S_DEPLOYMENT_MODE:-manifest}" = "helm"; then test -f "$${CONTROL_PLANE_K8S_HELM_CHART_PATH:-deploy/helm/generic-web-app}/Chart.yaml"; fi; \
 		docker buildx version >/dev/null; \
 		test "$${DOCKER_BUILDKIT:-}" = "1"; \
 		test -n "$${CONTROL_PLANE_KUBECONFIG:-}"; \
@@ -225,10 +247,11 @@ k8s-demo-check: require-env
 health-platform: require-env
 	@set -a; source "$(ENV_PROFILE)"; source "$(ENV_SECRETS)"; set +a; \
 	token="$${CONTROL_PLANE_API_TOKEN_ADMIN:-$${CONTROL_PLANE_API_TOKEN_DEPLOYER:-$${CONTROL_PLANE_API_TOKEN_READ_ONLY:-}}}"; \
+	app_port="$${CONTROL_PLANE_APP_PORT:-5000}"; \
 	if [[ -n "$$token" ]]; then \
-		curl -fsS -H "Authorization: Bearer $$token" "http://127.0.0.1:$${PORT:-5000}/health/platform"; \
+		curl -fsS -H "Authorization: Bearer $$token" "http://127.0.0.1:$$app_port/health/platform"; \
 	else \
-		curl -fsS "http://127.0.0.1:$${PORT:-5000}/health/platform"; \
+		curl -fsS "http://127.0.0.1:$$app_port/health/platform"; \
 	fi; \
 	printf '\n'
 

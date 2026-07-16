@@ -1184,6 +1184,23 @@ def test_update_deployment_rejects_invalid_transition(client):
     assert "Invalid deployment transition" in update_response.get_json()["error"]
 
 
+def test_update_deployment_rejects_service_url(client):
+    project_response = create_project(client, name="service-url-patch-app")
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "pending"},
+    )
+
+    response = client.patch(
+        f"/api/projects/{project_id}/deployments/{deployment_response.get_json()['id']}",
+        json={"service_url": "http://127.0.0.1:2375"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "Provide at least one updatable field: status, build_status"}
+
+
 def test_trigger_deployment_rejects_missing_commit_sha(client):
     project_response = create_project(client, name="invalid-deploy-app")
     project_id = project_response.get_json()["id"]
@@ -1192,6 +1209,18 @@ def test_trigger_deployment_rejects_missing_commit_sha(client):
 
     assert response.status_code == 400
     assert response.get_json() == {"error": "Missing required field: commit_sha"}
+
+
+def test_api_rejects_request_body_over_configured_limit(client, app):
+    app.config["MAX_CONTENT_LENGTH"] = 64
+
+    response = client.post(
+        "/api/projects",
+        data=b'{"name":"' + (b"x" * 128) + b'"}',
+        content_type="application/json",
+    )
+
+    assert response.status_code == 413
 
 
 def test_create_project_deployment_rejects_kubernetes_executor_without_required_settings(client, app):
@@ -1681,7 +1710,7 @@ def test_deployment_live_health_endpoint_returns_safe_probe_result(client, monke
     assert response.get_json()["http_status"] == 503
 
 
-def test_retry_deployment_falls_back_to_project_default_test_command(client, app, monkeypatch):
+def test_retry_deployment_preserves_explicitly_disabled_test_command(client, app, monkeypatch):
     project_response = create_project(client, name="retry-default-test-command-app", default_test_command="pytest -q")
     project_id = project_response.get_json()["id"]
 
@@ -1702,7 +1731,7 @@ def test_retry_deployment_falls_back_to_project_default_test_command(client, app
     assert retry_response.status_code == 201
     deployment_id = retry_response.get_json()["deployment_id"]
     deployment = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}").get_json()
-    assert deployment["build"]["test_command"] == "pytest -q"
+    assert deployment["build"]["test_command"] is None
 
 
 def test_redeploy_project_falls_back_to_project_default_test_command(client, monkeypatch):
@@ -1822,7 +1851,9 @@ def test_stop_deployment_calls_executor_and_records_events(client, app, monkeypa
     payload = process_queued_command(app, client, project_id, deployment_id)
     assert payload["status"] == "stopped"
     assert payload["service_url"] is None
-    assert payload["container_name"] == "paas-stoppable-app-1"
+    assert payload["container_name"] is None
+    assert payload["container_id"] is None
+    assert payload["host_port"] is None
     assert payload["events"][-2]["event_type"] == "deployment.stop_started"
     assert payload["events"][-1]["event_type"] == "deployment.stopped"
     assert payload["events"][-1]["metadata_json"]["log_path"] == "/tmp/stop.log"
@@ -1957,6 +1988,155 @@ def test_cleanup_kubernetes_deployment_removes_resources_and_preserves_history(c
     ]
     audit_events = client.get("/api/audit-events").get_json()["items"]
     assert audit_events[0]["action"] == "deployment.cleanup_requested"
+
+
+def test_stop_command_is_deduplicated_while_active(client, app):
+    project_id = create_project(client, name="deduplicated-stop-app").get_json()["id"]
+    deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    ).get_json()["id"]
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "local-docker"
+        db.session.commit()
+
+    first = client.post(f"/api/projects/{project_id}/deployments/{deployment_id}/stop")
+    second = client.post(f"/api/projects/{project_id}/deployments/{deployment_id}/stop")
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.get_json()["command"]["id"] == first.get_json()["command"]["id"]
+    with app.app_context():
+        commands = db.session.scalars(
+            db.select(DeploymentCommand).where(DeploymentCommand.deployment_id == deployment_id)
+        ).all()
+        assert len(commands) == 1
+        assert commands[0].active_key == "active"
+
+
+def test_stop_command_heartbeats_and_rejects_stale_reclaim(client, app, monkeypatch):
+    project_id = create_project(client, name="heartbeat-stop-app").get_json()["id"]
+    deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    ).get_json()["id"]
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "local-docker"
+        db.session.commit()
+    client.post(f"/api/projects/{project_id}/deployments/{deployment_id}/stop")
+
+    class HeartbeatingStopExecutor:
+        def set_heartbeat(self, heartbeat):
+            self.heartbeat = heartbeat
+
+        def stop(self, deployment):
+            self.heartbeat()
+            app.config["CONTROL_PLANE_WORKER_ID"] = "worker-b"
+            try:
+                assert worker_commands.claim_next_pending_command(claim_ttl_seconds=30) is None
+            finally:
+                app.config["CONTROL_PLANE_WORKER_ID"] = "worker"
+            return ExecutionResult("Stopped", deploy_target=deployment.deploy_target)
+
+    monkeypatch.setattr(
+        worker_commands,
+        "create_executor_for_deployment",
+        lambda _deployment: HeartbeatingStopExecutor(),
+    )
+
+    payload = process_queued_command(app, client, project_id, deployment_id)
+
+    assert payload["status"] == "stopped"
+    with app.app_context():
+        command = db.session.scalar(
+            db.select(DeploymentCommand).where(DeploymentCommand.deployment_id == deployment_id)
+        )
+        assert command.status == "succeeded"
+        assert command.active_key is None
+        assert command.claimed_by is None
+        assert command.claimed_at is None
+
+
+def test_stop_command_does_not_persist_result_after_claim_loss(client, app, monkeypatch):
+    project_id = create_project(client, name="claim-loss-stop-app").get_json()["id"]
+    deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    ).get_json()["id"]
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "local-docker"
+        db.session.commit()
+    client.post(f"/api/projects/{project_id}/deployments/{deployment_id}/stop")
+
+    class ClaimLosingStopExecutor:
+        def stop(self, deployment):
+            command = db.session.scalar(
+                db.select(DeploymentCommand).where(DeploymentCommand.deployment_id == deployment.id)
+            )
+            command.claimed_by = "other-worker"
+            command.claimed_at = worker_commands.now_utc()
+            db.session.commit()
+            return ExecutionResult("Stopped", deploy_target=deployment.deploy_target)
+
+    monkeypatch.setattr(
+        worker_commands,
+        "create_executor_for_deployment",
+        lambda _deployment: ClaimLosingStopExecutor(),
+    )
+
+    payload = process_queued_command(app, client, project_id, deployment_id)
+
+    assert payload["status"] == "running"
+    with app.app_context():
+        command = db.session.scalar(
+            db.select(DeploymentCommand).where(DeploymentCommand.deployment_id == deployment_id)
+        )
+        assert command.status == "claimed"
+        assert command.claimed_by == "other-worker"
+        assert command.active_key == "active"
+
+
+def test_unexpected_stop_exception_marks_command_failed(client, app, monkeypatch):
+    project_id = create_project(client, name="unexpected-stop-app").get_json()["id"]
+    deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    ).get_json()["id"]
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "local-docker"
+        db.session.commit()
+    client.post(f"/api/projects/{project_id}/deployments/{deployment_id}/stop")
+
+    class UnexpectedStopExecutor:
+        def stop(self, _deployment):
+            raise RuntimeError("sensitive stop implementation detail")
+
+    monkeypatch.setattr(
+        worker_commands,
+        "create_executor_for_deployment",
+        lambda _deployment: UnexpectedStopExecutor(),
+    )
+
+    payload = process_queued_command(app, client, project_id, deployment_id)
+
+    assert payload["status"] == "running"
+    with app.app_context():
+        command = db.session.scalar(
+            db.select(DeploymentCommand).where(DeploymentCommand.deployment_id == deployment_id)
+        )
+        assert command.status == "failed"
+        assert command.active_key is None
+        assert command.claimed_by is None
+        assert command.last_error == "Worker encountered an unexpected internal error"
+        failure_event = next(
+            event for event in command.deployment.events if event.event_type == "deployment.stop_failed"
+        )
+        assert failure_event.metadata_json["error_type"] == "RuntimeError"
+        assert "sensitive stop implementation detail" not in failure_event.message
 
 
 def test_cleanup_rejects_non_kubernetes_deployment(client, app):
@@ -2158,13 +2338,16 @@ def test_get_build_log_returns_tailed_content(client, app, tmp_path):
     )
     deployment_id = deployment_response.get_json()["id"]
     build_log_path = tmp_path / "project-1" / "deployment-1" / "logs" / "build.log"
+    latest_log_path = build_log_path.with_name("deploy.log")
     build_log_path.parent.mkdir(parents=True, exist_ok=True)
     build_log_path.write_text("clone\nbuild\ntest\npush\n", encoding="utf-8")
+    latest_log_path.write_text("deploy\n", encoding="utf-8")
 
     with app.app_context():
         app.config["CONTROL_PLANE_WORKSPACE_ROOT"] = str(tmp_path)
         deployment = db.session.get(PlatformDeployment, deployment_id)
-        deployment.build.log_path = str(build_log_path)
+        deployment.build.build_log_path = str(build_log_path)
+        deployment.build.log_path = str(latest_log_path)
         db.session.commit()
 
     response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/build-log?tail_lines=2")

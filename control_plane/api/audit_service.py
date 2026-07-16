@@ -27,9 +27,6 @@ def sanitize_audit_metadata(value):
 
 
 def client_ip_address():
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if isinstance(forwarded_for, str) and forwarded_for.strip():
-        return forwarded_for.split(",", 1)[0].strip()
     return request.remote_addr
 
 

@@ -27,6 +27,7 @@ def create_manual_deployment(project, payload, *, test_command):
         service_url=payload.get("service_url"),
         deployment_message=payload.get("message", "Deployment record created"),
         deployment_metadata={"branch": project.branch, "commit_sha": payload["commit_sha"]},
+        deployment_branch=project.branch,
     )
 
     if build.status != "pending":
@@ -46,7 +47,7 @@ def apply_deployment_update(deployment, update_data):
     message = update_data.get("message")
 
     if "status" in update_data:
-        deployment.status = update_data["status"]
+        deployment.transition_to(update_data["status"])
         create_deployment_event(
             deployment.id,
             "deployment.status_updated",
@@ -55,18 +56,8 @@ def apply_deployment_update(deployment, update_data):
             step="deployment",
         )
 
-    if "service_url" in update_data:
-        deployment.service_url = update_data["service_url"]
-        create_deployment_event(
-            deployment.id,
-            "deployment.service_url_updated",
-            deployment.status,
-            message or f"Service URL updated to '{deployment.service_url}'",
-            step="deploy",
-        )
-
     if "build_status" in update_data:
-        deployment.build.status = update_data["build_status"]
+        deployment.build.transition_to(update_data["build_status"])
         create_deployment_event(
             deployment.id,
             "build.status_updated",

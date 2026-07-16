@@ -1,11 +1,13 @@
 import json
 
+from control_plane.deployment_spec import project_for_deployment
 from worker.execution.contracts import ExecutionResult, WorkerExecutionError
 from worker.executors.kubernetes.manifest_renderer import KubernetesManifestRendererMixin
 
 
 class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
     def _deploy_with_manifest(self, deployment):
+        project = project_for_deployment(deployment)
         _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
         manifest_path = logs_dir / "kubernetes-manifest.json"
         apply_log_path = logs_dir / "kubernetes-apply.log"
@@ -13,11 +15,11 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
         port_forward_log_path = logs_dir / "kubernetes-port-forward.log"
         deployment_name = self._k8s_deployment_name(deployment)
         service_name = self._k8s_service_name(deployment)
-        internal_service_url = self._service_url(service_name, deployment.project.port)
+        internal_service_url = self._service_url(service_name, project.port)
         ingress_host = self._ingress_host(deployment.id)
         service_url = self._ingress_url(ingress_host)
         effective_url = service_url or internal_service_url
-        healthcheck_url = f"{effective_url}{deployment.project.healthcheck_path}"
+        healthcheck_url = f"{effective_url}{project.healthcheck_path}"
         manifest = self._manifest(deployment, deployment_name=deployment_name, service_name=service_name)
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
@@ -79,7 +81,7 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                         "ingress_name": deployment_name if self.ingress_enabled else None,
                         "ingress_host": ingress_host,
                         "ingress_class": self.ingress_class_name or None,
-                        "port": deployment.project.port,
+                        "port": project.port,
                     },
                 ),
                 self._event(
@@ -235,7 +237,7 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                 "ingress_class": self.ingress_class_name or None,
                 "healthcheck_url": healthcheck_url,
                 "image_ref": deployment.build.image_ref,
-                **self._env_source_summary(deployment.project.env_vars),
+                **self._env_source_summary(project.env_vars),
                 **health_metadata,
             },
             events=events,
@@ -294,5 +296,4 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
             log_path=str(log_path),
             deploy_target=self.deploy_target,
         )
-
 

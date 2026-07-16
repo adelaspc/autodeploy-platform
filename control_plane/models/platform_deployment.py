@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from control_plane.extensions import db
+from control_plane.deployment_spec import project_for_deployment
 from control_plane.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
 
 
@@ -25,7 +26,7 @@ class PlatformDeployment(db.Model):
         "pushing_image": ("deploying", "failed", "stopped"),
         "deploying": ("running", "failed", "stopped"),
         "running": ("deploying", "failed", "stopped"),
-        "failed": (),
+        "failed": ("stopped",),
         "stopped": (),
     }
 
@@ -46,6 +47,7 @@ class PlatformDeployment(db.Model):
     preflight_status = db.Column(db.String(32), nullable=True)
     preflight_summary = db.Column(db.Text, nullable=True)
     preflight_metadata_json = db.Column(db.JSON, nullable=True)
+    spec_snapshot_json = db.Column(db.JSON, nullable=True)
     preflight_completed_at = db.Column(db.DateTime, nullable=True)
     last_error = db.Column(db.Text, nullable=True)
     started_at = db.Column(db.DateTime, nullable=True)
@@ -75,8 +77,13 @@ class PlatformDeployment(db.Model):
 
         return next_status in self.STATUS_TRANSITIONS.get(self.status, ())
 
+    def transition_to(self, next_status):
+        if not self.can_transition_to(next_status):
+            raise ValueError(f"Invalid deployment transition from {self.status} to {next_status}")
+        self.status = next_status
+
     def to_dict(self):
-        secret_values = secret_values_from_env_vars(self.project.env_vars if self.project else [])
+        secret_values = secret_values_from_env_vars(project_for_deployment(self).env_vars)
         latest_command = max(self.commands, key=lambda command: command.id, default=None)
         return {
             "id": self.id,

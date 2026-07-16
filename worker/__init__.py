@@ -1,8 +1,16 @@
-from worker.cli import run_reconciler, run_reconciler_loop_command, run_reconciler_once, run_worker, run_worker_once
+from worker.cli import (
+    check_worker_readiness,
+    run_reconciler,
+    run_reconciler_loop_command,
+    run_reconciler_once,
+    run_worker,
+    run_worker_once,
+)
 
 __all__ = [
     "run_worker",
     "run_worker_once",
+    "check_worker_readiness",
     "run_reconciler_once",
     "run_reconciler",
     "run_reconciler_loop_command",

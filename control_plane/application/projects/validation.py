@@ -374,10 +374,10 @@ def validate_project_deploy_payload(payload):
 
 
 def validate_deployment_patch_payload(payload, deployment):
-    allowed_fields = {"status", "service_url", "build_status", "message"}
+    allowed_fields = {"status", "build_status", "message"}
     update_data = {key: value for key, value in payload.items() if key in allowed_fields}
     if not update_data:
-        return None, "Provide at least one updatable field: status, service_url, build_status"
+        return None, "Provide at least one updatable field: status, build_status"
 
     next_status = update_data.get("status")
     if next_status:
@@ -392,6 +392,8 @@ def validate_deployment_patch_payload(payload, deployment):
     build_status = update_data.get("build_status")
     if build_status and build_status not in Build.VALID_STATUSES:
         return None, "Invalid build status. Expected one of: " + ", ".join(Build.VALID_STATUSES)
+    if build_status and not deployment.build.can_transition_to(build_status):
+        return None, f"Invalid build transition from {deployment.build.status} to {build_status}"
 
     return update_data, None
 

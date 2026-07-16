@@ -1,5 +1,6 @@
 import subprocess
 
+from control_plane.deployment_spec import project_for_deployment
 from worker.execution.contracts import PreflightResult, WorkerExecutionError
 
 
@@ -81,8 +82,9 @@ class KubernetesPreflightMixin:
         return result
 
     def _preflight_referenced_resources(self, deployment, *, log_path, existing_events):
+        project = project_for_deployment(deployment)
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        references = self._kubernetes_referenced_resources(deployment.project.env_vars)
+        references = self._kubernetes_referenced_resources(project.env_vars)
         if self.image_pull_secret:
             references["image_pull_secret"] = self.image_pull_secret
 
@@ -158,7 +160,7 @@ class KubernetesPreflightMixin:
             "ingress_enabled": self.ingress_enabled,
             "ingress_class": self.ingress_class_name or None,
             "ingress_base_domain": self.ingress_base_domain if self.ingress_enabled else None,
-            **self._env_source_summary(deployment.project.env_vars),
+            **self._env_source_summary(project.env_vars),
         }
 
         if missing_resources:
@@ -227,4 +229,3 @@ class KubernetesPreflightMixin:
                 metadata={"kind": kind, "name": name, "namespace": self.namespace},
             ) from exc
         return result.returncode == 0
-

@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from control_plane.extensions import db
+from control_plane.deployment_spec import project_for_deployment
 from control_plane.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
 
 
@@ -21,7 +22,7 @@ class DeploymentEvent(db.Model):
 
     def to_dict(self):
         secret_values = secret_values_from_env_vars(
-            self.deployment.project.env_vars if self.deployment and self.deployment.project else []
+            project_for_deployment(self.deployment).env_vars if self.deployment else []
         )
         return {
             "id": self.id,

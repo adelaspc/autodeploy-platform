@@ -94,7 +94,7 @@ The control plane includes a Vue/Vite operator console served by Flask in built 
 
 Current UI scope:
 
-- bearer token storage for protected APIs
+- session-scoped bearer token storage for protected APIs
 - platform health and activity
 - project create, edit, and delete
 - project environment variable management for literal values, ConfigMap key refs, and Secret key refs
@@ -147,6 +147,7 @@ helm template generic-python ./deploy/helm/generic-web-app -f ./deploy/helm/gene
 ## Scope
 
 - `GET /health`
+- `GET /health/ready`
 - `GET /health/db`
 - `GET /health/platform`
 - `GET /health/activity`
@@ -257,7 +258,7 @@ Authorization: Bearer <token>
 Role matrix:
 
 - `read_only`: read/list/show routes, logs, summaries, diagnostics, audit events, `/health/db`, `/health/platform`, `/health/activity`, and `/health/observability`
-- `deployer`: everything in `read_only` plus deploy, retry, redeploy, and dedicated stop actions
+- `deployer`: everything in `read_only` plus deploy, retry, redeploy, and dedicated stop and Kubernetes cleanup actions
 - `admin`: everything in `deployer` plus project create/update/delete, manual deployment record creation, and generic deployment patch operations
 
 Public routes:
@@ -299,8 +300,10 @@ Currently audited actions include:
 - manual deployment created
 - deployment patched
 - deployment stop requested
-- deployment stopped
+- deployment cleanup requested
 - denied mutating API attempts on protected project routes
+
+The audit trail records the authenticated operator request and its request context. Asynchronous execution and completion belong to the deployment event stream: the worker records events such as `deployment.stop_started`, `deployment.stopped`, and `deployment.cleanup_succeeded` after processing the queued command.
 
 Audit records include:
 
@@ -544,7 +547,7 @@ Both activity endpoints also return compact pagination metadata including the ne
 
 ## Worker Execution
 
-The worker supports two executor modes:
+The worker supports three executor modes:
 
 - `fake`: default, test-friendly executor with simulated infrastructure behavior
 - `local-docker`: clones a Git repository into a local workspace, builds a Docker image, optionally runs tests in the built image, optionally tags and pushes to a registry, starts a local container, and waits for the configured healthcheck to succeed
@@ -556,6 +559,8 @@ Useful settings:
 - `CONTROL_PLANE_WORKSPACE_ROOT`
 - `CONTROL_PLANE_COMMAND_TIMEOUT_SECONDS`
 - `CONTROL_PLANE_COMMAND_RETRY_COUNT`
+- `CONTROL_PLANE_MAX_CONTENT_LENGTH` (defaults to 2 MiB and limits API request bodies, including webhooks)
+- `CONTROL_PLANE_TRUSTED_PROXY_COUNT` (defaults to `0`; set only to the exact number of trusted reverse proxies in front of the API)
 - `CONTROL_PLANE_REGISTRY_ENABLED`
 - `CONTROL_PLANE_REGISTRY_URL`
 - `CONTROL_PLANE_REGISTRY_NAMESPACE`
@@ -616,7 +621,7 @@ The Kubernetes executor is intentionally narrow in this iteration:
 
 Not included yet:
 
-- advanced ingress automation
+- advanced ingress routing and per-project ingress policy
 - cert-manager
 - autoscaling
 - namespaces per app

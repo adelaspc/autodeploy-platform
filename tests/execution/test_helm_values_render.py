@@ -41,6 +41,19 @@ def helm_template(*args):
     return result.stdout
 
 
+def helm_template_failure(*args):
+    result = subprocess.run(
+        [helm_binary(), "template", *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode != 0
+    return result.stderr
+
+
 def rendered_docs(rendered):
     return [
         doc
@@ -129,6 +142,9 @@ def test_generated_generic_web_app_values_render_with_helm(tmp_path):
     assert "path: /health" in rendered
     assert "imagePullSecrets:" in rendered
     assert "name: registry-pull-secret" in rendered
+    assert "automountServiceAccountToken: false" in rendered
+    assert "type: RuntimeDefault" in rendered
+    assert "allowPrivilegeEscalation: false" in rendered
 
 
 def test_control_plane_chart_does_not_mount_docker_socket_by_default():
@@ -141,7 +157,100 @@ def test_control_plane_chart_does_not_mount_docker_socket_by_default():
     assert "name: docker-socket" not in rendered
 
 
-def test_local_microk8s_values_explicitly_mount_docker_socket():
+def test_control_plane_chart_uses_dependency_aware_readiness_probes():
+    docs = rendered_docs(
+        helm_template(
+            "control-plane-readiness",
+            "./deploy/helm/autodeploy-control-plane",
+        )
+    )
+    api = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and doc["metadata"]["name"].endswith("-api")
+    )
+    worker = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and doc["metadata"]["name"].endswith("-worker")
+    )
+    api_container = api["spec"]["template"]["spec"]["containers"][0]
+    worker_container = worker["spec"]["template"]["spec"]["containers"][0]
+
+    assert api_container["livenessProbe"]["httpGet"]["path"] == "/health"
+    assert api_container["readinessProbe"]["httpGet"]["path"] == "/health/ready"
+    assert worker_container["livenessProbe"]["exec"]["command"][-1] == "import os; os.kill(1, 0)"
+    assert worker_container["readinessProbe"]["exec"]["command"][-1] == "check-worker-readiness"
+
+
+def test_control_plane_chart_creates_and_references_runtime_secret_by_default():
+    rendered = helm_template(
+        "control-plane-secret",
+        "./deploy/helm/autodeploy-control-plane",
+        "--set-string",
+        "secrets.values.CONTROL_PLANE_DATABASE_URL=sqlite:////tmp/control-plane.db",
+    )
+    docs = rendered_docs(rendered)
+    secret = next(doc for doc in docs if doc.get("kind") == "Secret")
+    config_map = next(doc for doc in docs if doc.get("kind") == "ConfigMap")
+    migration_job = next(doc for doc in docs if doc.get("kind") == "Job")
+    migration_container = migration_job["spec"]["template"]["spec"]["containers"][0]
+
+    assert secret["metadata"]["name"] == "control-plane-secret-autodeploy-control-plane-secret"
+    assert secret["stringData"]["CONTROL_PLANE_DATABASE_URL"] == "sqlite:////tmp/control-plane.db"
+    assert "helm.sh/hook" not in secret["metadata"].get("annotations", {})
+    assert "helm.sh/hook" not in config_map["metadata"].get("annotations", {})
+    assert rendered.count("name: control-plane-secret-autodeploy-control-plane-secret") == 4
+    assert {
+        item["name"]: item["value"] for item in migration_container["env"]
+    }["CONTROL_PLANE_DATABASE_URL"] == "sqlite:////tmp/control-plane.db"
+    assert "envFrom" not in migration_container
+
+
+def test_control_plane_chart_references_external_runtime_secret_without_creating_it():
+    rendered = helm_template(
+        "control-plane-external-secret",
+        "./deploy/helm/autodeploy-control-plane",
+        "--set",
+        "secrets.create=false",
+        "--set",
+        "secrets.existingSecret=externally-managed-runtime",
+    )
+    docs = rendered_docs(rendered)
+    migration_job = next(doc for doc in docs if doc.get("kind") == "Job")
+    migration_container = migration_job["spec"]["template"]["spec"]["containers"][0]
+
+    assert not any(doc.get("kind") == "Secret" for doc in docs)
+    assert rendered.count("name: externally-managed-runtime") == 4
+    assert migration_container["envFrom"] == [
+        {"secretRef": {"name": "externally-managed-runtime"}}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected_error"),
+    [
+        (
+            ("--set", "secrets.existingSecret=externally-managed-runtime"),
+            "secrets.create=true and secrets.existingSecret cannot be used together",
+        ),
+        (
+            ("--set", "secrets.create=false"),
+            "secrets.existingSecret is required when secrets.create=false",
+        ),
+    ],
+)
+def test_control_plane_chart_rejects_ambiguous_runtime_secret_modes(settings, expected_error):
+    stderr = helm_template_failure(
+        "control-plane-invalid-secret",
+        "./deploy/helm/autodeploy-control-plane",
+        *settings,
+    )
+
+    assert expected_error in stderr
+
+
+def test_local_microk8s_fake_values_do_not_mount_docker_socket():
     rendered = helm_template(
         "control-plane-local",
         "./deploy/helm/autodeploy-control-plane",
@@ -149,8 +258,74 @@ def test_local_microk8s_values_explicitly_mount_docker_socket():
         "./deploy/helm/autodeploy-control-plane/values.local-microk8s.yaml",
     )
 
-    assert "/var/run/docker.sock" in rendered
-    assert "name: docker-socket" in rendered
+    assert "/var/run/docker.sock" not in rendered
+    assert "name: docker-socket" not in rendered
+
+
+def test_control_plane_chart_adds_docker_socket_group_to_runtime_pods():
+    rendered = helm_template(
+        "control-plane-docker-socket",
+        "./deploy/helm/autodeploy-control-plane",
+        "--set",
+        "dockerSocket.enabled=true",
+        "--set-string",
+        "dockerSocket.groupId=998",
+    )
+    docs = rendered_docs(rendered)
+    worker = next(
+        doc
+        for doc in docs
+        if doc.get("kind") == "Deployment" and doc["metadata"]["name"].endswith("-worker")
+    )
+    reconciler = next(doc for doc in docs if doc.get("kind") == "CronJob")
+
+    assert worker["spec"]["template"]["spec"]["securityContext"]["supplementalGroups"] == [998]
+    assert reconciler["spec"]["jobTemplate"]["spec"]["template"]["spec"]["securityContext"][
+        "supplementalGroups"
+    ] == [998]
+
+
+def test_control_plane_chart_requires_group_id_when_docker_socket_is_enabled():
+    stderr = helm_template_failure(
+        "control-plane-docker-socket",
+        "./deploy/helm/autodeploy-control-plane",
+        "--set",
+        "dockerSocket.enabled=true",
+    )
+
+    assert "dockerSocket.groupId is required when dockerSocket.enabled=true" in stderr
+
+
+def test_control_plane_chart_rejects_cross_namespace_in_cluster_executor():
+    stderr = helm_template_failure(
+        "control-plane-namespace",
+        "./deploy/helm/autodeploy-control-plane",
+        "--namespace",
+        "paas-local",
+        "--set",
+        "config.CONTROL_PLANE_EXECUTOR=kubernetes",
+        "--set",
+        "config.CONTROL_PLANE_K8S_NAMESPACE=default",
+    )
+
+    assert "must match the Helm release namespace paas-local" in stderr
+
+
+def test_control_plane_chart_allows_external_kubeconfig_for_another_namespace():
+    rendered = helm_template(
+        "control-plane-namespace",
+        "./deploy/helm/autodeploy-control-plane",
+        "--namespace",
+        "paas-local",
+        "--set",
+        "config.CONTROL_PLANE_EXECUTOR=kubernetes",
+        "--set",
+        "config.CONTROL_PLANE_K8S_NAMESPACE=default",
+        "--set",
+        "kubeconfig.existingSecret=external-kubeconfig",
+    )
+
+    assert "secretName: external-kubeconfig" in rendered
 
 
 def test_control_plane_rbac_limits_secret_and_configmap_permissions_by_default():

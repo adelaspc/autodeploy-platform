@@ -89,6 +89,29 @@ The Compose stack also uses:
 
 That means `local-docker` mode can be enabled for a more realistic deployment path when the host Docker socket is available. Treat this as a trusted local boundary: Docker socket access is effectively host-level Docker daemon access and should not be used with untrusted repositories, Dockerfiles, test commands, or workload images. In Compose, the default deploy host is set to `host.docker.internal` so health checks can reach host-published app ports from inside the worker container.
 
+### Local Stack Lifecycle
+
+Use the Makefile targets consistently with the same profile used at startup:
+
+```bash
+make compose-logs PROFILE=demo
+make compose-down PROFILE=demo
+```
+
+`compose-down` stops the stack but preserves MySQL and workspace volumes. Generated kubeconfig copies and other transient files can be removed independently:
+
+```bash
+make runtime-clean
+```
+
+For an intentionally destructive reset, including the Compose database and workspace volumes, use the explicit confirmation guard:
+
+```bash
+make compose-reset PROFILE=demo CONFIRM=reset
+```
+
+This reset deletes local control-plane database state, deployment artifacts stored in the Compose workspace volume, and generated `.runtime` files. It does not delete workload resources already deployed into Kubernetes; clean those through the deployment cleanup action before resetting the control plane.
+
 ## Local Migration / Bootstrap Flow
 
 Compose starts the `migrate` service automatically, but the same flow can be run manually:
@@ -108,6 +131,7 @@ make db-upgrade PROFILE=demo
 Public:
 
 - `GET /health`
+- `GET /health/ready`
 
 Protected:
 
@@ -119,6 +143,7 @@ Protected:
 Operational meaning:
 
 - `/health` verifies the API process is serving requests
+- `/health/ready` verifies database reachability for orchestrator readiness without exposing database details
 - `/health/db` verifies database reachability and returns only a safe status/error code; driver details, paths, hosts, and credentials are kept out of the response
 - `/health/platform` shows executor/config readiness
 - `/health/activity` gives an operator-oriented platform activity summary
@@ -128,12 +153,12 @@ For a selected running deployment with a public service URL, the UI polls its pr
 
 In Compose:
 
-- the API container has a health check against `/health`
+- the API container has a dependency-aware health check against `/health/ready`
 
 In Kubernetes:
 
-- the API deployment uses `/health` for readiness and liveness probes
-- the worker deployment uses a minimal exec probe to confirm the long-running process is still alive
+- the API deployment uses `/health` for liveness and `/health/ready` for readiness
+- the worker liveness probe confirms the long-running process is alive, while readiness runs `check-worker-readiness` to verify database access and executor configuration
 
 ## Metrics and Structured Logs
 
@@ -167,7 +192,7 @@ Operational behavior:
 - the endpoint performs small aggregate database queries and does not expose raw records
 - metric labels use only bounded status/result/level values
 
-For a Helm deployment, set `config.CONTROL_PLANE_METRICS_ENABLED` and provide `secrets.CONTROL_PLANE_METRICS_TOKEN`. The chart does not install Prometheus or create a `ServiceMonitor`.
+For a Helm deployment, set `config.CONTROL_PLANE_METRICS_ENABLED` and provide `secrets.values.CONTROL_PLANE_METRICS_TOKEN` when the chart creates the runtime Secret. The chart does not install Prometheus or create a `ServiceMonitor`.
 
 ## Production-Like Kubernetes Deployment
 
@@ -262,17 +287,44 @@ The chart does not deploy a database. For a production-like evaluation, the reco
 
 ### Helm Install Flow
 
-Create a private, ignored values file with mode `0600` and keep the secret values there. The command line should contain only non-secret settings:
+The chart supports exactly one of two runtime Secret modes:
+
+- `secrets.create=true` and an empty `secrets.existingSecret`: the chart creates and manages the runtime Secret from `secrets.values`; this is the convenient local-demo mode.
+- `secrets.create=false` and a non-empty `secrets.existingSecret`: API, worker, reconciler, and migration Job use an externally managed Secret; the chart does not create, modify, or delete it.
+
+The chart rejects configurations where both modes are active or neither mode is configured.
+
+For a local trusted environment, copy the committed example to the ignored local filename and restrict its permissions:
+
+```bash
+cp deploy/helm/autodeploy-control-plane/values.secrets.local.example.yaml values.secrets.local.yaml
+chmod 0600 values.secrets.local.yaml
+```
+
+Edit `values.secrets.local.yaml`, then install using the local secret values file. The command line should contain only non-secret settings:
 
 ```bash
 helm upgrade --install autodeploy-control-plane ./deploy/helm/autodeploy-control-plane \
   --set image.repository=ghcr.io/example/autodeploy-control-plane \
   --set image.tag=latest \
-  --values .env.helm-secrets.yaml \
+  --values values.secrets.local.yaml \
   --set kubeconfig.existingSecret=autodeploy-control-plane-kubeconfig
 ```
 
-Do not pass credentials through `--set`: they may be retained in shell history or exposed through process inspection. For a shared environment, prefer a pre-created Kubernetes Secret or a dedicated secret-management integration over inline chart values.
+`values.secrets.local.yaml` contains plaintext credentials. It is ignored by Git, but that does not encrypt or otherwise protect its contents; keep it local, use mode `0600`, and use it only in a controlled, trusted environment. Do not pass credentials through `--set`: they may be retained in shell history or exposed through process inspection.
+
+A Kubernetes Secret is base64-encoded, not strongly encrypted by default. Its effective protection depends on cluster RBAC and, when configured, encryption at rest for etcd. Users or service accounts with sufficient cluster or namespace permissions can read Secret values. Helm also stores release information in the cluster; values supplied through `values.secrets.local.yaml` can therefore be recovered by principals with sufficient access to Helm release storage.
+
+For a shared or production-like environment, create the runtime Secret through the external secret-management workflow and configure only its name in Helm values:
+
+```yaml
+secrets:
+  create: false
+  existingSecret: autodeploy-control-plane-runtime
+  values: {}
+```
+
+In this mode Helm stores the Secret name, but the chart is not given the external Secret values. External Secrets, SOPS, Vault, or the cluster operator's standard secret-management mechanism can own those values and their rotation.
 
 ### Local MicroK8s Registry Flow
 
@@ -297,7 +349,7 @@ helm upgrade --install local ./deploy/helm/autodeploy-control-plane \
 - a shared SQLite database file at `/tmp/paas-workspaces/control_plane.db`
 - an init-permissions step that `chown`s the shared workspace for the non-root app container user
 - `CONTROL_PLANE_EXECUTOR=fake`, so the local Helm path validates the control-plane runtime itself without deploying workloads
-- `dockerSocket.enabled=true`, making the local Docker trust boundary explicit in this local-only override
+- no Docker socket mount, because this chart validation profile uses the fake executor
 
 This file is not the production-like path. It is a local-development override for a single-node MicroK8s cluster.
 
@@ -306,7 +358,8 @@ This file is not the production-like path. It is a local-development override fo
 Examples are provided at:
 
 - [deploy/examples/control-plane-configmap.example.yaml](../deploy/examples/control-plane-configmap.example.yaml)
-- [deploy/examples/control-plane-secret.example.yaml](../deploy/examples/control-plane-secret.example.yaml)
+- [deploy/helm/autodeploy-control-plane/values.secrets.local.example.yaml](../deploy/helm/autodeploy-control-plane/values.secrets.local.example.yaml)
+- [deploy/examples/control-plane-existing-secret.example.yaml](../deploy/examples/control-plane-existing-secret.example.yaml)
 - [deploy/examples/control-plane-kubeconfig.secret.example.yaml](../deploy/examples/control-plane-kubeconfig.secret.example.yaml)
 
 These examples are placeholders only. Do not commit real secrets.
@@ -355,12 +408,25 @@ rbac:
 
 `IngressClass` is cluster-scoped, so it is not granted by the namespace Role. When `CONTROL_PLANE_K8S_INGRESS_CLASS_NAME` is set, the configured kubeconfig or ServiceAccount must already be allowed to read the referenced IngressClass, or preflight will report it as missing/unreadable.
 
+When the Kubernetes executor uses the ServiceAccount created by this chart, `CONTROL_PLANE_K8S_NAMESPACE` must match the Helm release namespace because the Role and RoleBinding are namespace-scoped. The chart rejects a different workload namespace in this mode. To target a separately authorized namespace, provide `kubeconfig.existingSecret`; the worker and reconciler then use that kubeconfig instead of the in-cluster ServiceAccount token.
+
 Current tradeoff:
 
 - the control-plane image still uses local Docker build/push behavior
 - the base chart does not mount `/var/run/docker.sock` by default
-- `values.local-microk8s.yaml` enables the Docker socket explicitly for trusted local demos
+- `values.local-microk8s.yaml` keeps the Docker socket disabled because its executor is `fake`
 - Docker socket access is acceptable for a portfolio-grade local demonstration but not a hardened production pattern
+
+If a trusted single-node installation intentionally builds through the host Docker daemon, enable the mount and provide the socket group ID so the non-root worker and reconciler can access it:
+
+```yaml
+dockerSocket:
+  enabled: true
+  hostPath: /var/run/docker.sock
+  groupId: "<host-docker-socket-gid>"
+```
+
+Obtain the value on the node with `stat -c '%g' /var/run/docker.sock`. This is a local-only escape hatch; the recommended real Kubernetes demo remains the Compose worker connected to MicroK8s.
 
 For `CONTROL_PLANE_EXECUTOR=kubernetes`, the worker still needs:
 
@@ -382,7 +448,7 @@ Helm mode can be tuned with `CONTROL_PLANE_K8S_HELM_CHART_PATH`, `CONTROL_PLANE_
 
 Reconciliation is Helm-aware when persisted Helm release metadata is available: running deployments are checked with `helm status`, and leftover releases for failed or stopped deployments are removed with `helm uninstall`. Kubernetes failure diagnostics still use the existing direct resource and pod inspection behavior.
 
-The API deployment also mounts the same kubeconfig secret path when configured so `/health/platform` reports the same readiness posture as the worker. A shared PersistentVolumeClaim is used so the API can read runtime logs and diagnostics written by the worker.
+Only the worker and reconciler mount the kubeconfig Secret when configured; the API does not need Kubernetes credentials. Consequently, `/health/platform` reports API configuration posture rather than proving that the API Pod can read a kubeconfig. A shared PersistentVolumeClaim is used so the API can read runtime logs and diagnostics written by the worker.
 
 That tooling is now bundled into the image, but the Docker-socket dependency and shared-filesystem dependency remain known hardening gaps.
 
@@ -548,11 +614,13 @@ Kubernetes failure diagnostics expose pod phase, container reason, restart count
 
 ### Start And Validate The Runtime
 
-Rebuild and recreate the runtime containers:
+For the first start, build and launch the complete Compose stack, including MySQL, migrations, API, worker, and reconciler:
 
 ```bash
-make compose-recreate-runtime PROFILE=local-kubernetes
+make compose-up PROFILE=local-kubernetes
 ```
+
+This command stays attached so the component logs remain visible. Run the validation commands below from another terminal. After the complete stack has been started once, use `make compose-recreate-runtime PROFILE=local-kubernetes` to rebuild and recreate only the worker and reconciler after executor configuration changes.
 
 Validate worker tooling:
 
@@ -645,9 +713,12 @@ Old failed deployments can be left in the UI history for auditability. To remove
 
 ```bash
 curl -X POST http://127.0.0.1:5000/api/projects/<project-id>/deployments/<deployment-id>/cleanup \
+  -H "Authorization: Bearer ${CONTROL_PLANE_API_TOKEN_DEPLOYER}" \
   -H 'Content-Type: application/json' \
   -d '{"message":"Demo cleanup"}'
 ```
+
+Load `CONTROL_PLANE_API_TOKEN_DEPLOYER` from the trusted local `.env.secrets` file before running this command. The Authorization header may be omitted only when the selected local development profile explicitly uses `CONTROL_PLANE_ALLOW_AUTH_DISABLED=true`.
 
 The cleanup action removes the managed Deployment, Service, and Ingress in manifest mode, or uninstalls the Helm release in Helm mode. Use direct `kubectl delete` only as a break-glass fallback after identifying the exact stale resource names:
 
@@ -657,6 +728,8 @@ docker compose exec control-plane-worker sh -lc \
 ```
 
 ## Troubleshooting
+
+Numeric runtime settings are validated at application startup. Timeouts, polling intervals, content length, and claim TTL must be positive; command retry count and claim refresh interval cannot be negative; claim refresh must remain lower than claim TTL. Invalid values stop startup with the setting name instead of failing later inside a worker loop.
 
 ### API is up but `/health/db` fails
 
@@ -837,7 +910,7 @@ Check:
 - `CONTROL_PLANE_K8S_IMAGE_PULL_SECRET` is set before the deployment is created
 - the secret exists in the same namespace as the workload
 
-The worker verifies pushed registry images with `docker buildx imagetools inspect` before deployment. This uses the same Docker credential store as the authenticated push and supports private registry images. If `image.verify.failed` appears, fix registry/tag/auth state before investigating Kubernetes pod pull behavior.
+The worker verifies pushed registry images with `docker buildx imagetools inspect` before deployment. This uses the same Docker credential store as the authenticated push and supports private registry images. If `image.verify_failed` appears, fix registry/tag/auth state before investigating Kubernetes pod pull behavior.
 
 On Docker Hub free plans, a repository shown as locked can reject push token scope even when `docker login` succeeds. For the portfolio demo, pre-create the workload repository as public under the configured namespace or use a registry plan/provider that permits the intended private repository. A successful login does not override repository plan restrictions.
 
@@ -973,7 +1046,7 @@ For platform rollout rollback:
 ## Future Hardening
 
 - replace Docker-socket-dependent build execution with a dedicated builder pattern
-- add a dedicated readiness surface for worker and reconciler
+- add richer execution telemetry for scheduled reconciler jobs
 - add chart-level support for existing shared ConfigMaps/Secrets instead of inline secret values
 - support managed/external database documentation more deeply
 - add image signing, scanning, and supply-chain metadata once the deployment story grows beyond evaluation/demo scope

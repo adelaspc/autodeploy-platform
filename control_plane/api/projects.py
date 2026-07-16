@@ -345,7 +345,7 @@ def retry_project_deployment(project_id, deployment_id):
     if deployment_prereq_error:
         return jsonify({"error": deployment_prereq_error}), 409
     branch = get_deployment_branch(original)
-    test_command = original.build.test_command or project.default_test_command
+    test_command = original.build.test_command
 
     try:
         build, deployment, commit_sha = create_user_facing_deployment(
@@ -568,13 +568,12 @@ def update_project_deployment(project_id, deployment_id):
             "stop",
             message=update_data.get("message"),
         )
-    else:
-        apply_deployment_update(deployment, update_data)
+
+    apply_deployment_update(deployment, update_data)
 
     db.session.commit()
-    audit_action = "deployment.stopped" if update_data.get("status") == "stopped" else "deployment.patched"
     record_audit_event(
-        action=audit_action,
+        action="deployment.patched",
         resource_type="deployment",
         resource_id=deployment.id,
         metadata={

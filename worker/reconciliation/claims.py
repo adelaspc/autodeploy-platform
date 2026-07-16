@@ -44,10 +44,10 @@ def reconcile_stale_claim(deployment):
         )
     elif deployment.status in IN_PROGRESS_STATUSES:
         release_deployment_claim(deployment)
-        deployment.status = "failed"
+        deployment.transition_to("failed")
         deployment.finished_at = now_utc()
         deployment.last_error = "Reconciler marked deployment failed after stale claim"
-        deployment.build.status = "failed"
+        deployment.build.transition_to("failed")
         deployment.build.finished_at = now_utc()
         deployment.build.last_error = deployment.last_error
         record_reconcile_event(

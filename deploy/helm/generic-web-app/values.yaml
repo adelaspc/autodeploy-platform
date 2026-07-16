@@ -24,6 +24,15 @@ service:
 
 resources: {}
 
+automountServiceAccountToken: false
+
+podSecurityContext:
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+
 probes:
   readiness:
     enabled: false

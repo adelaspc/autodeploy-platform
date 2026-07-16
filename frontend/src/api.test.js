@@ -3,14 +3,17 @@ import { beforeEach, describe, it, mock } from "node:test";
 import { apiRequest, storeToken, storedToken } from "./api.js";
 
 beforeEach(() => {
-  const storage = new Map();
+  const localStorage = new Map();
+  const sessionStorage = new Map();
+  const storageApi = (storage) => ({
+    getItem: (key) => storage.get(key) || null,
+    setItem: (key, value) => storage.set(key, value),
+    removeItem: (key) => storage.delete(key),
+    clear: () => storage.clear(),
+  });
   globalThis.window = {
-    localStorage: {
-      getItem: (key) => storage.get(key) || null,
-      setItem: (key, value) => storage.set(key, value),
-      removeItem: (key) => storage.delete(key),
-      clear: () => storage.clear(),
-    },
+    localStorage: storageApi(localStorage),
+    sessionStorage: storageApi(sessionStorage),
   };
   mock.restoreAll();
 });
@@ -24,6 +27,13 @@ describe("api token storage", () => {
     storeToken("");
 
     assert.equal(storedToken(), "");
+  });
+
+  it("does not restore legacy persistent tokens", () => {
+    window.localStorage.setItem("autodeploy-control-plane-token", "legacy-token");
+
+    assert.equal(storedToken(), "");
+    assert.equal(window.localStorage.getItem("autodeploy-control-plane-token"), null);
   });
 });
 

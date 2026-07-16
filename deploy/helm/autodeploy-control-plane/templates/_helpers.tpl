@@ -18,6 +18,40 @@
 {{- end -}}
 {{- end -}}
 
+{{- define "autodeploy-control-plane.runtimeSecretName" -}}
+{{- $create := .Values.secrets.create -}}
+{{- $existingSecret := .Values.secrets.existingSecret | default "" | trim -}}
+{{- if and $create $existingSecret -}}
+{{- fail "secrets.create=true and secrets.existingSecret cannot be used together" -}}
+{{- else if and (not $create) (not $existingSecret) -}}
+{{- fail "secrets.existingSecret is required when secrets.create=false" -}}
+{{- else if $create -}}
+{{- printf "%s-secret" (include "autodeploy-control-plane.fullname" .) -}}
+{{- else -}}
+{{- $existingSecret -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "autodeploy-control-plane.validateRuntime" -}}
+{{- $executor := index .Values.config "CONTROL_PLANE_EXECUTOR" | default "fake" | toString | trim -}}
+{{- $workloadNamespace := index .Values.config "CONTROL_PLANE_K8S_NAMESPACE" | default "default" | toString | trim -}}
+{{- if and (eq $executor "kubernetes") (empty .Values.kubeconfig.existingSecret) (ne $workloadNamespace .Release.Namespace) -}}
+{{- fail (printf "CONTROL_PLANE_K8S_NAMESPACE=%s must match the Helm release namespace %s when the Kubernetes executor uses the chart ServiceAccount; configure kubeconfig.existingSecret for a separately authorized namespace" $workloadNamespace .Release.Namespace) -}}
+{{- end -}}
+{{- if and .Values.dockerSocket.enabled (empty (.Values.dockerSocket.groupId | toString | trim)) -}}
+{{- fail "dockerSocket.groupId is required when dockerSocket.enabled=true" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "autodeploy-control-plane.runtimePodSecurityContext" -}}
+{{- $context := deepCopy .Values.podSecurityContext -}}
+{{- if .Values.dockerSocket.enabled -}}
+{{- $groups := get $context "supplementalGroups" | default (list) -}}
+{{- $_ := set $context "supplementalGroups" (append $groups (int .Values.dockerSocket.groupId)) -}}
+{{- end -}}
+{{- toYaml $context -}}
+{{- end -}}
+
 {{- define "autodeploy-control-plane.workspaceClaimName" -}}
 {{- if .Values.workspace.existingClaim -}}
 {{- .Values.workspace.existingClaim -}}

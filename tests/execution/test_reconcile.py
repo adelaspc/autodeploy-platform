@@ -159,6 +159,7 @@ def test_reconciler_keeps_running_kubernetes_deployment_when_resources_exist(cli
     with app.app_context():
         changes = reconcile_deployments()
         assert changes == 0
+        db.session.remove()
         updated = db.session.get(PlatformDeployment, deployment_id)
         assert updated.status == "running"
         assert not any(event.event_type == "reconcile.kubernetes_missing_resource" for event in updated.events)
@@ -287,6 +288,7 @@ def test_reconciler_keeps_running_helm_deployment_when_release_exists(client, ap
     with app.app_context():
         changes = reconcile_deployments()
         assert changes == 0
+        db.session.remove()
         updated = db.session.get(PlatformDeployment, deployment_id)
         assert updated.status == "running"
         assert not any(event.event_type == "reconcile.helm_release_missing" for event in updated.events)
@@ -359,6 +361,7 @@ def test_reconciler_records_cleanup_failed_when_kubernetes_resource_check_errors
     with app.app_context():
         changes = reconcile_deployments()
         assert changes == 0
+        db.session.remove()
         updated = db.session.get(PlatformDeployment, deployment_id)
         assert updated.status == "running"
         event = next(event for event in updated.events if event.event_type == "reconcile.cleanup_failed")
@@ -457,6 +460,7 @@ def test_reconciler_records_cleanup_failed_when_helm_release_removal_errors(clie
     with app.app_context():
         changes = reconcile_deployments()
         assert changes == 0
+        db.session.remove()
         updated = db.session.get(PlatformDeployment, deployment_id)
         event = next(event for event in updated.events if event.event_type == "reconcile.helm_cleanup_failed")
         assert "helm uninstall failed" in event.message
@@ -605,6 +609,39 @@ def test_reconciler_records_cleanup_failed_when_kubernetes_resource_removal_erro
     with app.app_context():
         changes = reconcile_deployments()
         assert changes == 0
+        db.session.remove()
         updated = db.session.get(PlatformDeployment, deployment_id)
         event = next(event for event in updated.events if event.event_type == "reconcile.cleanup_failed")
         assert "kubectl delete failed" in event.message
+
+
+def test_reconciler_reuses_executor_across_actions(client, app, monkeypatch):
+    deployment_payload = create_deployment(client, name="reused-executor", status="failed", build_status="failed")
+    deployment_id = deployment_payload["id"]
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        db.session.commit()
+
+    class ReusableExecutor:
+        def runtime_resource_status(self, _deployment):
+            return {"deployment_exists": False, "service_exists": False, "ingress_exists": False}
+
+        def cleanup_workspace(self, _deployment):
+            return {"workspace_removed": False, "log_removed": False}
+
+    factory_calls = []
+    executor = ReusableExecutor()
+
+    import worker.reconciliation.service as reconcile_module
+
+    def factory(deployment):
+        factory_calls.append(deployment.id)
+        return executor
+
+    monkeypatch.setattr(reconcile_module, "create_executor_for_deployment", factory)
+
+    with app.app_context():
+        assert reconcile_deployments() == 0
+
+    assert factory_calls == [deployment_id]

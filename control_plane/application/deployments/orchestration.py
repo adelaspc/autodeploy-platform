@@ -8,6 +8,7 @@ from flask import current_app
 from sqlalchemy.orm import selectinload
 
 from control_plane.extensions import db
+from control_plane.deployment_spec import create_deployment_spec_snapshot, project_for_deployment
 from control_plane.models import Build, DeploymentEvent, PlatformDeployment
 
 
@@ -137,6 +138,7 @@ def create_build_and_deployment_records(
     service_url=None,
     deployment_message="Deployment record created",
     deployment_metadata=None,
+    deployment_branch=None,
 ):
     resolved_image_name = image_name or sanitize_image_component(project.name)
     resolved_image_tag = image_tag or sanitize_image_component(commit_sha[:12])
@@ -166,6 +168,7 @@ def create_build_and_deployment_records(
         environment=environment,
         status=deployment_status,
         service_url=service_url,
+        spec_snapshot_json=create_deployment_spec_snapshot(project, branch=deployment_branch),
     )
     db.session.add(deployment)
     db.session.flush()
@@ -182,6 +185,8 @@ def create_build_and_deployment_records(
 
 
 def get_deployment_branch(deployment):
+    if deployment.spec_snapshot_json:
+        return project_for_deployment(deployment).branch
     for event in deployment.events:
         if event.event_type != "deployment.created":
             continue
@@ -209,6 +214,7 @@ def create_requested_deployment(
         test_command=test_command,
         deployment_message=f"{message_prefix} for branch '{branch}' at commit '{commit_sha[:12]}'",
         deployment_metadata={"branch": branch, "commit_sha": commit_sha} | (deployment_metadata or {}),
+        deployment_branch=branch,
     )
     for event in extra_events or ():
         create_deployment_event(

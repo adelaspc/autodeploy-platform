@@ -66,7 +66,7 @@ def platform_status_payload():
             "configured_roles": configured_roles,
             "auth_disabled_allowed": auth_disabled_allowed,
             "token_transport": "bearer",
-            "public_routes": ["/health"],
+            "public_routes": ["/health", "/health/ready"],
             "protected_health_routes": [
                 "/health/db",
                 "/health/platform",

@@ -1,3 +1,4 @@
+from control_plane.deployment_spec import project_for_deployment
 from worker.execution.contracts import DeploymentExecutor, ExecutionResult, ExecutorContract, PreflightResult
 
 
@@ -18,8 +19,9 @@ class FakeDeploymentExecutor(DeploymentExecutor):
         )
 
     def build_image(self, deployment):
+        project = project_for_deployment(deployment)
         image_tag = deployment.build.image_tag or deployment.build.commit_sha[:12]
-        image_name = deployment.build.image_name or deployment.project.name
+        image_name = deployment.build.image_name or project.name
         image_ref = deployment.build.image_ref or f"local/{image_name}:{image_tag}"
         return ExecutionResult(
             "Docker image built",
@@ -32,11 +34,12 @@ class FakeDeploymentExecutor(DeploymentExecutor):
         return ExecutionResult("Test command completed", metadata={"executor": self.deploy_target})
 
     def tag_image(self, deployment):
+        project = project_for_deployment(deployment)
         return ExecutionResult(
             "Image tag skipped for fake executor",
             metadata={"executor": self.deploy_target, "skipped": True},
-            image_tag=deployment.build.image_tag or f"{deployment.project.name}:{deployment.id}",
-            image_ref=deployment.build.image_ref or f"{deployment.project.name}:{deployment.id}",
+            image_tag=deployment.build.image_tag or f"{project.name}:{deployment.id}",
+            image_ref=deployment.build.image_ref or f"{project.name}:{deployment.id}",
         )
 
     def push_image(self, deployment):
@@ -64,10 +67,11 @@ class FakeDeploymentExecutor(DeploymentExecutor):
         )
 
     def deploy(self, deployment):
+        project = project_for_deployment(deployment)
         return ExecutionResult(
             "Deployment marked as running",
             metadata={"executor": self.deploy_target},
-            service_url=deployment.service_url or f"https://{deployment.project.name}.local",
+            service_url=deployment.service_url or f"https://{project.name}.local",
             deploy_target=self.deploy_target,
         )
 
@@ -82,5 +86,4 @@ class FakeDeploymentExecutor(DeploymentExecutor):
 
     def cleanup_workspace(self, deployment):
         return {"workspace_removed": False, "log_removed": False}
-
 

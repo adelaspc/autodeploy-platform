@@ -35,6 +35,44 @@ class DummyPopen:
         self._returncode = -9
 
 
+def test_kubernetes_port_forward_retries_bind_collision(tmp_path):
+    ports = iter((19090, 19091))
+    attempts = []
+
+    def popen_factory(args, stdout=None, stderr=None, text=None):
+        attempts.append(args)
+        process = DummyPopen(args, stdout=stdout, stderr=stderr, text=text)
+        if len(attempts) == 1:
+            stdout.write("Unable to listen on port 19090: bind: address already in use\n")
+            stdout.flush()
+            process._returncode = 1
+        return process
+
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        port_allocator=lambda: next(ports),
+        health_probe=lambda _url: {"status_code": 200, "summary": "ok"},
+        sleep_fn=lambda _seconds: None,
+        popen_factory=popen_factory,
+    )
+    deployment = SimpleNamespace(
+        project=SimpleNamespace(port=5000, healthcheck_path="/health"),
+    )
+
+    metadata = executor._port_forward_healthcheck(
+        deployment,
+        service_name="demo-service",
+        log_path=tmp_path / "port-forward.log",
+    )
+
+    assert len(attempts) == 2
+    assert "19090:5000" in attempts[0]
+    assert "19091:5000" in attempts[1]
+    assert metadata["port_forward_local_port"] == 19091
+    assert metadata["port_forward_attempts"] == 2
+
+
 class RecordingHelmRunner:
     instances = []
 
@@ -164,12 +202,13 @@ def make_kubernetes_deployment_stub(*, deployment_id=7, project_id=3, name="helm
     )()
 
 
-def create_pending_deployment(client, *, name="k8s-app", test_command=None):
+def create_pending_deployment(client, *, name="k8s-app", test_command=None, env_vars=None):
     project_response = create_project(
         client,
         name=name,
         repo_url="https://github.com/example/k8s-app",
         trigger="manual",
+        **({"env_vars": env_vars} if env_vars is not None else {}),
     )
     project_id = project_response.get_json()["id"]
     deployment_response = client.post(
@@ -228,6 +267,10 @@ def test_kubernetes_manifest_generation_uses_registry_image_and_service():
     assert deployment_manifest["spec"]["template"]["spec"]["containers"][0]["env"] == [
         {"name": "APP_ENV", "value": "production"}
     ]
+    pod_spec = deployment_manifest["spec"]["template"]["spec"]
+    assert pod_spec["automountServiceAccountToken"] is False
+    assert pod_spec["securityContext"] == {"seccompProfile": {"type": "RuntimeDefault"}}
+    assert pod_spec["containers"][0]["securityContext"] == {"allowPrivilegeEscalation": False}
     assert "imagePullSecrets" not in deployment_manifest["spec"]["template"]["spec"]
     assert service_manifest["kind"] == "Service"
     assert service_manifest["spec"]["ports"][0]["port"] == 5000
@@ -397,20 +440,18 @@ def test_kubernetes_manifest_generation_supports_configmap_and_secret_env_refs()
 
 
 def test_kubernetes_executor_processes_mixed_env_sources_and_records_summary(client, tmp_path):
-    _project_id, pending = create_pending_deployment(client, name="k8s-env-success", test_command=None)
+    env_vars = [
+        {"name": "LOG_LEVEL", "value": "info"},
+        {"name": "APP_ENV", "value_source": "configmap_key_ref", "source_name": "my-app-config", "source_key": "app-env"},
+        {"name": "DATABASE_URL", "value_source": "secret_key_ref", "source_name": "my-app-secret", "source_key": "database-url"},
+    ]
+    _project_id, pending = create_pending_deployment(
+        client,
+        name="k8s-env-success",
+        test_command=None,
+        env_vars=env_vars,
+    )
     commands = []
-
-    with client.application.app_context():
-        from control_plane.extensions import db
-        from control_plane.models import PlatformDeployment
-
-        deployment = db.session.get(PlatformDeployment, pending["id"])
-        deployment.project.env_vars = [
-            {"name": "LOG_LEVEL", "value": "info"},
-            {"name": "APP_ENV", "value_source": "configmap_key_ref", "source_name": "my-app-config", "source_key": "app-env"},
-            {"name": "DATABASE_URL", "value_source": "secret_key_ref", "source_name": "my-app-secret", "source_key": "database-url"},
-        ]
-        db.session.commit()
 
     def fake_runner(args, capture_output, text, timeout, check, input=None, env=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
         commands.append(args)
@@ -419,6 +460,8 @@ def test_kubernetes_executor_processes_mixed_env_sources_and_records_summary(cli
             repo_dir.mkdir(parents=True, exist_ok=True)
             (repo_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="clone ok\n", stderr="")
+        if args[:2] == ["git", "-C"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="checkout ok\n", stderr="")
         if args[:2] in (["docker", "build"], ["docker", "tag"], ["docker", "push"]) or args[:4] == [
             "docker",
             "buildx",
@@ -888,6 +931,8 @@ def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, t
             repo_dir.mkdir(parents=True, exist_ok=True)
             (repo_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="clone ok\n", stderr="")
+        if args[:2] == ["git", "-C"]:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="checkout ok\n", stderr="")
         if args[:2] == ["docker", "build"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="build ok\n", stderr="")
         if args[:2] == ["docker", "tag"]:

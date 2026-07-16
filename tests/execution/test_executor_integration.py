@@ -59,7 +59,37 @@ def _create_repo(repo_dir, *, health_response="ok", health_status=200):
     )
     subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, capture_output=True, text=True, check=True)
     subprocess.run(["git", "add", "."], cwd=repo_dir, capture_output=True, text=True, check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=repo_dir, capture_output=True, text=True, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=AutoDeploy Tests",
+            "-c",
+            "user.email=autodeploy-tests@example.invalid",
+            "commit",
+            "-m",
+            "init",
+        ],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def test_create_repo_does_not_require_global_git_identity(tmp_path):
+    repo_dir = tmp_path / "identity-independent-repo"
+
+    _create_repo(repo_dir)
+
+    commit = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert commit.stdout.strip() == "AutoDeploy Tests <autodeploy-tests@example.invalid>"
 
 
 @pytest.mark.skipif(not _docker_available(), reason="Docker not available")

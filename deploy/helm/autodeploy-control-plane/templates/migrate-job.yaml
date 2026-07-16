@@ -16,6 +16,9 @@ spec:
         app.kubernetes.io/component: migrate
     spec:
       restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       {{- if .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml .Values.imagePullSecrets | nindent 8 }}
@@ -29,16 +32,30 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["python", "-m", "flask", "--app", "wsgi:app", "db", "upgrade"]
+          env:
+            {{- range $key, $value := .Values.config }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- if .Values.secrets.create }}
+            {{- range $key, $value := .Values.secrets.values }}
+            {{- if ne ($value | toString) "" }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- end }}
+            {{- else }}
           envFrom:
-            - configMapRef:
-                name: {{ include "autodeploy-control-plane.fullname" . }}-config
             - secretRef:
-                name: {{ include "autodeploy-control-plane.fullname" . }}-secret
+                name: {{ include "autodeploy-control-plane.runtimeSecretName" . }}
+            {{- end }}
           volumeMounts:
             - name: workspace
               mountPath: {{ include "autodeploy-control-plane.workspaceMountPath" . }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
       volumes:
         - name: workspace
           {{- include "autodeploy-control-plane.workspaceVolume" . | nindent 10 }}

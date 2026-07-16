@@ -72,6 +72,7 @@ Health response boundaries:
 - Git clone credentials for private repositories are also environment-backed.
 - The control plane compares API tokens using constant-time comparison.
 - Raw bearer tokens should not be logged.
+- The operator UI keeps its bearer token in `sessionStorage`, clears any legacy `localStorage` value, and therefore does not retain the token after the browser session ends. Browser storage remains readable by same-origin JavaScript, so the Content Security Policy and avoidance of unsafe HTML sinks remain part of this boundary.
 - Executor command logs redact configured sensitive values where supported by the worker path.
 
 Project configuration now distinguishes readable config from secret-bearing config in `env_vars`:
@@ -129,8 +130,10 @@ Current audit coverage includes:
 - deploy, retry, and redeploy actions
 - manual deployment record creation
 - generic deployment patch actions
-- dedicated deployment stop actions
+- dedicated deployment stop and Kubernetes cleanup actions
 - denied mutating requests on protected project API routes
+
+The audit trail records who requested an API action and the associated request context. Worker-owned asynchronous progress and completion are recorded as deployment events rather than duplicated as audit records; for example, a stop request is audited as `deployment.stop_requested`, while the worker emits `deployment.stop_started` and `deployment.stopped`.
 
 Audit records currently store:
 
@@ -141,6 +144,8 @@ Audit records currently store:
 - success or failure status
 - request id when passed through `X-Request-Id`
 - client IP when available from the request context
+
+The audit trail uses the direct peer address by default and ignores client-supplied `X-Forwarded-For`. When the API is reachable only through trusted reverse proxies, `CONTROL_PLANE_TRUSTED_PROXY_COUNT` may be set to the exact number of proxy hops; Werkzeug then resolves `remote_addr` from the trusted right-hand side of the forwarding chain. Leaving the API directly reachable while enabling this setting would allow spoofing, so the default is `0` for local Compose and direct deployments.
 - a small metadata object
 
 What is intentionally not stored:
@@ -182,7 +187,9 @@ Prometheus labels are limited to bounded operational dimensions. Request, projec
 
 ## Live Workload Health Boundary
 
-The protected deployment `live-health` route probes only the `service_url` recorded by the platform for an existing deployment and appends that project's validated healthcheck path. It does not accept an arbitrary URL from the request. Results contain only status, safe message, HTTP status, and check timestamp; response bodies are neither returned nor persisted.
+The protected deployment `live-health` route probes only the worker-owned `service_url` recorded by the platform for an existing deployment and appends that project's validated healthcheck path. The generic deployment PATCH endpoint cannot modify this URL. The probe accepts only a plain HTTP(S) origin without credentials, query, fragment, or base path, and it does not follow redirects. Local executor URLs may intentionally resolve to loopback or private addresses, so those address ranges cannot be rejected without breaking the trusted local demo. Results contain only status, safe message, HTTP status, and check timestamp; response bodies are neither returned nor persisted.
+
+API request bodies are capped at 2 MiB by default through `CONTROL_PLANE_MAX_CONTENT_LENGTH`. This limit applies before webhook payloads are read into memory. Browser-facing responses include a same-origin Content Security Policy, clickjacking protection, MIME-sniffing protection, and a no-referrer policy.
 
 Live health is an operator signal, not an authorization or lifecycle transition. A single timeout or HTTP error does not mark a deployment failed. This avoids turning transient Kubernetes Pod replacement into destructive control-plane state.
 
@@ -193,6 +200,26 @@ Project and deployment commands are treated as narrow local-demo build/test inpu
 Accepted examples include `pytest -q`, `python -m pytest`, `python -m py_compile server.py`, `npm test`, and `ruff check .`.
 
 Rejected examples include shell wrappers and shell control syntax such as `sh -c`, `bash -c`, `&&`, `||`, `|`, redirection, backticks, and subshells. The worker applies the same validation before running tests so an invalid test command already present in the database fails at the `tests` step before `docker run` is invoked. `migration_command` remains a validated and stored compatibility field reserved by the application specification; the worker does not execute or revalidate it.
+
+## Helm-Managed Runtime Secrets
+
+The control-plane Helm chart supports two mutually exclusive runtime Secret modes:
+
+- `secrets.create=true`: the chart creates the Secret from `secrets.values`; this mode is intended for local demos in a controlled, trusted environment.
+- `secrets.create=false` with `secrets.existingSecret`: the chart references a Secret managed outside the Helm release and does not create, modify, or delete it.
+
+The chart fails rendering when `secrets.create=true` is combined with `secrets.existingSecret`, or when `secrets.create=false` has no external Secret name. API, worker, reconciler, and migration Job all resolve the runtime Secret through the same chart helper.
+
+The local `values.secrets.local.yaml` workflow has important boundaries:
+
+- the file contains secret values in plaintext; Git ignore rules and mode `0600` reduce accidental exposure but do not encrypt it
+- Kubernetes Secrets are base64-encoded and are not strongly encrypted by default
+- actual cluster-side protection depends on namespace/cluster RBAC and optional encryption at rest for etcd
+- users and service accounts with sufficient access can read Kubernetes Secret values
+- Helm stores release information in the cluster, including values supplied to the release, so sufficiently privileged users can recover chart-managed secret values
+- this mode is suitable only for local, trusted evaluation; shared or production-like environments should use `secrets.existingSecret` with an external secret-management workflow
+
+When `secrets.existingSecret` is used, Helm receives and stores the Secret name but not its data, provided secret values are not also passed through other Helm values or command-line arguments.
 
 ## Docker Socket Boundary
 

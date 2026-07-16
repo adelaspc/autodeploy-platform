@@ -57,8 +57,5 @@ def reconcile_failed_artifacts(deployment, *, executor_factory):
             metadata={"action": "workspace_cleanup"},
         )
 
-    if changed:
-        db.session.commit()
-    else:
-        db.session.flush()
+    db.session.commit()
     return changed

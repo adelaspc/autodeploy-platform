@@ -1,12 +1,14 @@
 from control_plane.command_validation import CommandValidationError, parse_optional_command
+from control_plane.deployment_spec import project_for_deployment
 from worker.execution.contracts import WorkerExecutionError
 
 
 class ImageBuildServiceMixin:
     def build_image(self, deployment):
+        project = project_for_deployment(deployment)
         workspace_dir, repo_dir, logs_dir = self._prepare_workspace(deployment)
-        dockerfile_path = repo_dir / deployment.project.dockerfile_path
-        build_context_path = repo_dir / deployment.project.build_context
+        dockerfile_path = repo_dir / project.dockerfile_path
+        build_context_path = repo_dir / project.build_context
 
         if not dockerfile_path.is_file():
             raise WorkerExecutionError(
@@ -73,7 +75,7 @@ class ImageBuildServiceMixin:
         return sanitized.strip("-") or "app"
 
     def _image_name(self, deployment):
-        return self._sanitize_image_component(deployment.build.image_name or deployment.project.name)
+        return self._sanitize_image_component(deployment.build.image_name or project_for_deployment(deployment).name)
 
     def _tag_suffix(self, deployment):
         raw = deployment.build.image_tag or deployment.build.commit_sha[:12] or str(deployment.id)

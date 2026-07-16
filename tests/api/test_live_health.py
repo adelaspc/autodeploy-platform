@@ -28,6 +28,20 @@ def test_deployment_healthcheck_url_uses_recorded_service_and_project_path():
     assert deployment_healthcheck_url(deployment) == "https://demo.example/ready"
 
 
+def test_deployment_healthcheck_url_rejects_unsafe_origin_shapes():
+    unsafe_urls = [
+        "http://user:password@demo.example",
+        "http://demo.example/base",
+        "http://demo.example?next=http://127.0.0.1",
+        "http://demo.example#fragment",
+        "ftp://demo.example",
+        "http://demo.example:99999",
+    ]
+
+    for service_url in unsafe_urls:
+        assert deployment_healthcheck_url(deployment_stub(service_url=service_url)) is None
+
+
 def test_live_health_reports_successful_http_probe():
     result = probe_deployment_health(
         deployment_stub(),
@@ -37,6 +51,16 @@ def test_live_health_reports_successful_http_probe():
     assert result["status"] == "healthy"
     assert result["http_status"] == 200
     assert result["checked_at"]
+
+
+def test_live_health_treats_redirect_as_unhealthy():
+    result = probe_deployment_health(
+        deployment_stub(),
+        opener=lambda request, timeout: ResponseStub(302),
+    )
+
+    assert result["status"] == "unhealthy"
+    assert result["http_status"] == 302
 
 
 def test_live_health_reports_http_and_network_failures():

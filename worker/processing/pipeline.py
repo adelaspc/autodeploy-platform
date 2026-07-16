@@ -1,4 +1,7 @@
+from flask import current_app
+
 from control_plane.extensions import db
+from control_plane.models import PlatformDeployment
 from sqlalchemy import update  # noqa: F401 - compatibility for existing pipeline consumers
 from worker.execution.contracts import WorkerExecutionError
 from worker.execution.factory import create_executor
@@ -63,6 +66,7 @@ def process_deployment(deployment, executor=None):
         )
         build_result = executor.build_image(deployment)
         ensure_claim_owned(deployment)
+        deployment.build.build_log_path = build_result.log_path
         apply_execution_result(deployment, build_result)
         commit_step_result(
             deployment,
@@ -138,7 +142,7 @@ def process_deployment(deployment, executor=None):
         ensure_claim_owned(deployment)
         apply_execution_result(deployment, push_result)
         deployment.build.registry_push_status = "skipped" if push_result.metadata.get("skipped") else "succeeded"
-        deployment.build.status = "succeeded"
+        deployment.build.transition_to("succeeded")
         deployment.build.finished_at = now_utc()
         commit_step_result(
             deployment,
@@ -229,7 +233,7 @@ def process_deployment(deployment, executor=None):
 
         ensure_claim_owned(deployment)
         refresh_claim(deployment)
-        deployment.status = "running"
+        deployment.transition_to("running")
         deployment.finished_at = now_utc()
         record_event(
             deployment,
@@ -257,6 +261,8 @@ def process_deployment(deployment, executor=None):
     except WorkerExecutionError as exc:
         if exc.log_path:
             deployment.build.log_path = exc.log_path
+            if exc.step == "image.build":
+                deployment.build.build_log_path = exc.log_path
         if exc.step == "image.push":
             deployment.build.registry_push_status = "failed"
         persist_preflight_failure(deployment, exc)
@@ -265,6 +271,25 @@ def process_deployment(deployment, executor=None):
             return mark_failed(deployment, exc.step, exc.message, metadata=exc.metadata)
         except ClaimLostError as claim_exc:
             return persist_claim_loss(deployment.id, claim_exc)
+    except Exception as exc:
+        deployment_id = deployment.id
+        current_app.logger.exception(
+            "deployment_worker_unexpected_failure",
+            extra={"deployment_id": deployment_id, "error_type": type(exc).__name__},
+        )
+        db.session.rollback()
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        if deployment is None:
+            return None
+        try:
+            return mark_failed(
+                deployment,
+                "worker.internal",
+                "Worker encountered an unexpected internal error",
+                metadata={"error_type": type(exc).__name__},
+            )
+        except ClaimLostError as claim_exc:
+            return persist_claim_loss(deployment_id, claim_exc)
 
 
 def process_next_pending_deployment(executor=None):

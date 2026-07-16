@@ -24,10 +24,10 @@ def reconcile_running_missing_container(deployment, *, executor_factory):
     if container_exists:
         return False
 
-    deployment.status = "failed"
+    deployment.transition_to("failed")
     deployment.finished_at = now_utc()
     deployment.last_error = "Reconciler detected missing runtime container for running deployment"
-    deployment.build.status = "failed"
+    deployment.build.transition_to("failed")
     deployment.build.finished_at = deployment.finished_at
     deployment.build.last_error = deployment.last_error
     deployment.service_url = None

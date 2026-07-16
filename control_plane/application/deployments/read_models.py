@@ -3,7 +3,12 @@ from pathlib import Path
 
 from flask import current_app
 
+from control_plane.deployment_spec import project_for_deployment
 from control_plane.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
+
+
+def deployment_secret_values(deployment):
+    return secret_values_from_env_vars(project_for_deployment(deployment).env_vars)
 
 
 def get_runtime_log_path(deployment):
@@ -16,7 +21,17 @@ def get_runtime_log_path(deployment):
 
 
 def get_build_log_path(deployment):
-    log_path = deployment.build.log_path
+    log_path = deployment.build.build_log_path
+    if not log_path:
+        for event in sorted(deployment.events, key=lambda item: (item.created_at, item.id or 0), reverse=True):
+            if event.event_type != "image.build_succeeded":
+                continue
+            metadata = event.metadata_json or {}
+            log_path = metadata.get("log_path")
+            if log_path:
+                break
+    if not log_path:
+        log_path = deployment.build.log_path
     if not log_path:
         return None
     return Path(log_path)
@@ -75,7 +90,7 @@ def latest_kubernetes_event(deployment, event_types):
 def deployment_preflight_record(deployment):
     if not deployment.preflight_status:
         return None
-    secret_values = secret_values_from_env_vars(deployment.project.env_vars if deployment.project else [])
+    secret_values = deployment_secret_values(deployment)
     metadata = redact_sensitive_data(deployment.preflight_metadata_json or {}, secret_values=secret_values)
     return {
         "status": deployment.preflight_status,
@@ -86,7 +101,7 @@ def deployment_preflight_record(deployment):
 
 
 def kubernetes_summary_fields(deployment):
-    secret_values = secret_values_from_env_vars(deployment.project.env_vars if deployment.project else [])
+    secret_values = deployment_secret_values(deployment)
     if deployment.deploy_target != "kubernetes":
         return {
             "kubernetes_namespace": None,
@@ -242,9 +257,7 @@ def kubernetes_failure_stage_and_summary(failure_event):
     if failure_event is None:
         return None, None
 
-    secret_values = secret_values_from_env_vars(
-        failure_event.deployment.project.env_vars if failure_event.deployment and failure_event.deployment.project else []
-    )
+    secret_values = deployment_secret_values(failure_event.deployment)
     metadata = redact_sensitive_data(failure_event.metadata_json or {}, secret_values=secret_values)
     if failure_event.event_type == "kubernetes.preflight_failed":
         missing_resources = metadata.get("missing_resources") or []
@@ -304,7 +317,7 @@ def helm_diagnostic_fields(deployment, metadata):
 def serialize_kubernetes_diagnostics(deployment):
     if deployment.deploy_target != "kubernetes":
         return None
-    secret_values = secret_values_from_env_vars(deployment.project.env_vars if deployment.project else [])
+    secret_values = deployment_secret_values(deployment)
 
     preflight_record = deployment_preflight_record(deployment)
     if preflight_record and preflight_record["status"] == "failed":
@@ -415,7 +428,7 @@ def serialize_kubernetes_diagnostics(deployment):
 
 def serialize_deployment_summary(deployment, *, branch):
     build = deployment.build
-    secret_values = secret_values_from_env_vars(deployment.project.env_vars if deployment.project else [])
+    secret_values = deployment_secret_values(deployment)
     meaningful_event = latest_meaningful_event(deployment)
     push_event = latest_push_event(deployment)
     current_step = meaningful_event.step if meaningful_event and meaningful_event.step else deployment.status
@@ -475,7 +488,7 @@ def read_log_tail(path, *, tail_lines, secret_values=()):
 
 
 def serialize_runtime_log_payload(deployment, log_path, *, tail_lines):
-    secret_values = secret_values_from_env_vars(deployment.project.env_vars if deployment.project else [])
+    secret_values = deployment_secret_values(deployment)
     payload = read_log_tail(log_path, tail_lines=tail_lines, secret_values=secret_values)
     return {
         "deployment_id": deployment.id,
@@ -486,7 +499,7 @@ def serialize_runtime_log_payload(deployment, log_path, *, tail_lines):
 
 
 def serialize_build_log_payload(deployment, log_path, *, tail_lines):
-    secret_values = secret_values_from_env_vars(deployment.project.env_vars if deployment.project else [])
+    secret_values = deployment_secret_values(deployment)
     payload = read_log_tail(log_path, tail_lines=tail_lines, secret_values=secret_values)
     return {
         "deployment_id": deployment.id,

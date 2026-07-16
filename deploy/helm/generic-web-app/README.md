@@ -14,6 +14,8 @@ This chart renders:
 
 It does not render jobs, migrations, PVCs, RBAC, service accounts, Docker socket mounts, kubeconfig mounts, sidecars, autoscaling, cronjobs, or network policies.
 
+The rendered Pod does not mount a ServiceAccount token, uses the runtime-default seccomp profile, and disables privilege escalation. `podSecurityContext` and `securityContext` remain configurable for images that support stricter settings such as non-root execution or dropping all capabilities.
+
 ## Relationship To The PaaS
 
 `deploy/helm/autodeploy-control-plane` deploys internal platform components such as the API, worker, reconciler, migration hook, workspace volume, RBAC, optional Docker socket access, and optional kubeconfig.
