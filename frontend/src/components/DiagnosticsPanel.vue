@@ -1,4 +1,6 @@
 <script setup>
+import { DIAGNOSTICS_BUNDLE_NOTICE } from "../diagnosticsBundle";
+
 defineProps({
   diagnostics: { type: Object, default: null },
   view: { type: Object, required: true },
@@ -17,6 +19,9 @@ defineEmits(["copy", "download"]);
         <span class="subtle">{{ view.stageLabel }}</span>
       </div>
     </div>
+    <p class="diagnostics-export-notice" role="note">
+      <strong>{{ DIAGNOSTICS_BUNDLE_NOTICE }}</strong>
+    </p>
     <div class="diagnostics-summary" :data-stage="view.stage || 'none'">
       <span>{{ view.stageLabel }}</span><strong>{{ view.summary }}</strong>
       <small>{{ view.eventType }}<template v-if="view.eventAt"> - {{ formatTime(view.eventAt) }}</template></small>

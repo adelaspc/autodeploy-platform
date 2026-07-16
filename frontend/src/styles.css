@@ -728,6 +728,20 @@ small {
   margin-bottom: 16px;
 }
 
+.diagnostics-export-notice {
+  margin: 12px 0 0;
+  border-left: 3px solid #ffc247;
+  border-radius: 0 7px 7px 0;
+  background: #171309;
+  padding: 10px 12px;
+  color: #c8c0a9;
+  font-size: 13px;
+}
+
+.diagnostics-export-notice strong {
+  color: #ffd37a;
+}
+
 .diagnostics-summary {
   display: grid;
   gap: 6px;

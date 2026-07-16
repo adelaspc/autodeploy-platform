@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDiagnosticsBundle, diagnosticsBundleFilename, diagnosticsBundleText } from "./diagnosticsBundle.js";
+import {
+  DIAGNOSTICS_BUNDLE_NOTICE,
+  buildDiagnosticsBundle,
+  diagnosticsBundleFilename,
+  diagnosticsBundleText,
+} from "./diagnosticsBundle.js";
 
 test("builds a deployment diagnostics bundle", () => {
   const parts = {
@@ -12,6 +17,7 @@ test("builds a deployment diagnostics bundle", () => {
   };
   const bundle = buildDiagnosticsBundle(parts);
   assert.equal(bundle.deployment.deployment_id, 42);
+  assert.equal(bundle.handling_notice, DIAGNOSTICS_BUNDLE_NOTICE);
   assert.equal(bundle.kubernetes_diagnostics.pod_phase, "Running");
   assert.match(diagnosticsBundleText(parts), /deployment.failed/);
   assert.equal(diagnosticsBundleFilename(parts.summary), "paas-deployment-42-diagnostics.json");
