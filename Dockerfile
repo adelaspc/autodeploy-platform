@@ -1,20 +1,19 @@
-FROM node:22-bookworm-slim AS frontend-builder
+FROM node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3 AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM alpine/helm:4.2.0 AS helm-cli
+FROM alpine/helm:4.2.0@sha256:af08f75a3130d666a50b9fc150f40987ef20b885cf67659aabf4b83a5f2c5501 AS helm-cli
 
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim-trixie@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
 COPY --from=helm-cli /usr/bin/helm /usr/local/bin/helm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        docker.io \
         docker-cli \
         docker-buildx \
         git \
@@ -25,8 +24,8 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
+COPY requirements.lock.txt ./
+RUN --mount=type=cache,target=/root/.cache/pip pip install --require-hashes -r requirements.lock.txt
 
 COPY --chown=appuser:appuser control_plane ./control_plane
 COPY --chown=appuser:appuser migrations ./migrations

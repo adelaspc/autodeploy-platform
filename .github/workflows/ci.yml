@@ -12,47 +12,55 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Scan working tree for secrets
-        run: docker run --rm --volume "$PWD:/repo" zricethezav/gitleaks:v8.30.1 dir /repo --redact
+        run: docker run --rm --volume "$PWD:/repo" zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f dir /repo --redact
 
   tests:
     name: Tests
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: "pip"
           cache-dependency-path: |
             requirements.txt
+            requirements.lock.txt
             requirements-dev.txt
 
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
 
       - name: Run test suite
-        run: python -m pytest
+        run: python -m pytest -m "not docker and not mysql and not kubernetes" --cov=control_plane --cov=worker --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: backend-coverage
+          path: coverage.xml
 
   lint:
     name: Ruff
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: "pip"
           cache-dependency-path: |
             requirements.txt
+            requirements.lock.txt
             requirements-dev.txt
 
       - name: Install dependencies
@@ -69,10 +77,10 @@ jobs:
         working-directory: frontend
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: "22"
           cache: "npm"
@@ -92,15 +100,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: "pip"
           cache-dependency-path: |
             requirements.txt
+            requirements.lock.txt
             requirements-dev.txt
 
       - name: Install dependencies
@@ -115,37 +124,50 @@ jobs:
     continue-on-error: true
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: "pip"
           cache-dependency-path: |
             requirements.txt
+            requirements.lock.txt
             requirements-dev.txt
 
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
 
       - name: Run pip-audit
-        run: pip-audit -r requirements.txt
+        run: pip-audit -r requirements.lock.txt
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Audit control-plane frontend runtime dependencies
+        working-directory: frontend
+        run: npm audit --omit=dev
 
   migrations:
     name: Migrations
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: "pip"
           cache-dependency-path: |
             requirements.txt
+            requirements.lock.txt
             requirements-dev.txt
 
       - name: Install dependencies
@@ -160,22 +182,94 @@ jobs:
           export CONTROL_PLANE_DATABASE_URL="sqlite:////${GITHUB_WORKSPACE}/instance/ci-control-plane.db"
           python -m flask --app wsgi:app db upgrade
 
+  mysql-concurrency:
+    name: MySQL concurrency
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
+        env:
+          MYSQL_DATABASE: autodeploy_test
+          MYSQL_USER: autodeploy
+          MYSQL_PASSWORD: autodeploy-test-password
+          MYSQL_ROOT_PASSWORD: root-test-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root --password=root-test-password"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements.lock.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Verify concurrent claims
+        env:
+          CONTROL_PLANE_TEST_MYSQL_URL: mysql+pymysql://autodeploy:autodeploy-test-password@127.0.0.1:3306/autodeploy_test
+        run: python -m pytest -q -m mysql tests/integration/test_mysql_claims.py
+
+  docker-integration:
+    name: Docker integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements.lock.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run real Docker executor tests
+        run: python -m pytest -q -m docker tests/execution/test_executor_integration.py
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Build control-plane image
         run: docker build --tag autodeploy-control-plane:ci .
+
+      - name: Scan image for fixable high and critical vulnerabilities
+        continue-on-error: true
+        run: >-
+          docker run --rm
+          --volume /var/run/docker.sock:/var/run/docker.sock
+          ghcr.io/aquasecurity/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e
+          image --scanners vuln --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1
+          autodeploy-control-plane:ci
 
   compose-config:
     name: Compose Config
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Validate docker compose configuration
         env:
@@ -188,10 +282,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Set up Helm
-        uses: azure/setup-helm@v5
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
 
       - name: Render Helm chart
         run: helm template ci ./deploy/helm/autodeploy-control-plane -f ./deploy/helm/autodeploy-control-plane/values.ci.yaml > /dev/null

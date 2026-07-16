@@ -25,4 +25,6 @@ norecursedirs = [
 ]
 markers = [
   "docker: tests that require a local Docker daemon and are skipped unless Docker is available",
+  "mysql: integration tests that require CONTROL_PLANE_TEST_MYSQL_URL",
+  "kubernetes: integration tests that require a reachable Kubernetes API server",
 ]

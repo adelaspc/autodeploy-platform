@@ -23,7 +23,10 @@ def helm_binary():
 def test_control_plane_image_bundles_pinned_helm_cli():
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
-    assert "FROM alpine/helm:4.2.0 AS helm-cli" in dockerfile
+    assert (
+        "FROM alpine/helm:4.2.0@sha256:af08f75a3130d666a50b9fc150f40987ef20b885cf67659aabf4b83a5f2c5501 "
+        "AS helm-cli"
+    ) in dockerfile
     assert "COPY --from=helm-cli /usr/bin/helm /usr/local/bin/helm" in dockerfile
     assert "helm version --short" in dockerfile
 

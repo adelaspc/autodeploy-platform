@@ -13,7 +13,7 @@ COMPOSE_DOCKER_SOCKET_OVERRIDE := docker-compose.docker-socket.yml
 GITLEAKS_VERSION := 8.30.1
 export DOCKER_BUILDKIT ?= 1
 
-.PHONY: help env-init require-env api db-upgrade worker-once worker reconciler reconciler-once reconciler-loop compose-up compose-recreate-runtime compose-config compose-toolcheck compose-down compose-logs compose-reset runtime-clean k8s-demo-check wsl-ingress-domain health-platform test lint secret-scan secret-scan-history frontend-test frontend-build
+.PHONY: help env-init require-env api db-upgrade worker-once worker reconciler reconciler-once reconciler-loop compose-up compose-recreate-runtime compose-config compose-toolcheck compose-down compose-logs compose-reset runtime-clean k8s-demo-check wsl-ingress-domain health-platform lock-requirements test coverage integration-docker integration-mysql integration-kubernetes lint secret-scan secret-scan-history frontend-test frontend-build
 
 help:
 	@printf '%s\n' \
@@ -45,12 +45,20 @@ help:
 		'  wsl-ingress-domain Print the nip.io base domain for the current WSL IP' \
 		'' \
 		'Quality targets:' \
+		'  lock-requirements Regenerate the hashed Python runtime lock file' \
 		'  test              Run backend tests' \
+		'  coverage          Run backend tests and generate terminal/XML coverage reports' \
+		'  integration-docker Run opt-in tests against the local Docker daemon' \
+		'  integration-mysql Run concurrency tests against CONTROL_PLANE_TEST_MYSQL_URL' \
+		'  integration-kubernetes Run read-only checks against CONTROL_PLANE_TEST_KUBECONFIG' \
 		'  lint              Run Ruff checks' \
 		'  secret-scan       Scan the working tree for secrets with Gitleaks' \
 		'  secret-scan-history Scan all Git history for secrets with Gitleaks' \
 		'  frontend-test     Run frontend unit tests' \
 		'  frontend-build    Build the frontend'
+
+lock-requirements:
+	$(PYTHON) -m piptools compile --generate-hashes --strip-extras --output-file=requirements.lock.txt requirements.txt
 
 env-init:
 	@umask 077; if [[ ! -f .env.demo ]]; then \
@@ -256,7 +264,19 @@ health-platform: require-env
 	printf '\n'
 
 test:
-	$(PYTHON) -m pytest tests
+	$(PYTHON) -m pytest tests -m 'not docker and not mysql and not kubernetes'
+
+coverage:
+	$(PYTHON) -m pytest tests -m 'not docker and not mysql and not kubernetes' --cov=control_plane --cov=worker --cov-report=term-missing --cov-report=xml
+
+integration-docker:
+	$(PYTHON) -m pytest -q -m docker tests/execution/test_executor_integration.py
+
+integration-mysql:
+	$(PYTHON) -m pytest -q -m mysql tests/integration/test_mysql_claims.py
+
+integration-kubernetes:
+	$(PYTHON) -m pytest -q -m kubernetes tests/integration/test_kubernetes_contract.py
 
 lint:
 	$(PYTHON) -m ruff check control_plane worker wsgi.py

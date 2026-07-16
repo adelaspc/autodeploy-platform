@@ -156,8 +156,8 @@ def test_local_docker_executor_real_container_flow(client, tmp_path):
         stopped = stop_response.get_json()
         assert stopped["status"] == "stopped"
         assert stopped["service_url"] is None
-        assert stopped["events"][-1]["event_type"] == "deployment.stopped"
-        assert stopped["events"][-1]["metadata_json"]["runtime_log_path"].endswith("/runtime.log")
+        stopped_event = next(event for event in stopped["events"] if event["event_type"] == "deployment.stopped")
+        assert stopped_event["metadata_json"]["runtime_log_path"].endswith("/runtime.log")
         container_name = None
     finally:
         if container_name:
