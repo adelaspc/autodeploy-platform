@@ -91,11 +91,32 @@ def reconcile_deployments(*, emitter=None):
         try:
             changes = reconcile_deployment(deployment)
         except Exception as exc:
-            current_app.logger.exception("reconcile_deployment_failed", extra={"deployment_id": deployment.id})
+            current_app.logger.exception(
+                "reconcile_deployment_failed",
+                extra={
+                    "event": "reconcile_deployment_failed",
+                    "request_id": deployment.origin_request_id,
+                    "project_id": deployment.project_id,
+                    "deployment_id": deployment.id,
+                    "build_id": deployment.build_id,
+                    "error_type": type(exc).__name__,
+                },
+            )
             emitter(f"Deployment {deployment.id}: reconciliation error: {exc}")
             db.session.rollback()
             continue
         if changes:
             total_changes += changes
+            current_app.logger.info(
+                "reconcile_deployment_changed",
+                extra={
+                    "event": "reconcile_deployment_changed",
+                    "request_id": deployment.origin_request_id,
+                    "project_id": deployment.project_id,
+                    "deployment_id": deployment.id,
+                    "build_id": deployment.build_id,
+                    "reconciliation_actions": changes,
+                },
+            )
             emitter(f"Deployment {deployment.id}: applied {changes} reconciliation action(s)")
     return total_changes

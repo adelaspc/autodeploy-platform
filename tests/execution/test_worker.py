@@ -565,6 +565,56 @@ def test_run_reconciler_loop_polls_until_stopped():
     ]
 
 
+def test_run_worker_loop_uses_structured_logger_without_emitter(app, caplog):
+    calls = {"count": 0}
+
+    def processor():
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return SimpleNamespace(
+                id=99,
+                project_id=7,
+                build_id=8,
+                status="running",
+                origin_request_id="request-99",
+            )
+        return None
+
+    def sleep_fn(_interval):
+        import worker.cli as worker_cli
+
+        worker_cli._keep_running = False
+
+    import worker.cli as worker_cli
+
+    worker_cli._keep_running = True
+    with app.app_context(), caplog.at_level("INFO"):
+        run_worker_loop(interval=0.01, processor=processor, sleep_fn=sleep_fn)
+
+    record = next(record for record in caplog.records if record.event == "worker_deployment_processed")
+    assert record.request_id == "request-99"
+    assert record.deployment_id == 99
+    assert record.final_status == "running"
+
+
+def test_run_reconciler_loop_uses_structured_logger_without_emitter(app, caplog):
+    def reconciler(*, emitter):
+        assert emitter is None
+        import worker.cli as worker_cli
+
+        worker_cli._keep_running = False
+        return 2
+
+    import worker.cli as worker_cli
+
+    worker_cli._keep_running = True
+    with app.app_context(), caplog.at_level("INFO"):
+        run_reconciler_loop(interval=0.01, reconciler=reconciler, sleep_fn=lambda _seconds: None)
+
+    record = next(record for record in caplog.records if record.event == "reconciler_pass_completed")
+    assert record.reconciliation_actions == 2
+
+
 def test_reconciler_cli_exposes_explicit_once_and_loop_commands(app):
     commands = app.cli.commands
 

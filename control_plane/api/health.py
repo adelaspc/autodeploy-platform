@@ -21,7 +21,10 @@ def readiness_health_check():
     try:
         db.session.execute(text("SELECT 1"))
     except Exception as exc:
-        current_app.logger.warning("API readiness check failed", exc_info=exc)
+        current_app.logger.warning(
+            "API readiness check failed",
+            extra={"event": "api_readiness_failed", "error_type": type(exc).__name__},
+        )
         return jsonify({"status": "error", "error_code": "not_ready"}), 503
 
     return jsonify({"status": "ok"}), 200
@@ -33,7 +36,10 @@ def database_health_check():
     try:
         db.session.execute(text("SELECT 1"))
     except Exception as exc:
-        current_app.logger.warning("Database health check failed", exc_info=exc)
+        current_app.logger.warning(
+            "Database health check failed",
+            extra={"event": "database_health_failed", "error_type": type(exc).__name__},
+        )
         return jsonify({"status": "error", "database": "unreachable", "error_code": "database_unreachable"}), 503
 
     return jsonify({"status": "ok", "database": "reachable"}), 200

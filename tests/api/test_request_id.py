@@ -3,6 +3,9 @@ import hmac
 import json
 import re
 
+from control_plane.extensions import db
+from control_plane.models import PlatformDeployment
+
 
 def bearer_headers(token, request_id=None):
     headers = {"Authorization": f"Bearer {token}"}
@@ -88,6 +91,66 @@ def test_audit_events_include_request_id(client, app):
     created_event = audit_response.get_json()["items"][0]
     assert created_event["action"] == "project.created"
     assert created_event["request_id"] == request_id
+
+
+def test_manual_deployment_and_worker_events_preserve_origin_request_id(client, app):
+    configure_api_tokens(app)
+    project_response = client.post(
+        "/api/projects",
+        json=create_project_payload(name="request-id-deployment-app"),
+        headers=bearer_headers("admin-token"),
+    )
+    project_id = project_response.get_json()["id"]
+    request_id = "deployment-request-123"
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "0123456789abcdef", "image_name": "request-id-app", "image_tag": "test"},
+        headers=bearer_headers("admin-token", request_id=request_id),
+    )
+
+    assert response.status_code == 201
+    deployment_id = response.get_json()["id"]
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        assert deployment.origin_request_id == request_id
+        assert deployment.events[0].metadata_json["origin_request_id"] == request_id
+
+
+def test_deployment_command_preserves_its_own_origin_request_id(client, app):
+    configure_api_tokens(app)
+    project_response = client.post(
+        "/api/projects",
+        json=create_project_payload(name="request-id-command-app"),
+        headers=bearer_headers("admin-token"),
+    )
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "0123456789abcdef",
+            "image_name": "request-id-command-app",
+            "image_tag": "test",
+            "status": "running",
+            "build_status": "succeeded",
+        },
+        headers=bearer_headers("admin-token", request_id="deployment-origin"),
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments/{deployment_id}/stop",
+        json={},
+        headers=bearer_headers("deployer-token", request_id="stop-request-456"),
+    )
+
+    assert response.status_code == 202
+    command = response.get_json()["command"]
+    assert command["origin_request_id"] == "stop-request-456"
+    requested_event = next(
+        event for event in response.get_json()["events"] if event["event_type"] == "deployment.stop_requested"
+    )
+    assert requested_event["metadata_json"]["origin_request_id"] == "stop-request-456"
 
 
 def test_auth_error_response_includes_request_id(client, app):

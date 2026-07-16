@@ -31,6 +31,16 @@ from worker.processing.lifecycle import (
 
 
 def process_deployment(deployment, executor=None):
+    current_app.logger.info(
+        "deployment_worker_started",
+        extra={
+            "event": "deployment_worker_started",
+            "request_id": deployment.origin_request_id,
+            "project_id": deployment.project_id,
+            "deployment_id": deployment.id,
+            "build_id": deployment.build_id,
+        },
+    )
     executor = executor or create_executor()
     attach_claim_heartbeat(executor, deployment, expected_worker_id=worker_id())
     deployment.last_error = None
@@ -275,7 +285,11 @@ def process_deployment(deployment, executor=None):
         deployment_id = deployment.id
         current_app.logger.exception(
             "deployment_worker_unexpected_failure",
-            extra={"deployment_id": deployment_id, "error_type": type(exc).__name__},
+            extra={
+                "deployment_id": deployment_id,
+                "request_id": deployment.origin_request_id,
+                "error_type": type(exc).__name__,
+            },
         )
         db.session.rollback()
         deployment = db.session.get(PlatformDeployment, deployment_id)

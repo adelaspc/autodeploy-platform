@@ -57,7 +57,8 @@ def error_payload(message, **extra):
 
 class RequestIdLogFilter:
     def filter(self, record):
-        record.request_id = current_request_id()
+        if getattr(record, "request_id", None) is None:
+            record.request_id = current_request_id()
         return True
 
 

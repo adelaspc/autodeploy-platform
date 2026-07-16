@@ -18,7 +18,7 @@ def _request_shutdown(_signum, _frame):
     _keep_running = False
 
 
-def run_worker_loop(*, interval, sleep_fn=time.sleep, processor=process_next_work_item, emitter=click.echo):
+def run_worker_loop(*, interval, sleep_fn=time.sleep, processor=process_next_work_item, emitter=None):
     global _keep_running
     while _keep_running:
         deployment = processor()
@@ -26,14 +26,38 @@ def run_worker_loop(*, interval, sleep_fn=time.sleep, processor=process_next_wor
             sleep_fn(interval)
             continue
 
-        emitter(f"Processed deployment {deployment.id} with final status '{deployment.status}'")
+        message = f"Processed deployment {deployment.id} with final status '{deployment.status}'"
+        if emitter is not None:
+            emitter(message)
+        else:
+            current_app.logger.info(
+                "worker_deployment_processed",
+                extra={
+                    "event": "worker_deployment_processed",
+                    "request_id": deployment.origin_request_id,
+                    "project_id": deployment.project_id,
+                    "deployment_id": deployment.id,
+                    "build_id": deployment.build_id,
+                    "final_status": deployment.status,
+                },
+            )
 
 
-def run_reconciler_loop(*, interval, sleep_fn=time.sleep, reconciler=reconcile_deployments, emitter=click.echo):
+def run_reconciler_loop(*, interval, sleep_fn=time.sleep, reconciler=reconcile_deployments, emitter=None):
     global _keep_running
     while _keep_running:
         changes = reconciler(emitter=emitter)
-        emitter(f"Reconciler finished with {changes} action(s)")
+        message = f"Reconciler finished with {changes} action(s)"
+        if emitter is not None:
+            emitter(message)
+        else:
+            current_app.logger.info(
+                "reconciler_pass_completed",
+                extra={
+                    "event": "reconciler_pass_completed",
+                    "reconciliation_actions": changes,
+                },
+            )
         if _keep_running:
             sleep_fn(interval)
 
@@ -54,7 +78,10 @@ def check_worker_readiness():
     try:
         db.session.execute(text("SELECT 1"))
     except Exception as exc:
-        current_app.logger.warning("Worker readiness database check failed", exc_info=exc)
+        current_app.logger.warning(
+            "Worker readiness database check failed",
+            extra={"event": "worker_readiness_database_failed", "error_type": type(exc).__name__},
+        )
         raise click.ClickException("worker database is unreachable") from exc
 
     try:
@@ -62,7 +89,10 @@ def check_worker_readiness():
 
         status = platform_status_payload()
     except Exception as exc:
-        current_app.logger.warning("Worker readiness executor check failed", exc_info=exc)
+        current_app.logger.warning(
+            "Worker readiness executor check failed",
+            extra={"event": "worker_readiness_executor_failed", "error_type": type(exc).__name__},
+        )
         raise click.ClickException("worker executor configuration is not ready") from exc
     if not status.get("deployment_creation_ready"):
         raise click.ClickException("worker executor configuration is not ready")
@@ -81,12 +111,26 @@ def run_worker(poll_interval):
         5.0,
     )
     interval = configured_interval if poll_interval is None else poll_interval
-    click.echo(f"Worker polling every {interval} seconds")
+    current_app.logger.info(
+        "worker_started",
+        extra={"event": "worker_started", "poll_interval_seconds": interval},
+    )
     run_worker_loop(interval=interval)
-    click.echo("Worker stopped")
+    current_app.logger.info("worker_stopped", extra={"event": "worker_stopped"})
 
 
 def _run_reconciler_once():
+    if current_app.config.get("CONTROL_PLANE_COMPONENT") == "reconciler":
+        changes = reconcile_deployments()
+        current_app.logger.info(
+            "reconciler_pass_completed",
+            extra={
+                "event": "reconciler_pass_completed",
+                "reconciliation_actions": changes,
+            },
+        )
+        return
+
     changes = reconcile_deployments(emitter=click.echo)
     click.echo(f"Reconciler finished with {changes} action(s)")
 
@@ -115,6 +159,9 @@ def run_reconciler_loop_command(poll_interval):
         60.0,
     )
     interval = configured_interval if poll_interval is None else poll_interval
-    click.echo(f"Reconciler polling every {interval} seconds")
+    current_app.logger.info(
+        "reconciler_started",
+        extra={"event": "reconciler_started", "poll_interval_seconds": interval},
+    )
     run_reconciler_loop(interval=interval)
-    click.echo("Reconciler stopped")
+    current_app.logger.info("reconciler_stopped", extra={"event": "reconciler_stopped"})

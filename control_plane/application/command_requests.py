@@ -4,6 +4,7 @@ from sqlalchemy.exc import IntegrityError
 from control_plane.application.deployments.orchestration import create_deployment_event
 from control_plane.extensions import db
 from control_plane.models import DeploymentCommand
+from control_plane.api.request_context import current_request_id
 
 
 ACTIVE_COMMAND_STATUSES = ("pending", "claimed")
@@ -28,6 +29,7 @@ def request_deployment_command(deployment, command_type, *, message=None):
         status="pending",
         active_key="active",
         message=message,
+        origin_request_id=current_request_id(),
     )
     db.session.add(command)
     create_deployment_event(
@@ -36,7 +38,7 @@ def request_deployment_command(deployment, command_type, *, message=None):
         deployment.status,
         message or f"Deployment {command_type} requested",
         step=f"deploy.{command_type}",
-        metadata_json={"command_type": command_type},
+        metadata_json={"command_type": command_type, "origin_request_id": command.origin_request_id},
     )
     try:
         db.session.flush()

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 
 
 REDACTED = "[REDACTED]"
+LOG_SECRET_PATTERNS = (
+    re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9._~+/=-]+)"),
+    re.compile(r"(?i)(\b(?:authorization|password|passwd|pwd|token|api[_-]?key)\b\s*[:=]\s*)([^\s,;]+)"),
+    re.compile(r"(?i)([a-z][a-z0-9+.-]*://[^\s:/@]+:)([^\s/@]+)(@)"),
+)
 SENSITIVE_KEY_PARTS = {
     "authorization",
     "password",
@@ -73,6 +79,17 @@ def redact_text(text, *, secret_values=()):
     for value in secret_values:
         if value:
             sanitized = sanitized.replace(value, REDACTED)
+    return sanitized
+
+
+def redact_log_text(text, *, secret_values=()):
+    """Best-effort redaction for untrusted exception and infrastructure log text."""
+    sanitized = redact_text(text, secret_values=secret_values)
+    for pattern in LOG_SECRET_PATTERNS:
+        sanitized = pattern.sub(
+            lambda match: f"{match.group(1)}{REDACTED}{match.group(3) if match.lastindex == 3 else ''}",
+            sanitized,
+        )
     return sanitized
 
 

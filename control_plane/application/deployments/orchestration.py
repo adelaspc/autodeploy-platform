@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 from control_plane.extensions import db
 from control_plane.deployment_spec import create_deployment_spec_snapshot, project_for_deployment
 from control_plane.models import Build, DeploymentEvent, PlatformDeployment
+from control_plane.api.request_context import current_request_id
 
 
 def create_deployment_event(
@@ -169,6 +170,7 @@ def create_build_and_deployment_records(
         status=deployment_status,
         service_url=service_url,
         spec_snapshot_json=create_deployment_spec_snapshot(project, branch=deployment_branch),
+        origin_request_id=current_request_id(),
     )
     db.session.add(deployment)
     db.session.flush()
@@ -179,7 +181,7 @@ def create_build_and_deployment_records(
         deployment.status,
         deployment_message,
         step="deployment",
-        metadata_json=deployment_metadata,
+        metadata_json=(deployment_metadata or {}) | {"origin_request_id": deployment.origin_request_id},
     )
     return build, deployment
 

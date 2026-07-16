@@ -25,6 +25,7 @@ class DeploymentCommand(db.Model):
     last_error = db.Column(db.Text, nullable=True)
     claimed_by = db.Column(db.String(255), nullable=True)
     claimed_at = db.Column(db.DateTime, nullable=True)
+    origin_request_id = db.Column(db.String(128), nullable=True, index=True)
     requested_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc), index=True)
     completed_at = db.Column(db.DateTime, nullable=True)
 
@@ -43,6 +44,7 @@ class DeploymentCommand(db.Model):
             "last_error": redact_text(self.last_error, secret_values=secret_values) if self.last_error else None,
             "claimed_by": self.claimed_by,
             "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
+            "origin_request_id": self.origin_request_id,
             "requested_at": self.requested_at.isoformat(),
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
         }

@@ -54,6 +54,7 @@ class PlatformDeployment(db.Model):
     finished_at = db.Column(db.DateTime, nullable=True)
     claimed_at = db.Column(db.DateTime, nullable=True)
     claimed_by = db.Column(db.String(255), nullable=True)
+    origin_request_id = db.Column(db.String(128), nullable=True, index=True)
     created_at = db.Column(db.DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = db.Column(
         db.DateTime,
@@ -113,6 +114,7 @@ class PlatformDeployment(db.Model):
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
             "claimed_by": self.claimed_by,
+            "origin_request_id": self.origin_request_id,
             "latest_command": latest_command.to_dict() if latest_command else None,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),

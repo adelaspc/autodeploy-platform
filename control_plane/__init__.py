@@ -13,6 +13,7 @@ from control_plane.api.request_context import (
 from control_plane.config import Config, validate_numeric_config
 from control_plane.extensions import db, migrate
 from control_plane.logging_config import install_structured_logging
+from control_plane.retention import cleanup_observability
 from worker import (
     check_worker_readiness,
     run_reconciler,
@@ -23,7 +24,9 @@ from worker import (
 )
 
 
-def create_app(config_class=Config):
+def create_app(config_class=None):
+    if config_class is None or config_class is Config:
+        config_class = Config.from_env()
     app = Flask(__name__, static_folder="../frontend/dist", static_url_path="")
     app.config.from_object(config_class)
     init_app = getattr(config_class, "init_app", None)
@@ -31,6 +34,8 @@ def create_app(config_class=Config):
         init_app(app)
     validate_numeric_config(app)
     trusted_proxy_count = app.config.get("CONTROL_PLANE_TRUSTED_PROXY_COUNT", 0)
+    if trusted_proxy_count < 0:
+        raise RuntimeError("CONTROL_PLANE_TRUSTED_PROXY_COUNT cannot be negative")
     if trusted_proxy_count:
         app.wsgi_app = ProxyFix(app.wsgi_app, x_for=trusted_proxy_count)
 
@@ -63,6 +68,7 @@ def create_app(config_class=Config):
     app.cli.add_command(run_reconciler_once)
     app.cli.add_command(run_reconciler)
     app.cli.add_command(run_reconciler_loop_command)
+    app.cli.add_command(cleanup_observability)
 
     dist_dir = Path(app.static_folder or "")
 

@@ -10,6 +10,9 @@ def deployment_secret_values(deployment):
 
 def record_event(deployment, event_type, status, message, *, step=None, level="info", metadata=None):
     secret_values = deployment_secret_values(deployment)
+    event_metadata = dict(metadata or {})
+    if deployment.origin_request_id:
+        event_metadata.setdefault("origin_request_id", deployment.origin_request_id)
     db.session.add(
         DeploymentEvent(
             deployment_id=deployment.id,
@@ -18,7 +21,7 @@ def record_event(deployment, event_type, status, message, *, step=None, level="i
             level=level,
             status=status,
             message=redact_text(message, secret_values=secret_values) if message else None,
-            metadata_json=redact_sensitive_data(metadata, secret_values=secret_values),
+            metadata_json=redact_sensitive_data(event_metadata, secret_values=secret_values),
         )
     )
 

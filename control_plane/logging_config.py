@@ -2,6 +2,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from control_plane.security import redact_log_text
+
 
 STRUCTURED_FIELDS = (
     "component",
@@ -14,6 +16,11 @@ STRUCTURED_FIELDS = (
     "project_id",
     "deployment_id",
     "build_id",
+    "command_id",
+    "error_type",
+    "final_status",
+    "reconciliation_actions",
+    "poll_interval_seconds",
 )
 
 
@@ -28,7 +35,7 @@ class JsonLogFormatter(logging.Formatter):
             "level": record.levelname.lower(),
             "logger": record.name,
             "event": getattr(record, "event", None) or record.getMessage().split(" ", 1)[0],
-            "message": record.getMessage(),
+            "message": redact_log_text(record.getMessage()),
         }
         for field in STRUCTURED_FIELDS:
             value = getattr(record, field, None)
@@ -37,7 +44,7 @@ class JsonLogFormatter(logging.Formatter):
             if value is not None and field != "event":
                 payload[field] = value
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = redact_log_text(self.formatException(record.exc_info))
         return json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
 

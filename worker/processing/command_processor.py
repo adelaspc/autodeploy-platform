@@ -110,6 +110,9 @@ def attach_command_heartbeat(executor, command, *, expected_worker_id=None):
 
 
 def _record_event(deployment, event_type, status, message, *, step, level="info", metadata=None):
+    event_metadata = dict(metadata or {})
+    if deployment.origin_request_id:
+        event_metadata.setdefault("origin_request_id", deployment.origin_request_id)
     db.session.add(
         DeploymentEvent(
             deployment=deployment,
@@ -118,7 +121,7 @@ def _record_event(deployment, event_type, status, message, *, step, level="info"
             message=message,
             step=step,
             level=level,
-            metadata_json=metadata or {},
+            metadata_json=event_metadata,
         )
     )
 
@@ -130,6 +133,14 @@ def process_deployment_command(command, executor=None):
     attach_command_heartbeat(executor, command, expected_worker_id=expected_worker_id)
     command_type = command.command_type
     step = f"deploy.{command_type}"
+    current_app.logger.info(
+        "deployment_command_worker_started",
+        extra={
+            "event": "deployment_command_worker_started",
+            "request_id": command.origin_request_id,
+            "deployment_id": deployment.id,
+        },
+    )
 
     try:
         refresh_command_claim(command, expected_worker_id=expected_worker_id)
@@ -139,7 +150,7 @@ def process_deployment_command(command, executor=None):
             deployment.status,
             command.message or f"Processing deployment {command_type}",
             step=step,
-            metadata={"command_id": command.id},
+            metadata={"command_id": command.id, "origin_request_id": command.origin_request_id},
         )
         db.session.commit()
         result = executor.stop(deployment)
@@ -162,7 +173,8 @@ def process_deployment_command(command, executor=None):
                 event.get("message"),
                 step=event.get("step") or step,
                 level=event.get("level", "info"),
-                metadata=event.get("metadata_json"),
+                metadata=(event.get("metadata_json") or {})
+                | {"origin_request_id": command.origin_request_id},
             )
         terminal_event = "deployment.stopped" if command_type == "stop" else "deployment.cleanup_succeeded"
         _record_event(
@@ -171,7 +183,12 @@ def process_deployment_command(command, executor=None):
             "stopped",
             result.message,
             step=step,
-            metadata=(result.metadata or {}) | {"command_id": command.id, "log_path": result.log_path},
+            metadata=(result.metadata or {})
+            | {
+                "command_id": command.id,
+                "log_path": result.log_path,
+                "origin_request_id": command.origin_request_id,
+            },
         )
         command.status = "succeeded"
         command.active_key = None
@@ -201,7 +218,10 @@ def process_deployment_command(command, executor=None):
             command.last_error,
             step=exc.step or step,
             level="error",
-            metadata=redact_sensitive_data(exc.metadata, secret_values=secret_values),
+            metadata=redact_sensitive_data(
+                (exc.metadata or {}) | {"origin_request_id": command.origin_request_id},
+                secret_values=secret_values,
+            ),
         )
         db.session.commit()
         return deployment
@@ -211,7 +231,12 @@ def process_deployment_command(command, executor=None):
     except Exception as exc:
         current_app.logger.exception(
             "deployment_command_unexpected_failure",
-            extra={"command_id": command.id, "deployment_id": deployment.id, "command_type": command_type},
+            extra={
+                "command_id": command.id,
+                "deployment_id": deployment.id,
+                "command_type": command_type,
+                "request_id": command.origin_request_id,
+            },
         )
         command_id = command.id
         deployment_id = deployment.id
@@ -241,7 +266,11 @@ def process_deployment_command(command, executor=None):
             step=step,
             level="error",
             metadata=redact_sensitive_data(
-                {"command_id": command.id, "error_type": type(exc).__name__},
+                {
+                    "command_id": command.id,
+                    "error_type": type(exc).__name__,
+                    "origin_request_id": command.origin_request_id,
+                },
                 secret_values=secret_values,
             ),
         )
