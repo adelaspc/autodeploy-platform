@@ -168,9 +168,10 @@ def test_local_docker_executor_real_container_flow(client, tmp_path):
             f"/api/projects/{project_id}/deployments/{deployment_id}/stop",
         )
         assert stop_response.status_code == 202
-        command = process_next_pending_command(executor=executor)
-        assert command is not None
-        assert command.status == "succeeded"
+        stopped_deployment = process_next_pending_command(executor=executor)
+        assert stopped_deployment is not None
+        assert stopped_deployment.id == deployment_id
+        assert stopped_deployment.status == "stopped"
 
         stopped = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}").get_json()
         assert stopped["status"] == "stopped"
