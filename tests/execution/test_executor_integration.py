@@ -75,12 +75,20 @@ def _create_repo(repo_dir, *, health_response="ok", health_status=200):
         text=True,
         check=True,
     )
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return commit.stdout.strip()
 
 
 def test_create_repo_does_not_require_global_git_identity(tmp_path):
     repo_dir = tmp_path / "identity-independent-repo"
 
-    _create_repo(repo_dir)
+    commit_sha = _create_repo(repo_dir)
 
     commit = subprocess.run(
         ["git", "log", "-1", "--format=%an <%ae>"],
@@ -90,12 +98,19 @@ def test_create_repo_does_not_require_global_git_identity(tmp_path):
         check=True,
     )
     assert commit.stdout.strip() == "AutoDeploy Tests <autodeploy-tests@example.invalid>"
+    assert commit_sha == subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
 
 
 @pytest.mark.skipif(not _docker_available(), reason="Docker not available")
 def test_local_docker_executor_real_container_flow(client, tmp_path):
     repo_dir = tmp_path / "repo"
-    _create_repo(repo_dir)
+    commit_sha = _create_repo(repo_dir)
 
     project_response = client.post(
         "/api/projects",
@@ -116,7 +131,7 @@ def test_local_docker_executor_real_container_flow(client, tmp_path):
     deployment_response = client.post(
         f"/api/projects/{project_id}/deployments",
         json={
-            "commit_sha": "realdocker001",
+            "commit_sha": commit_sha,
             "image_name": "real-local-docker-app",
             "image_tag": "realdocker001",
             "status": "pending",
@@ -173,7 +188,7 @@ def test_local_docker_executor_real_container_flow(client, tmp_path):
 @pytest.mark.skipif(not _docker_available(), reason="Docker not available")
 def test_local_docker_executor_healthcheck_failure_persists_runtime_log(client, tmp_path):
     repo_dir = tmp_path / "repo-fail"
-    _create_repo(repo_dir, health_response="not ready", health_status=503)
+    commit_sha = _create_repo(repo_dir, health_response="not ready", health_status=503)
 
     project_response = client.post(
         "/api/projects",
@@ -194,7 +209,7 @@ def test_local_docker_executor_healthcheck_failure_persists_runtime_log(client, 
     deployment_response = client.post(
         f"/api/projects/{project_id}/deployments",
         json={
-            "commit_sha": "realdocker002",
+            "commit_sha": commit_sha,
             "image_name": "real-local-docker-fail-app",
             "image_tag": "realdocker002",
             "status": "pending",
