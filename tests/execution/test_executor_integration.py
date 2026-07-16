@@ -5,6 +5,7 @@ import textwrap
 import pytest
 
 from worker.executors.local_docker import LocalDockerExecutor
+from worker.processing.command_processor import process_next_pending_command
 from worker.processing.pipeline import process_next_pending_deployment
 
 pytestmark = pytest.mark.docker
@@ -163,12 +164,15 @@ def test_local_docker_executor_real_container_flow(client, tmp_path):
         assert apply_event["metadata_json"]["runtime_log_path"].endswith("/runtime.log")
         assert deployment["service_url"].startswith("http://127.0.0.1:")
 
-        stop_response = client.patch(
-            f"/api/projects/{project_id}/deployments/{deployment_id}",
-            json={"status": "stopped"},
+        stop_response = client.post(
+            f"/api/projects/{project_id}/deployments/{deployment_id}/stop",
         )
-        assert stop_response.status_code == 200
-        stopped = stop_response.get_json()
+        assert stop_response.status_code == 202
+        command = process_next_pending_command(executor=executor)
+        assert command is not None
+        assert command.status == "succeeded"
+
+        stopped = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}").get_json()
         assert stopped["status"] == "stopped"
         assert stopped["service_url"] is None
         stopped_event = next(event for event in stopped["events"] if event["event_type"] == "deployment.stopped")
