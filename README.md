@@ -1,6 +1,6 @@
 # AutoDeploy Control Plane
 
-[![CI](https://github.com/adelaspc/autodeploy-platform-/actions/workflows/ci.yml/badge.svg)](https://github.com/adelaspc/autodeploy-platform-/actions/workflows/ci.yml)
+[![CI](https://github.com/adelaspc/autodeploy-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/adelaspc/autodeploy-platform/actions/workflows/ci.yml)
 
 AutoDeploy is an operator-facing PaaS control plane that turns project specifications into observable, asynchronous deployments across simulated, local Docker, and Kubernetes runtimes.
 
@@ -21,27 +21,99 @@ AutoDeploy is an operator-facing PaaS control plane that turns project specifica
 
 ```mermaid
 flowchart LR
-    O[Operator / Vue console] --> A[Flask API]
-    A <--> D[(Control-plane DB)]
-    W[Worker] <--> D
-    R[Reconciler] <--> D
-    W --> G[Git repository]
-    W --> X{Executor}
-    X --> F[Fake runtime]
-    X --> L[Local Docker]
-    X --> K[Kubernetes / Helm]
-    A -. status, events, logs .-> O
+    subgraph operator["Operator layer"]
+        O[Operator]
+        UI[Vue operator console]
+        O --> UI
+    end
+
+    subgraph control["Control plane"]
+        API[Flask REST API]
+        DB[(Control-plane database)]
+        WORKER[Background worker]
+        RECON[Reconciler]
+
+        API -->|persist desired state| DB
+        DB -->|claim pending work| WORKER
+        WORKER -->|status, events and diagnostics| DB
+        RECON -.->|inspect persisted state| DB
+    end
+
+    subgraph external["External systems and runtimes"]
+        GIT[Git repository]
+        BUILD[Docker build and test]
+        REG[(Container registry)]
+        EXEC{Executor contract}
+        FAKE[Fake runtime]
+        LOCAL[Local Docker]
+
+        subgraph kubernetes["Kubernetes"]
+            MODE{Deployment mode}
+            MANIFEST[Generated manifests]
+            HELM[Generic Helm chart]
+            MODE --> MANIFEST
+            MODE --> HELM
+        end
+
+        APP[User workload]
+
+        GIT --> BUILD
+        BUILD --> REG
+        EXEC --> FAKE
+        EXEC --> LOCAL
+        EXEC --> MODE
+        LOCAL --> APP
+        MANIFEST --> APP
+        HELM --> APP
+    end
+
+    UI -->|commands and configuration| API
+    API -.->|status, events, logs and diagnostics| UI
+    WORKER -->|checkout source| GIT
+    WORKER -->|build and test image| BUILD
+    WORKER -->|runtime side effects| EXEC
+    REG -->|immutable image| MODE
+    RECON -.->|detect drift and clean up| EXEC
+
+    classDef operatorNode fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e;
+    classDef controlNode fill:#ede9fe,stroke:#6d28d9,color:#3b0764;
+    classDef dataNode fill:#fef3c7,stroke:#b45309,color:#78350f;
+    classDef runtimeNode fill:#dcfce7,stroke:#15803d,color:#14532d;
+
+    class O,UI operatorNode;
+    class API,WORKER,RECON controlNode;
+    class DB,REG dataNode;
+    class GIT,BUILD,EXEC,FAKE,LOCAL,MODE,MANIFEST,HELM,APP runtimeNode;
 ```
 
 The API records intent, the worker owns side effects, and the reconciler repairs drift. Deploy, retry, redeploy, stop, and cleanup all cross the same persisted ownership boundary. See [Architecture](docs/architecture.md) for claims, snapshots, execution, reconciliation, and runtime boundaries.
+
+## Visual architecture
+
+The simplified overview is the recommended starting point for recruiters and first-time reviewers. Select it to open the full-resolution version.
+
+[![AutoDeploy control-plane architecture overview](diagrams/autodeploy-architecture-overview.png)](diagrams/autodeploy-architecture-overview.png)
+
+**[Open the simplified architecture overview](diagrams/autodeploy-architecture-overview.png)**
+
+The detailed architecture and focused views below provide optional technical depth. Select any thumbnail to open the full-resolution version.
+
+| System view | Runtime behavior |
+| --- | --- |
+| [![Detailed AutoDeploy control-plane architecture](diagrams/autodeploy-architecture.png)](diagrams/autodeploy-architecture.png) | [![Asynchronous deployment sequence](diagrams/autodeploy-deployment-sequence.png)](diagrams/autodeploy-deployment-sequence.png) |
+| **[Detailed control-plane architecture](diagrams/autodeploy-architecture.png)** | **[Deployment sequence](diagrams/autodeploy-deployment-sequence.png)** |
+| [![Validated deployment lifecycle](diagrams/autodeploy-deployment-lifecycle.png)](diagrams/autodeploy-deployment-lifecycle.png) | [![Persisted-state reconciliation flow](diagrams/autodeploy-reconciliation-flow.png)](diagrams/autodeploy-reconciliation-flow.png) |
+| **[Deployment lifecycle](diagrams/autodeploy-deployment-lifecycle.png)** | **[Reconciliation flow](diagrams/autodeploy-reconciliation-flow.png)** |
+| [![Security controls and trust boundaries](diagrams/autodeploy-security-and-trust-boundaries.png)](diagrams/autodeploy-security-and-trust-boundaries.png) | [![Conceptual control-plane data model](diagrams/autodeploy-data-model.png)](diagrams/autodeploy-data-model.png) |
+| **[Security and trust boundaries](diagrams/autodeploy-security-and-trust-boundaries.png)** | **[Conceptual data model](diagrams/autodeploy-data-model.png)** |
 
 ## Five-minute quick start
 
 This path uses SQLite and the `fake` executor. It needs Python 3.12 and Node.js 22, but no Docker daemon, registry, MySQL, or Kubernetes cluster.
 
 ```bash
-git clone https://github.com/adelaspc/autodeploy-platform-.git
-cd autodeploy-platform-
+git clone https://github.com/adelaspc/autodeploy-platform.git
+cd autodeploy-platform
 
 python3.12 -m venv .venv
 .venv/bin/python -m pip install --upgrade pip
