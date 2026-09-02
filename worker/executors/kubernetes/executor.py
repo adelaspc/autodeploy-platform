@@ -84,6 +84,7 @@ class KubernetesExecutor(
         ingress_enabled=False,
         ingress_class_name="",
         ingress_base_domain="127.0.0.1.nip.io",
+        rollout_timeout=None,
     ):
         super().__init__(
             workspace_root=workspace_root,
@@ -116,6 +117,7 @@ class KubernetesExecutor(
         self.ingress_enabled = bool(ingress_enabled)
         self.ingress_class_name = (ingress_class_name or "").strip()
         self.ingress_base_domain = (ingress_base_domain or "").strip().strip(".")
+        self.rollout_timeout = healthcheck_timeout if rollout_timeout is None else rollout_timeout
         if self.ingress_enabled and not self.ingress_base_domain:
             raise ValueError("CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN is required when ingress is enabled")
 

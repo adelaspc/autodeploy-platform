@@ -1,11 +1,15 @@
 const TOKEN_STORAGE_KEY = "autodeploy-control-plane-token";
 
 export function storedToken() {
+  // Remove tokens saved by older versions of the UI. Tokens intentionally live
+  // only for the current browser tab/session instead of persistent local storage.
   window.localStorage.removeItem(TOKEN_STORAGE_KEY);
   return window.sessionStorage.getItem(TOKEN_STORAGE_KEY) || "";
 }
 
 export function storeToken(token) {
+  // Normalize user input so accidental surrounding whitespace is not sent as
+  // part of the Bearer token.
   const normalized = (token || "").trim();
   window.localStorage.removeItem(TOKEN_STORAGE_KEY);
   if (normalized) {
@@ -17,6 +21,10 @@ export function storeToken(token) {
 
 export async function apiRequest(path, options = {}) {
   const token = storedToken();
+
+  // Start with any caller-provided headers. Add JSON and authentication
+  // defaults only when appropriate, keeping this helper usable for GET requests
+  // and for callers that need to specify another content type.
   const headers = new Headers(options.headers || {});
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -28,6 +36,8 @@ export async function apiRequest(path, options = {}) {
   const response = await fetch(path, { ...options, headers });
   const payload = await readPayload(response);
   if (!response.ok) {
+    // Convert every non-successful HTTP response into the same Error shape so
+    // Vue components can display a message and still inspect status/payload.
     const message = payload?.error || payload?.message || `Request failed (${response.status})`;
     const error = new Error(message);
     error.status = response.status;
@@ -38,6 +48,8 @@ export async function apiRequest(path, options = {}) {
 }
 
 async function readPayload(response) {
+  // Read the body once as text: empty responses become null, JSON responses are
+  // parsed, and plain-text responses remain available in a predictable object.
   const text = await response.text();
   if (!text) {
     return null;

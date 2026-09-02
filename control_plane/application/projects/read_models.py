@@ -40,6 +40,7 @@ def registry_missing_settings():
 def platform_status_payload():
     from flask import current_app
 
+    # Keep readiness focused on whether a deployment can actually be created.
     executor = current_executor_name()
     executor_contract = executor_contract_for_name(executor)
     kubernetes_selected = executor == "kubernetes"
@@ -107,6 +108,7 @@ def platform_status_payload():
 def serialize_platform_activity_deployment(deployment):
     build = deployment.build
     project = deployment.project
+    # Errors may contain values coming from project-level environment variables.
     secret_values = secret_values_from_env_vars(project.env_vars if project else [])
     return {
         "deployment_id": deployment.id,
@@ -151,6 +153,7 @@ def normalize_activity_repository_url(value):
         return None
 
     if candidate.startswith("https://github.com/"):
+        # GitHub treats these URL variants as the same repository.
         normalized = candidate.rstrip("/")
         if normalized.endswith(".git"):
             normalized = normalized[:-4]
@@ -170,6 +173,7 @@ def serialize_project_identity(project):
 
 
 def build_deployment_activity_query(*, project_id=None, statuses=None, before_deployment_id=None):
+    # These relationships are always serialized, so load them in the same query batch.
     query = PlatformDeployment.query.options(
         selectinload(PlatformDeployment.project),
         selectinload(PlatformDeployment.build),
@@ -179,6 +183,7 @@ def build_deployment_activity_query(*, project_id=None, statuses=None, before_de
     if statuses:
         query = query.filter(PlatformDeployment.status.in_(tuple(statuses)))
     if before_deployment_id is not None:
+        # IDs provide a stable cursor when multiple records have the same timestamp.
         query = query.filter(PlatformDeployment.id < before_deployment_id)
     return query
 
@@ -189,6 +194,7 @@ def build_webhook_activity_items(
     normalized_project_repo_url=None,
     before_webhook_delivery_id=None,
 ):
+    # Repository URLs are normalized in Python, so that filter is applied after fetching.
     items = (
         WebhookDelivery.query.filter(WebhookDelivery.status.in_(tuple(statuses)))
         .order_by(WebhookDelivery.received_at.desc(), WebhookDelivery.id.desc())
@@ -237,6 +243,7 @@ def platform_activity_payload(
         latest_limit
     ).all()
 
+    # Intersecting keeps each section consistent with the caller's status filter.
     active_statuses = {"pending", "running"} & (deployment_statuses or all_statuses)
     active_query = build_deployment_activity_query(
         project_id=project_id,
@@ -357,6 +364,7 @@ def project_activity_payload(
 
     relevant_webhook_deliveries = []
     normalized_repo_url = normalize_activity_repository_url(project.repo_url)
+    # Webhook activity only applies to projects triggered by GitHub pushes.
     if include_webhooks and project.trigger == "github_push" and normalized_repo_url:
         statuses = tuple(webhook_statuses) if webhook_statuses else ("accepted", "ignored")
         relevant_webhook_deliveries = build_webhook_activity_items(
@@ -401,6 +409,7 @@ def project_activity_payload(
 
 
 def project_status_payload(project):
+    # Each query answers a separate status-card concern and only needs one row.
     latest_deployment = (
         PlatformDeployment.query.options(
             selectinload(PlatformDeployment.project),

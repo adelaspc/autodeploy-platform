@@ -7,11 +7,13 @@ from worker.execution.contracts import WorkerExecutionError
 from worker.execution.factory import create_executor
 from worker.processing.claims import (
     ClaimLostError,
+    DeploymentCancellationRequested,
     attach_claim_heartbeat,
     claim_next_pending_deployment,
     ensure_claim_owned,
     now_utc,
     persist_claim_loss,
+    persist_cancellation_acknowledgement,
     refresh_claim,
     release_deployment_claim,
     worker_id,
@@ -31,6 +33,7 @@ from worker.processing.lifecycle import (
 
 
 def process_deployment(deployment, executor=None):
+    """Run one claimed deployment through the shared build and deploy lifecycle."""
     current_app.logger.info(
         "deployment_worker_started",
         extra={
@@ -95,6 +98,8 @@ def process_deployment(deployment, executor=None):
             extra_events=build_result.events,
         )
 
+        # Testing is optional, but all executors follow the same state machine
+        # when a test command was captured with the build.
         if deployment.build.test_command:
             begin_step(
                 deployment,
@@ -201,6 +206,11 @@ def process_deployment(deployment, executor=None):
             event_type="deployment.apply_started",
             message="Worker started deployment apply step",
         )
+        deploy_target = getattr(executor, "deploy_target", None)
+        if deploy_target and deploy_target != "unknown":
+            ensure_claim_owned(deployment)
+            deployment.deploy_target = deploy_target
+            db.session.commit()
         preflight_fn = getattr(executor, "preflight_deploy", None)
         if callable(preflight_fn):
             preflight_result = preflight_fn(deployment)
@@ -268,6 +278,8 @@ def process_deployment(deployment, executor=None):
         return deployment
     except ClaimLostError as exc:
         return persist_claim_loss(deployment.id, exc)
+    except DeploymentCancellationRequested as exc:
+        return persist_cancellation_acknowledgement(deployment.id, exc)
     except WorkerExecutionError as exc:
         if exc.log_path:
             deployment.build.log_path = exc.log_path
@@ -281,6 +293,8 @@ def process_deployment(deployment, executor=None):
             return mark_failed(deployment, exc.step, exc.message, metadata=exc.metadata)
         except ClaimLostError as claim_exc:
             return persist_claim_loss(deployment.id, claim_exc)
+        except DeploymentCancellationRequested as cancellation_exc:
+            return persist_cancellation_acknowledgement(deployment.id, cancellation_exc)
     except Exception as exc:
         deployment_id = deployment.id
         current_app.logger.exception(
@@ -304,6 +318,8 @@ def process_deployment(deployment, executor=None):
             )
         except ClaimLostError as claim_exc:
             return persist_claim_loss(deployment_id, claim_exc)
+        except DeploymentCancellationRequested as cancellation_exc:
+            return persist_cancellation_acknowledgement(deployment_id, cancellation_exc)
 
 
 def process_next_pending_deployment(executor=None):

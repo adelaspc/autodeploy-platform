@@ -16,9 +16,11 @@ from worker.reconciliation.kubernetes import (
     reconcile_kubernetes_nonrunning_resources as handle_kubernetes_nonrunning_resources,
     reconcile_running_missing_kubernetes_resource as handle_running_missing_kubernetes_resource,
 )
+from worker.reconciliation.events import record_reconcile_event
 
 
 class ReconciliationContext:
+    """Reuse one executor while checking a single deployment for drift."""
     def __init__(self, deployment, *, executor_factory=create_executor_for_deployment):
         self.deployment_id = deployment.id
         self._executor_factory = executor_factory
@@ -58,15 +60,39 @@ def reconcile_kubernetes_nonrunning_resources(deployment, *, executor_factory=cr
     return handle_kubernetes_nonrunning_resources(deployment, executor_factory=executor_factory)
 
 
+def reconcile_missing_deploy_target(deployment):
+    if deployment.deploy_target:
+        return False
+    metadata = deployment.preflight_metadata_json or {}
+    recovered_target = metadata.get("deploy_target")
+    if recovered_target not in {"fake", "local-docker", "kubernetes"}:
+        return False
+
+    deployment.deploy_target = recovered_target
+    record_reconcile_event(
+        deployment,
+        "reconcile.deploy_target_recovered",
+        f"Recovered missing deployment target '{recovered_target}' from persisted preflight metadata",
+        metadata={"deploy_target": recovered_target, "source": "preflight_metadata"},
+    )
+    db.session.commit()
+    return True
+
+
 
 
 
 
 
 def reconcile_deployment(deployment):
+    # Each handler describes one repair rule. Keeping the order explicit makes
+    # the pass predictable when a deployment has more than one inconsistency.
     changes = 0
     context = ReconciliationContext(deployment, executor_factory=create_executor_for_deployment)
     if reconcile_stale_claim(deployment):
+        deployment = db.session.get(PlatformDeployment, deployment.id)
+        changes += 1
+    if reconcile_missing_deploy_target(deployment):
         deployment = db.session.get(PlatformDeployment, deployment.id)
         changes += 1
     handlers = (

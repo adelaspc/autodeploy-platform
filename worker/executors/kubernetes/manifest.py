@@ -95,28 +95,23 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
         )
 
         try:
-            rollout_result = self._run_kubectl_with_events(
-                "deploy.kubernetes.rollout",
-                self._kubectl_args(
-                    "rollout",
-                    "status",
-                    f"deployment/{deployment_name}",
-                    "--timeout",
-                    f"{self.healthcheck_timeout}s",
-                ),
-                log_path=rollout_log_path,
-                success_event=self._event(
-                    "kubernetes.rollout_succeeded",
-                    "deploying",
-                    "Kubernetes rollout completed successfully",
-                    step="deploy.kubernetes.rollout",
-                    metadata={"deployment_name": deployment_name, "namespace": self.namespace},
-                ),
-                failure_event_type="kubernetes.rollout_failed",
-                failure_step="deploy.kubernetes.rollout",
-                failure_metadata={"deployment_name": deployment_name, "namespace": self.namespace},
-                existing_events=events,
-            )
+            try:
+                rollout_result = self._run_manifest_rollout_status(
+                    deployment_name,
+                    timeout_seconds=self.rollout_timeout,
+                    log_path=rollout_log_path,
+                    existing_events=events,
+                )
+            except WorkerExecutionError as exc:
+                if not self._is_rollout_condition_timeout(exc):
+                    raise
+                rollout_result = self._run_manifest_rollout_status(
+                    deployment_name,
+                    timeout_seconds=15,
+                    log_path=logs_dir / "kubernetes-rollout-recheck.log",
+                    existing_events=events,
+                    grace_recheck=True,
+                )
         except WorkerExecutionError as exc:
             diagnostics = self._collect_rollout_diagnostics(deployment_name, logs_dir=logs_dir)
             merged_metadata = exc.metadata | diagnostics
@@ -151,6 +146,9 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
             )
             health_metadata |= self._collect_pod_runtime_metadata(
                 deployment_name, prefix="healthcheck", logs_dir=logs_dir
+            )
+            health_metadata |= self._capture_runtime_logs(
+                deployment, deployment_name, logs_dir=logs_dir
             )
         except WorkerExecutionError as exc:
             diagnostics = self._collect_healthcheck_diagnostics(
@@ -245,7 +243,67 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
             service_url=service_url,
             deploy_target=self.deploy_target,
             healthcheck_url=healthcheck_url,
+            runtime_log_path=health_metadata.get("runtime_log_path"),
         )
+
+    def _run_manifest_rollout_status(
+        self,
+        deployment_name,
+        *,
+        timeout_seconds,
+        log_path,
+        existing_events,
+        grace_recheck=False,
+    ):
+        message = (
+            "Kubernetes rollout completed during grace recheck"
+            if grace_recheck
+            else "Kubernetes rollout completed successfully"
+        )
+        return self._run_kubectl_with_events(
+            "deploy.kubernetes.rollout",
+            self._kubectl_args(
+                "rollout",
+                "status",
+                f"deployment/{deployment_name}",
+                "--timeout",
+                f"{timeout_seconds}s",
+            ),
+            log_path=log_path,
+            success_event=self._event(
+                "kubernetes.rollout_succeeded",
+                "deploying",
+                message,
+                step="deploy.kubernetes.rollout",
+                metadata={
+                    "deployment_name": deployment_name,
+                    "namespace": self.namespace,
+                    "grace_recheck": grace_recheck,
+                    "timeout_seconds": timeout_seconds,
+                },
+            ),
+            failure_event_type="kubernetes.rollout_failed",
+            failure_step="deploy.kubernetes.rollout",
+            failure_metadata={
+                "deployment_name": deployment_name,
+                "namespace": self.namespace,
+                "grace_recheck": grace_recheck,
+                "timeout_seconds": timeout_seconds,
+            },
+            existing_events=existing_events,
+        )
+
+    @staticmethod
+    def _is_rollout_condition_timeout(error):
+        text = " ".join(
+            str(value or "")
+            for value in (
+                error.message,
+                error.metadata.get("summary"),
+                " ".join(error.metadata.get("output_tail") or []),
+            )
+        ).lower()
+        return "timed out waiting for the condition" in text
 
 
     def _stop_with_manifest(self, deployment):
@@ -296,4 +354,3 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
             log_path=str(log_path),
             deploy_target=self.deploy_target,
         )
-

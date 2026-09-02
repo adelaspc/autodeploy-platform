@@ -92,7 +92,7 @@ Build and runtime log routes accept a bounded `tail_lines` parameter. Live healt
 
 - `ping` returns `200`.
 - Supported matching pushes create deployments through the normal orchestration path.
-- Unsupported events/refs, unmatched repositories, branch mismatches, and duplicate `X-GitHub-Delivery` values are persisted as ignored and return `202`.
+- Unsupported events/refs, deleted branches, unmatched repositories, branch mismatches, and duplicate `X-GitHub-Delivery` values are persisted as ignored and return `202`.
 - Delivery records retain identifiers, repository, branch, commit, status/reason, time, and a deployment ID when exactly one was created; webhook bodies and secrets are not copied into audit metadata.
 
 The webhook is intentionally not a GitHub App, general queue, or alternate deployment engine.

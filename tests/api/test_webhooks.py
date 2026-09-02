@@ -207,6 +207,59 @@ def test_github_webhook_ignores_branch_mismatch(client, app):
         assert delivery.reason == "branch_mismatch"
 
 
+def test_github_webhook_ignores_deleted_branch(client, app):
+    project_response = create_project(client, name="deleted-branch-app")
+    project_id = project_response.get_json()["id"]
+    zero_sha = "0" * 40
+    payload = {
+        "ref": "refs/heads/main",
+        "after": zero_sha,
+        "deleted": True,
+        "repository": {
+            "clone_url": "https://github.com/example/webhook-app.git",
+        },
+    }
+    body, headers = github_headers(app, payload, delivery_id="push-branch-deleted")
+
+    response = client.post("/api/webhooks/github", data=body, headers=headers)
+
+    assert response.status_code == 202
+    assert response.get_json() == {
+        "status": "ignored",
+        "reason": "branch_deleted",
+        "event": "push",
+        "delivery_id": "push-branch-deleted",
+        "repository_url": "https://github.com/example/webhook-app.git",
+        "branch": "main",
+        "commit_sha": zero_sha,
+    }
+    assert client.get(f"/api/projects/{project_id}/deployments").get_json()["items"] == []
+
+    with app.app_context():
+        delivery = WebhookDelivery.query.filter_by(delivery_id="push-branch-deleted").first()
+        assert delivery is not None
+        assert delivery.status == "ignored"
+        assert delivery.reason == "branch_deleted"
+        assert delivery.deployment_id is None
+
+
+def test_github_webhook_treats_zero_after_sha_as_deleted_branch(client, app):
+    create_project(client, name="zero-sha-deleted-branch-app")
+    payload = {
+        "ref": "refs/heads/main",
+        "after": "0" * 40,
+        "repository": {
+            "clone_url": "https://github.com/example/webhook-app.git",
+        },
+    }
+    body, headers = github_headers(app, payload, delivery_id="push-zero-sha")
+
+    response = client.post("/api/webhooks/github", data=body, headers=headers)
+
+    assert response.status_code == 202
+    assert response.get_json()["reason"] == "branch_deleted"
+
+
 def test_github_webhook_ignores_push_when_kubernetes_executor_is_not_ready(client, app):
     create_project(client, name="k8s-webhook-prereq-app", default_test_command="pytest -q")
     with app.app_context():

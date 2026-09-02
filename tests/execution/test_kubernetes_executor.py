@@ -619,6 +619,8 @@ def test_kubernetes_executor_helm_mode_deploys_with_generated_values_and_release
 
     def fake_runner(args, **kwargs):
         kubectl_commands.append(args)
+        if "logs" in args:
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="application ready\n", stderr="")
         raise AssertionError(f"Manifest-mode kubectl command should not run in helm deploy mode: {args}")
 
     executor = KubernetesExecutor(
@@ -663,10 +665,15 @@ def test_kubernetes_executor_helm_mode_deploys_with_generated_values_and_release
     assert "kubernetes.helm_deploy_started" in event_types
     assert "kubernetes.helm_deploy_succeeded" in event_types
     assert "kubernetes.healthcheck_succeeded" in event_types
-    assert len(kubectl_commands) == 1
+    assert len(kubectl_commands) == 2
     assert "get" in kubectl_commands[0]
     assert "pods" in kubectl_commands[0]
     assert "json" in kubectl_commands[0]
+    assert "logs" in kubectl_commands[1]
+    assert "deployment/paas-helm-app-production-3-generic-web-app" in kubectl_commands[1]
+    assert result.metadata["runtime_log_path"].endswith("/runtime.log")
+    assert result.runtime_log_path == result.metadata["runtime_log_path"]
+    assert "application ready" in Path(result.runtime_log_path).read_text(encoding="utf-8")
 
 
 def test_kubernetes_executor_helm_mode_failure_raises_worker_execution_error(tmp_path):
@@ -923,8 +930,10 @@ def test_kubernetes_executor_helm_mode_does_not_change_runtime_status_behavior(t
 def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, tmp_path):
     _project_id, pending = create_pending_deployment(client, name="k8s-success", test_command=None)
     commands = []
+    rollout_attempts = 0
 
     def fake_runner(args, capture_output, text, timeout, check, input=None, env=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
+        nonlocal rollout_attempts
         commands.append(args)
         if args[:2] == ["git", "clone"]:
             repo_dir = Path(args[-1])
@@ -942,6 +951,15 @@ def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, t
         if args[:4] == ["docker", "buildx", "imagetools", "inspect"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="manifest ok\n", stderr="")
         if args[:3] == ["kubectl", "--namespace", "default"]:
+            if "rollout" in args:
+                rollout_attempts += 1
+                if rollout_attempts == 1:
+                    return subprocess.CompletedProcess(
+                        args=args,
+                        returncode=1,
+                        stdout="Waiting for deployment spec update to be observed...\n",
+                        stderr="error: timed out waiting for the condition\n",
+                    )
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="kubectl ok\n", stderr="")
         raise AssertionError(f"Unexpected command: {args}")
 
@@ -977,10 +995,13 @@ def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, t
     assert "kubernetes.rollout_succeeded" in event_types
     assert "kubernetes.healthcheck_started" in event_types
     assert "kubernetes.healthcheck_succeeded" in event_types
+    rollout_event = next(event for event in deployment["events"] if event["event_type"] == "kubernetes.rollout_succeeded")
+    assert rollout_event["metadata_json"]["grace_recheck"] is True
+    assert rollout_event["metadata_json"]["timeout_seconds"] == 15
 
     assert any(command[:2] == ["docker", "push"] for command in commands)
     assert any("apply" in command for command in commands if command[0] == "kubectl")
-    assert any("rollout" in command for command in commands if command[0] == "kubectl")
+    assert len([command for command in commands if command[0] == "kubectl" and "rollout" in command]) == 2
 
 
 def test_kubernetes_executor_preflight_fails_when_referenced_resources_are_missing(tmp_path):

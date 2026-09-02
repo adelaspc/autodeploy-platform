@@ -9,6 +9,7 @@ import subprocess
 
 from worker.execution.contracts import ExecutionResult, PreflightResult, WorkerExecutionError
 from worker.executors.local_docker import LocalDockerExecutor
+from worker.processing.command_processor import claim_next_pending_command, process_next_pending_command
 import worker.processing.pipeline as worker_service
 from worker.processing.pipeline import claim_next_pending_deployment, now_utc, process_next_pending_deployment, refresh_claim
 
@@ -342,6 +343,55 @@ def test_process_next_pending_deployment_runs_to_completion(client):
     assert verify_event["metadata_json"]["skipped"] is True
 
 
+def test_stop_requested_during_processing_cancels_pipeline_before_next_step(client):
+    pending = create_pending_deployment(client, name="worker-cancelled")
+
+    class StopRequestingExecutor(OrderedExecutor):
+        def clone_repo(self, deployment):
+            result = super().clone_repo(deployment)
+            response = client.post(
+                f"/api/projects/{deployment.project_id}/deployments/{deployment.id}/stop",
+                json={"message": "Cancel the active deployment"},
+            )
+            assert response.status_code == 202
+            assert claim_next_pending_command(worker_id="stop-worker") is None
+            return result
+
+        def stop(self, deployment):
+            self.calls.append("stop")
+            return ExecutionResult(
+                "Partially created runtime resources removed",
+                deploy_target=deployment.deploy_target or "ordered",
+            )
+
+    executor = StopRequestingExecutor()
+
+    cancelled = process_next_pending_deployment(executor=executor)
+
+    assert cancelled.id == pending["id"]
+    assert cancelled.status == "cloning"
+    assert cancelled.claimed_at is None
+    assert cancelled.claimed_by is None
+    assert cancelled.last_error is None
+    assert executor.calls == ["clone_repo"]
+
+    stopped = process_next_pending_command(executor=executor)
+
+    assert stopped.id == pending["id"]
+    assert stopped.status == "stopped"
+    assert stopped.build.status == "cancelled"
+    assert stopped.build.finished_at is not None
+    assert executor.calls == ["clone_repo", "stop"]
+    payload = client.get(
+        f"/api/projects/{stopped.project_id}/deployments/{stopped.id}"
+    ).get_json()
+    event_types = [event["event_type"] for event in payload["events"]]
+    assert "deployment.cancellation_acknowledged" in event_types
+    assert "image.build_started" not in event_types
+    assert "deployment.failed" not in event_types
+    assert event_types[-2:] == ["deployment.stop_started", "deployment.stopped"]
+
+
 def test_process_next_pending_deployment_persists_helm_runtime_metadata(client):
     pending = create_pending_deployment(client, name="worker-helm")
     executor = HelmMetadataExecutor()
@@ -366,6 +416,8 @@ def test_process_next_pending_deployment_persists_preflight_failure_state(client
     create_pending_deployment(client, name="worker-preflight-fail")
 
     class PreflightFailingExecutor:
+        deploy_target = "kubernetes"
+
         def clone_repo(self, deployment):
             return ExecutionResult("Repository cloned", workspace_path=f"/tmp/test-workspaces/deployment-{deployment.id}")
 
@@ -407,6 +459,7 @@ def test_process_next_pending_deployment_persists_preflight_failure_state(client
 
     assert processed is not None
     assert processed.status == "failed"
+    assert processed.deploy_target == "kubernetes"
     assert processed.preflight_status == "failed"
     assert processed.preflight_summary == "Missing Kubernetes referenced resources: ConfigMap/demo-config"
     assert processed.preflight_metadata_json["missing_resources"] == [{"kind": "ConfigMap", "name": "demo-config"}]

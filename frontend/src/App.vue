@@ -24,7 +24,7 @@ const { projects, selectedProjectId, selectedProject, loadProjects, persistProje
 const {
   projectStatus, projectActivity, selectedDeployment, deploymentSummary, deploymentEvents, buildLog, runtimeLog,
   diagnostics, logTailLines, latestDeployments, activeDeployment, latestFailedDeployment, latestDeployment,
-  clearSelection, clearProject, loadProject, selectDeployment: selectDeploymentData, loadArtifacts,
+  clearSelection, clearProject, loadProject, selectDeployment: selectDeploymentData, loadArtifacts, stopDeploymentPolling,
 } = useDeployments(apiRequest);
 const liveHealth = useLiveHealth(apiRequest);
 const serviceReachability = liveHealth.serviceReachability;
@@ -330,7 +330,10 @@ function clearToken() {
 }
 
 onMounted(initialize);
-onBeforeUnmount(liveHealth.stop);
+onBeforeUnmount(() => {
+  liveHealth.stop();
+  stopDeploymentPolling();
+});
 </script>
 
 <template>

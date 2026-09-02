@@ -21,6 +21,14 @@ htmlcov/
 .coverage.*
 coverage.xml
 
+# Editor and operating system files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
 # Local app data
 instance/
 .runtime/

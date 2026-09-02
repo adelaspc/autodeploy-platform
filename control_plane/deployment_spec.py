@@ -22,6 +22,7 @@ PROJECT_SPEC_FIELDS = (
 
 
 def create_deployment_spec_snapshot(project, *, branch=None):
+    """Freeze the project settings that a queued deployment must use."""
     project_spec = {field: deepcopy(getattr(project, field, None)) for field in PROJECT_SPEC_FIELDS}
     if branch is not None:
         project_spec["branch"] = branch
@@ -29,6 +30,8 @@ def create_deployment_spec_snapshot(project, *, branch=None):
 
 
 def project_for_deployment(deployment):
+    # Project edits apply to future deployments only. Older records without a
+    # snapshot keep the fallback for compatibility with pre-migration data.
     snapshot = getattr(deployment, "spec_snapshot_json", None)
     if isinstance(snapshot, dict) and snapshot.get("version") == DEPLOYMENT_SPEC_VERSION:
         project_spec = snapshot.get("project")

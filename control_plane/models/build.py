@@ -6,16 +6,26 @@ from control_plane.security import redact_text, secret_values_from_env_vars
 
 class Build(db.Model):
     __tablename__ = "builds"
-    VALID_STATUSES = ("pending", "cloning", "building", "testing", "pushing_image", "succeeded", "failed")
+    VALID_STATUSES = (
+        "pending",
+        "cloning",
+        "building",
+        "testing",
+        "pushing_image",
+        "succeeded",
+        "failed",
+        "cancelled",
+    )
     VALID_REGISTRY_PUSH_STATUSES = ("skipped", "succeeded", "failed")
     STATUS_TRANSITIONS = {
-        "pending": ("cloning", "failed"),
-        "cloning": ("building", "failed"),
-        "building": ("testing", "pushing_image", "failed"),
-        "testing": ("pushing_image", "failed"),
-        "pushing_image": ("succeeded", "failed"),
+        "pending": ("cloning", "failed", "cancelled"),
+        "cloning": ("building", "failed", "cancelled"),
+        "building": ("testing", "pushing_image", "failed", "cancelled"),
+        "testing": ("pushing_image", "failed", "cancelled"),
+        "pushing_image": ("succeeded", "failed", "cancelled"),
         "succeeded": ("failed",),
         "failed": (),
+        "cancelled": (),
     }
 
     id = db.Column(db.Integer, primary_key=True)

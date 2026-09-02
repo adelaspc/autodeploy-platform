@@ -50,11 +50,13 @@ projects_bp = Blueprint("projects", __name__, url_prefix="/api/projects")
 
 @projects_bp.before_request
 def protect_projects_api():
+    # Protect all routes in this blueprint and allow users with at least the read_only role.
     return authorize_request("read_only")
 
 
 @projects_bp.get("")
 def list_projects():
+    # Return all projects, ordered from newest to oldest.
     projects = Project.query.order_by(Project.created_at.desc()).all()
     return jsonify([project.to_dict() for project in projects])
 
@@ -62,6 +64,7 @@ def list_projects():
 @projects_bp.post("")
 @require_api_role("admin")
 def create_project():
+    # Validate and create a new project, then record the operation in the audit log.
     payload = request.get_json(silent=True) or {}
     validation_error = validate_project_payload(payload)
     if validation_error:
@@ -90,17 +93,20 @@ def create_project():
 
 @projects_bp.get("/<int:project_id>")
 def get_project(project_id):
+    # Return the requested project details, or respond with 404 if it does not exist.
     return jsonify(get_project_or_404(project_id).to_dict())
 
 
 @projects_bp.get("/<int:project_id>/status")
 def get_project_status(project_id):
+    # Build a summary of the project's current state and deployments.
     project = get_project_or_404(project_id)
     return jsonify(project_status_payload(project))
 
 
 @projects_bp.get("/<int:project_id>/activity")
 def get_project_activity(project_id):
+    # Return filtered and paginated project activity based on the query parameters.
     project = get_project_or_404(project_id)
     latest_limit, error_response, status_code = parse_limit_arg("latest_limit", default=10, request=request)
     if error_response is not None:
@@ -164,6 +170,7 @@ def get_project_activity(project_id):
 @projects_bp.patch("/<int:project_id>")
 @require_api_role("admin")
 def update_project(project_id):
+    # Validate and apply partial changes to an existing project's configuration.
     project = get_project_or_404(project_id)
     payload = request.get_json(silent=True) or {}
     update_data, validation_error = validate_project_patch_payload(payload, project)
@@ -190,6 +197,7 @@ def update_project(project_id):
 @projects_bp.delete("/<int:project_id>")
 @require_api_role("admin")
 def delete_project(project_id):
+    # Delete the project and save essential information about the operation in the audit log.
     project = get_project_or_404(project_id)
     project_metadata = {
         "name": project.name,
@@ -209,6 +217,7 @@ def delete_project(project_id):
 
 @projects_bp.get("/<int:project_id>/builds")
 def list_project_builds(project_id):
+    # Return the project's complete build history in descending order.
     project = get_project_or_404(project_id)
     builds = Build.query.filter_by(project_id=project.id).order_by(Build.created_at.desc()).all()
     return jsonify([build.to_dict() for build in builds])
@@ -216,6 +225,7 @@ def list_project_builds(project_id):
 
 @projects_bp.get("/<int:project_id>/deployments")
 def list_project_deployments(project_id):
+    # Return a paginated list of project deployments, optionally filtered by status.
     project = get_project_or_404(project_id)
     limit, error_response, status_code = parse_limit_arg("limit", default=20, request=request)
     if error_response is not None:
@@ -246,6 +256,7 @@ def list_project_deployments(project_id):
 
 @projects_bp.get("/<int:project_id>/deployments/latest")
 def get_latest_project_deployment(project_id):
+    # Return the project's latest deployment, or 404 if no deployment exists.
     project = get_project_or_404(project_id)
     deployment = get_latest_project_deployment_record(project.id)
     if deployment is None:
@@ -257,6 +268,7 @@ def get_latest_project_deployment(project_id):
 @projects_bp.post("/<int:project_id>/deployments")
 @require_api_role("admin")
 def create_project_deployment(project_id):
+    # Manually create build and deployment records from the submitted data.
     project = get_project_or_404(project_id)
     payload = request.get_json(silent=True) or {}
     validation_error = validate_deployment_request_payload(payload)
@@ -294,6 +306,7 @@ def create_project_deployment(project_id):
 @projects_bp.post("/<int:project_id>/deploy")
 @require_api_role("deployer")
 def deploy_project(project_id):
+    # Resolve the requested commit and create a new deployment for the worker to process.
     project = get_project_or_404(project_id)
     payload = request.get_json(silent=True) or {}
     validation_error = validate_project_deploy_payload(payload)
@@ -339,6 +352,7 @@ def deploy_project(project_id):
 @projects_bp.post("/<int:project_id>/deployments/<int:deployment_id>/retry")
 @require_api_role("deployer")
 def retry_project_deployment(project_id, deployment_id):
+    # Create a new deployment using the selected deployment's branch and test command.
     project = get_project_or_404(project_id)
     original = get_project_deployment_or_404(project_id, deployment_id)
     deployment_prereq_error = kubernetes_deployment_prereq_error()
@@ -384,6 +398,7 @@ def retry_project_deployment(project_id, deployment_id):
 @projects_bp.post("/<int:project_id>/redeploy")
 @require_api_role("deployer")
 def redeploy_project(project_id):
+    # Create a new deployment based on the project's latest deployment configuration.
     project = get_project_or_404(project_id)
     original = get_latest_project_deployment_record(project.id)
     if original is None:
@@ -431,24 +446,28 @@ def redeploy_project(project_id):
 
 @projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>")
 def get_project_deployment(project_id, deployment_id):
+    # Return complete deployment details, including associated events.
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     return jsonify(serialize_project_deployment(deployment, include_events=True))
 
 
 @projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/summary")
 def get_project_deployment_summary(project_id, deployment_id):
+    # Return a compact summary of the selected build and deployment.
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     return jsonify(serialize_deployment_summary(deployment, branch=get_deployment_branch(deployment)))
 
 
 @projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/live-health")
 def get_project_deployment_live_health(project_id, deployment_id):
+    # Probe the deployed application's health endpoint in real time.
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     return jsonify(probe_deployment_health(deployment))
 
 
 @projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/kubernetes-diagnostics")
 def get_project_deployment_kubernetes_diagnostics(project_id, deployment_id):
+    # Return diagnostic information for a deployment running in Kubernetes.
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     diagnostics = serialize_kubernetes_diagnostics(deployment)
     if diagnostics is None:
@@ -458,6 +477,7 @@ def get_project_deployment_kubernetes_diagnostics(project_id, deployment_id):
 
 @projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/runtime-log")
 def get_project_deployment_runtime_log(project_id, deployment_id):
+    # Return a limited number of runtime log lines after safely validating the path.
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     runtime_log_path = get_runtime_log_path(deployment)
     if runtime_log_path is None:
@@ -476,6 +496,7 @@ def get_project_deployment_runtime_log(project_id, deployment_id):
 
 @projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/build-log")
 def get_project_deployment_build_log(project_id, deployment_id):
+    # Return a limited number of build log lines after safely validating the path.
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     build_log_path = get_build_log_path(deployment)
     if build_log_path is None:
@@ -493,6 +514,7 @@ def get_project_deployment_build_log(project_id, deployment_id):
 
 
 def _queue_deployment_command(project_id, deployment, command_type, *, message=None):
+    # Create or reuse an asynchronous worker command and record the request in the audit log.
     command, created = request_deployment_command(deployment, command_type, message=message)
     db.session.commit()
     record_audit_event(
@@ -514,6 +536,7 @@ def _queue_deployment_command(project_id, deployment, command_type, *, message=N
 @projects_bp.post("/<int:project_id>/deployments/<int:deployment_id>/stop")
 @require_api_role("deployer")
 def stop_project_deployment(project_id, deployment_id):
+    # Validate the request and enqueue an asynchronous command to stop the deployment.
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
@@ -536,6 +559,7 @@ def stop_project_deployment(project_id, deployment_id):
 @projects_bp.post("/<int:project_id>/deployments/<int:deployment_id>/cleanup")
 @require_api_role("deployer")
 def cleanup_project_deployment(project_id, deployment_id):
+    # Enqueue resource cleanup for a deployment that uses Kubernetes.
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     payload = request.get_json(silent=True) or {}
     if not isinstance(payload, dict):
@@ -555,6 +579,7 @@ def cleanup_project_deployment(project_id, deployment_id):
 @projects_bp.patch("/<int:project_id>/deployments/<int:deployment_id>")
 @require_api_role("admin")
 def update_project_deployment(project_id, deployment_id):
+    # Validate and apply manual deployment updates, or schedule the deployment to stop.
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     payload = request.get_json(silent=True) or {}
     update_data, validation_error = validate_deployment_patch_payload(payload, deployment)
@@ -590,6 +615,7 @@ def update_project_deployment(project_id, deployment_id):
 
 @projects_bp.get("/<int:project_id>/deployments/<int:deployment_id>/events")
 def list_project_deployment_events(project_id, deployment_id):
+    # Return all persisted events for the selected deployment in chronological order.
     deployment = get_project_deployment_or_404(project_id, deployment_id)
     events = DeploymentEvent.query.filter_by(deployment_id=deployment.id).order_by(DeploymentEvent.created_at.asc()).all()
     return jsonify([event.to_dict() for event in events])

@@ -108,15 +108,20 @@ Security checks available locally include:
 .venv/bin/pip-audit -r requirements.lock.txt
 cd frontend && npm audit --omit=dev
 make secret-scan
+make secret-scan-history
 ```
+
+`secret-scan` checks the tracked files and local untracked files that are not ignored. `secret-scan-history` checks every reachable Git revision, including secrets removed from the current working tree.
 
 ## CI job map
 
 GitHub Actions runs on pull requests and pushes to `main`:
 
+The workflow gives its `GITHUB_TOKEN` read-only access to repository contents. No CI job is allowed to modify repository content or configuration.
+
 | Job | Contract |
 | --- | --- |
-| Gitleaks | No committed secrets in the working tree |
+| Gitleaks | No detected secrets anywhere in the reachable Git history |
 | Tests | Fast Python suite and informational XML coverage |
 | Ruff | Focused Python correctness checks |
 | Frontend | Locked install, tests, and production bundle on Node 22 |

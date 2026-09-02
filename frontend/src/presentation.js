@@ -8,7 +8,7 @@ export function shortSha(value) {
 
 export function statusTone(status) {
   if (["ok", "running", "succeeded", "reachable", "healthy"].includes(status)) return "success";
-  if (["pending", "cloning", "building", "testing", "pushing_image", "deploying"].includes(status)) return "warning";
+  if (["pending", "cloning", "building", "testing", "pushing_image", "deploying", "cancelled"].includes(status)) return "warning";
   if (["failed", "degraded", "error"].includes(status)) return "danger";
   return "neutral";
 }

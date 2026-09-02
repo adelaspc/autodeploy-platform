@@ -11,6 +11,8 @@ ACTIVE_COMMAND_STATUSES = ("pending", "claimed")
 
 
 def request_deployment_command(deployment, command_type, *, message=None):
+    # Stop and cleanup cross the same database boundary as deployments. The API
+    # records the request here; a worker performs the runtime operation later.
     existing = db.session.scalar(
         select(DeploymentCommand)
         .where(
@@ -21,6 +23,7 @@ def request_deployment_command(deployment, command_type, *, message=None):
         .order_by(DeploymentCommand.requested_at.asc())
     )
     if existing is not None:
+        # Reuse active commands so repeated clicks do not schedule duplicate work.
         return existing, False
 
     command = DeploymentCommand(

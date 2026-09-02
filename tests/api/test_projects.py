@@ -120,6 +120,28 @@ def test_create_project_rejects_github_repo_url_with_extra_path_segments(client)
     assert "canonical GitHub HTTPS repository URL" in response.get_json()["error"]
 
 
+def test_create_project_rejects_github_repo_url_with_empty_path_segment(client):
+    response = create_project(
+        client,
+        name="invalid-github-empty-segment-app",
+        repo_url="https://github.com/example//repo",
+    )
+
+    assert response.status_code == 400
+    assert "canonical GitHub HTTPS repository URL" in response.get_json()["error"]
+
+
+def test_create_project_rejects_github_repo_url_with_repeated_git_suffix(client):
+    response = create_project(
+        client,
+        name="invalid-github-repeated-suffix-app",
+        repo_url="https://github.com/example/repo.git.git",
+    )
+
+    assert response.status_code == 400
+    assert "canonical GitHub HTTPS repository URL" in response.get_json()["error"]
+
+
 def test_create_project_rejects_non_github_https_repo_url(client):
     response = create_project(
         client,
@@ -826,6 +848,19 @@ def test_create_project_accepts_kubernetes_env_var_references(client):
     assert payload["env_vars"][0]["value_source"] == "configmap_key_ref"
     assert payload["env_vars"][1]["value_source"] == "secret_key_ref"
     assert payload["env_vars"][1]["is_secret"] is True
+
+
+def test_create_project_rejects_env_var_without_value_or_source(client):
+    response = create_project(
+        client,
+        name="incomplete-env-project",
+        env_vars=[{"name": "OPTIONAL_SETTING"}],
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": "Invalid env_vars[0]. Provide a literal 'value' or a supported 'value_source'"
+    }
 
 
 def test_create_project_redacts_literal_secret_env_values_in_api_payloads(client):

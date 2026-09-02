@@ -11,11 +11,13 @@ from control_plane.security import REDACTED, redact_sensitive_data
 
 
 def sanitize_audit_metadata(value):
+    # Sanitize recursively because metadata may contain nested request payloads
     if value is None:
         return None
     if isinstance(value, Mapping):
         sanitized = {}
         for key, item in value.items():
+            # Environment variables are redacted as a whole: their names and values may both expose deployment secrets
             if key == "env_vars":
                 sanitized[key] = REDACTED
             else:
@@ -54,6 +56,7 @@ def record_audit_event(
         "metadata_json": sanitized_metadata,
     }
 
+    # Audit writes are best effort and use their own short transaction so an audit failure never changes the outcome of the API operation being recorded.
     try:
         with db.engine.begin() as connection:
             connection.execute(AuditEvent.__table__.insert().values(**payload))
@@ -72,6 +75,7 @@ def record_audit_event(
 
 def list_audit_events(*, limit, before_id=None):
     query = AuditEvent.query.order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
+    # ID-based cursor pagination remains stable as newer events are inserted.
     if before_id is not None:
         query = query.filter(AuditEvent.id < before_id)
     return query.limit(limit).all()

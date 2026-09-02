@@ -136,6 +136,26 @@ def test_update_deployment_rejects_invalid_transition(client):
     assert "Invalid deployment transition" in update_response.get_json()["error"]
 
 
+def test_update_deployment_rejects_reusing_running_record_for_rollout(client):
+    project_id = create_project(client, name="immutable-running-deployment-app").get_json()["id"]
+    deployment = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "abc123def456",
+            "status": "running",
+            "build_status": "succeeded",
+        },
+    ).get_json()
+
+    response = client.patch(
+        f"/api/projects/{project_id}/deployments/{deployment['id']}",
+        json={"status": "deploying"},
+    )
+
+    assert response.status_code == 400
+    assert "Invalid deployment transition from running to deploying" in response.get_json()["error"]
+
+
 def test_update_deployment_rejects_service_url(client):
     project_response = create_project(client, name="service-url-patch-app")
     project_id = project_response.get_json()["id"]

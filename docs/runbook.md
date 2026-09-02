@@ -415,6 +415,8 @@ The chart includes RBAC for the current Kubernetes executor surface:
 - create/update/patch/delete for managed Services, Deployments, and optional Ingresses
 - read-only Events access for operator diagnostics
 
+On a successful deployment, the worker runs `kubectl logs deployment/<name> --all-containers=true --prefix=true --tail=200` and stores the redacted output as the deployment runtime-log snapshot. A logging failure does not turn a healthy rollout into a failed deployment; its error is retained in the snapshot for troubleshooting. Redeploy to capture a new snapshot, or use `kubectl logs` directly for live/current output.
+
 The default Role is intentionally scoped for manifest mode and does not grant Secret or ConfigMap mutation. Helm mode may need additional Secret mutation permissions because Helm v3 stores release metadata in Secrets by default. Enable that explicitly with:
 
 ```yaml
@@ -817,6 +819,14 @@ If MicroK8s returns `access denied`, add the user to the `microk8s` group and op
 sudo usermod -a -G microk8s "$USER"
 newgrp microk8s
 ```
+
+### Kubernetes rollout times out while the Pod later becomes ready
+
+`CONTROL_PLANE_K8S_ROLLOUT_TIMEOUT_SECONDS` controls the primary `kubectl rollout status` wait and defaults to 120 seconds. It is separate from `CONTROL_PLANE_HEALTHCHECK_TIMEOUT_SECONDS`, which controls the application HTTP healthcheck. Local or cold clusters can need most of a minute before the Deployment controller observes a new generation even when the image is already present.
+
+When Kubernetes reports `timed out waiting for the condition`, the worker performs one additional 15-second rollout check before recording failure. If that grace check also fails, inspect the persisted rollout diagnostics and Pod events for scheduling, image-pull, crash, or readiness failures rather than increasing the timeout indefinitely.
+
+The worker persists `deploy_target=kubernetes` before preflight and apply. Therefore a partial apply that eventually fails remains eligible for diagnostics, explicit cleanup, and reconciliation of leftover Deployment, Service, Ingress, or Helm resources.
 
 ### Docker build fails with `the --mount option requires BuildKit`
 

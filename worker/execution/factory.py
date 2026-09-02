@@ -59,6 +59,7 @@ def _build_kubernetes_executor():
         ingress_enabled=current_app.config.get("CONTROL_PLANE_K8S_INGRESS_ENABLED", False),
         ingress_class_name=current_app.config.get("CONTROL_PLANE_K8S_INGRESS_CLASS_NAME", ""),
         ingress_base_domain=current_app.config.get("CONTROL_PLANE_K8S_INGRESS_BASE_DOMAIN", "127.0.0.1.nip.io"),
+        rollout_timeout=current_app.config.get("CONTROL_PLANE_K8S_ROLLOUT_TIMEOUT_SECONDS", 120),
     )
 
 
@@ -67,6 +68,8 @@ def create_executor():
 
 
 def create_executor_for_deployment(deployment):
+    # Prefer the recorded target when revisiting existing work. Configuration may
+    # have changed since the deployment was originally created.
     return _create_executor_for_name(deployment.deploy_target or current_app.config.get("CONTROL_PLANE_EXECUTOR", "fake"))
 
 

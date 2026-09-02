@@ -25,6 +25,7 @@ from worker import (
 
 
 def create_app(config_class=None):
+    """Build the Flask app used by the API, worker, and reconciler processes."""
     if config_class is None or config_class is Config:
         config_class = Config.from_env()
     app = Flask(__name__, static_folder="../frontend/dist", static_url_path="")
@@ -72,6 +73,8 @@ def create_app(config_class=None):
 
     dist_dir = Path(app.static_folder or "")
 
+    # In a packaged build Flask serves the Vue app as well as the API. Unknown
+    # frontend paths fall back to index.html so client-side navigation still works.
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")
     def serve_frontend(path):

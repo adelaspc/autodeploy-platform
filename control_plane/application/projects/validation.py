@@ -34,26 +34,23 @@ def validate_healthcheck_path(value):
 
 def normalize_github_repo_url(value):
     parsed = urlparse(value)
+    # Only accept GitHub HTTPS URLs without extra URL components.
     if parsed.scheme != "https" or parsed.netloc.lower() != "github.com":
         return None
     if parsed.params or parsed.query or parsed.fragment:
         return None
 
-    path = parsed.path.rstrip("/")
-    parts = [part for part in path.split("/") if part]
-    if len(parts) != 2:
+    # The path must contain exactly an owner and a repository name.
+    path_match = re.fullmatch(r"/([^/]+)/([^/]+)/?", parsed.path)
+    if path_match is None:
         return None
 
-    owner, repo = parts
-    if not owner or not repo:
-        return None
+    owner, repo = path_match.groups()
 
     if repo.endswith(".git"):
         repo = repo[:-4]
-    if not repo:
-        return None
-
-    if "/" in owner or "/" in repo or repo.endswith(".git"):
+    # Reject empty repository names and repeated .git suffixes.
+    if not repo or repo.endswith(".git"):
         return None
 
     return f"https://github.com/{owner.lower()}/{repo.lower()}.git"
@@ -68,6 +65,7 @@ def validate_repo_url(value):
     if normalized_remote is not None:
         return None
 
+    # Local repositories are useful for development but must not reach other environments.
     app_env = (current_app.config.get("CONTROL_PLANE_ENV") or "").strip().lower()
     repo_path = Path(value)
     if app_env == "development" and repo_path.exists():
@@ -99,6 +97,7 @@ def validate_repo_relative_path(value, field_name, *, allow_dot=False):
 
 
 def validate_project_spec_fields(payload):
+    # This validation is shared by create and patch requests.
     for field_name in ("name", "branch"):
         if field_name in payload:
             string_error = validate_non_empty_string(payload[field_name], field_name)
@@ -139,6 +138,7 @@ def validate_project_spec_fields(payload):
 
 
 def normalize_project_spec_fields(payload):
+    # Work on a copy so the original request payload is not changed.
     normalized = dict(payload)
     repo_url = normalized.get("repo_url")
     if isinstance(repo_url, str):
@@ -221,6 +221,7 @@ def validate_project_patch_payload(payload, project):
         "trigger",
         "runtime",
     }
+    # Ignore fields that cannot be updated through this endpoint.
     update_data = {key: value for key, value in payload.items() if key in allowed_fields}
     if not update_data:
         return None, "Provide at least one updatable field"
@@ -242,6 +243,7 @@ def validate_project_patch_payload(payload, project):
         if not isinstance(update_data["git_secret_ref"], str):
             return None, "Invalid git_secret_ref. Expected a string"
 
+    # Validate the final auth configuration, including values already stored on the project.
     effective_git_auth_type = update_data.get("git_auth_type", project.git_auth_type)
     effective_git_secret_ref = update_data.get("git_secret_ref", project.git_secret_ref)
     if effective_git_auth_type == "token" and not effective_git_secret_ref:
@@ -264,6 +266,7 @@ def validate_project_env_vars(env_vars):
     if not isinstance(env_vars, list):
         return "Invalid env_vars. Expected a list of environment variable definitions"
 
+    # Kubernetes deployments require stricter names and secret handling.
     kubernetes_mode = kubernetes_project_validation_enabled()
     seen_names = set()
 
@@ -281,6 +284,7 @@ def validate_project_env_vars(env_vars):
         seen_names.add(name)
 
         value_source = item.get("value_source")
+        # Keep literal values compatible with payloads that predate value_source.
         if value_source is None:
             value_source = "literal" if item.get("value") is not None else None
 
@@ -297,14 +301,8 @@ def validate_project_env_vars(env_vars):
                 "'configmap_ref' and 'secret_ref' are not supported field names"
             )
 
-        if value_source is None and value is None and source_name is None and source_key is None:
-            continue
-
         if value_source is None:
-            return (
-                f"Invalid env_vars[{index}]. Provide either a literal 'value', a supported "
-                "'value_source', or a metadata-only env var definition"
-            )
+            return f"Invalid env_vars[{index}]. Provide a literal 'value' or a supported 'value_source'"
         if value_source not in VALID_ENV_VALUE_SOURCES:
             return (
                 f"Invalid env_vars[{index}]. 'value_source' must be one of: "
@@ -379,6 +377,7 @@ def validate_deployment_patch_payload(payload, deployment):
     if not update_data:
         return None, "Provide at least one updatable field: status, build_status"
 
+    # A valid status value still has to follow the deployment state machine.
     next_status = update_data.get("status")
     if next_status:
         if next_status not in PlatformDeployment.VALID_STATUSES:
@@ -399,6 +398,7 @@ def validate_deployment_patch_payload(payload, deployment):
 
 
 def resolve_effective_test_command(project, *, requested_test_command, payload_includes_test_command):
+    # An explicit request value overrides the project default, including null.
     if payload_includes_test_command:
         return requested_test_command
     return project.default_test_command
@@ -416,6 +416,7 @@ def executor_deployment_prereq_missing_settings(executor_name=None):
     missing = []
 
     for required_setting in executor_contract.required_config:
+        # Settings declared with =true must be explicitly enabled.
         if required_setting.endswith("=true"):
             config_name = required_setting[:-5]
             if not current_app.config.get(config_name, False):

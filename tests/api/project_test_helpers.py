@@ -14,7 +14,7 @@ def create_project(client, **overrides):
         "build_context": ".",
         "port": 5000,
         "healthcheck_path": "/health",
-        "env_vars": [{"name": "DATABASE_URL", "required": True}],
+        "env_vars": [{"name": "APP_ENV", "value_source": "literal", "value": "test", "is_secret": False}],
         "default_test_command": "pytest -q",
         "migration_command": "flask db upgrade",
         "cpu": "250m",

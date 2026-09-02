@@ -46,6 +46,52 @@ def test_reconciler_clears_stale_pending_claim(client, app):
         assert any(event.event_type == "reconcile.claim_cleared" for event in updated.events)
 
 
+def test_reconciler_recovers_missing_target_from_preflight_metadata(client, app, monkeypatch):
+    deployment_payload = create_deployment(
+        client,
+        name="recover-kubernetes-target",
+        status="failed",
+        build_status="failed",
+    )
+    deployment_id = deployment_payload["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.preflight_status = "succeeded"
+        deployment.preflight_metadata_json = {
+            "deploy_target": "kubernetes",
+            "namespace": "default",
+        }
+        db.session.commit()
+
+    class NoLeftoverResourcesExecutor:
+        def runtime_resource_status(self, deployment):
+            return {
+                "deployment_exists": False,
+                "service_exists": False,
+                "ingress_exists": False,
+            }
+
+        def cleanup_workspace(self, deployment):
+            return {"workspace_removed": False, "log_removed": False}
+
+    import worker.reconciliation.service as reconcile_module
+
+    monkeypatch.setattr(
+        reconcile_module,
+        "create_executor_for_deployment",
+        lambda deployment: NoLeftoverResourcesExecutor(),
+    )
+
+    with app.app_context():
+        changes = reconcile_deployments()
+        updated = db.session.get(PlatformDeployment, deployment_id)
+
+        assert changes == 1
+        assert updated.deploy_target == "kubernetes"
+        assert any(event.event_type == "reconcile.deploy_target_recovered" for event in updated.events)
+
+
 def test_reconciler_marks_running_deployment_failed_when_container_missing(client, app, monkeypatch):
     deployment_payload = create_deployment(client, name="missing-container", status="running", build_status="succeeded")
     deployment_id = deployment_payload["id"]

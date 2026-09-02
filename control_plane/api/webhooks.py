@@ -63,6 +63,12 @@ def github_branch_from_ref(ref):
     return ref[len(prefix) :]
 
 
+def github_push_deletes_branch(payload, commit_sha):
+    if payload.get("deleted") is True:
+        return True
+    return isinstance(commit_sha, str) and bool(commit_sha) and set(commit_sha) == {"0"}
+
+
 def base_github_response(*, delivery_id, event_type, repository_url=None, branch=None, commit_sha=None):
     return {
         "event": event_type or None,
@@ -220,6 +226,16 @@ def github_webhook():
             delivery_id=delivery_id,
             event_type="push",
             reason="unsupported_ref",
+            repository_url=repository_url,
+            branch=branch,
+            commit_sha=commit_sha,
+        )
+
+    if github_push_deletes_branch(payload, commit_sha):
+        return persist_ignored_delivery(
+            delivery_id=delivery_id,
+            event_type="push",
+            reason="branch_deleted",
             repository_url=repository_url,
             branch=branch,
             commit_sha=commit_sha,

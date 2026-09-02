@@ -25,7 +25,7 @@ class PlatformDeployment(db.Model):
         "testing": ("pushing_image", "failed", "stopped"),
         "pushing_image": ("deploying", "failed", "stopped"),
         "deploying": ("running", "failed", "stopped"),
-        "running": ("deploying", "failed", "stopped"),
+        "running": ("failed", "stopped"),
         "failed": ("stopped",),
         "stopped": (),
     }

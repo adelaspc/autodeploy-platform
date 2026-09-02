@@ -13,14 +13,17 @@ health_bp = Blueprint("health", __name__)
 
 @health_bp.get("/health")
 def health_check():
+    # Liveness is intentionally lightweight and public: it only proves that the HTTP process can answer requests
     return jsonify({"status": "ok"}), 200
 
 
-@health_bp.get("/health/ready")
+@health_bp.get("/health/ready") # public endpoint
 def readiness_health_check():
+    # Readiness also verifies the database because the API cannot serve its core workload without persistence
     try:
         db.session.execute(text("SELECT 1"))
     except Exception as exc:
+        # Log only the exception type and return a stable error code so database credentials or internal addresses cannot leak through the response
         current_app.logger.warning(
             "API readiness check failed",
             extra={"event": "api_readiness_failed", "error_type": type(exc).__name__},
@@ -30,9 +33,10 @@ def readiness_health_check():
     return jsonify({"status": "ok"}), 200
 
 
-@health_bp.get("/health/db")
+@health_bp.get("/health/db") # protected endpoint
 @require_api_role("read_only")
 def database_health_check():
+    # This operator-facing check exposes database reachability, so unlike the generic readiness endpoint it is protected by API authentication
     try:
         db.session.execute(text("SELECT 1"))
     except Exception as exc:
@@ -48,6 +52,7 @@ def database_health_check():
 @health_bp.get("/health/platform")
 @require_api_role("read_only")
 def platform_health_check():
+    # The read model summarizes executor, authentication, registry, and Kubernetes readiness without exposing their secret configuration values
     return jsonify(platform_status_payload()), 200
 
 
@@ -56,6 +61,7 @@ def platform_health_check():
 def observability_health_check():
     from flask import current_app
 
+    # Report the observability posture rather than sensitive values such as the metrics bearer token itself.
     log_format = (current_app.config.get("CONTROL_PLANE_LOG_FORMAT", "json") or "").strip().lower()
     return jsonify(
         {
@@ -83,6 +89,7 @@ def observability_health_check():
 def platform_activity_health_check():
     from flask import request
 
+    # Each collection has its own bounded page size because the response combines several deployment and webhook activity feeds.
     latest_limit, error_response, status_code = parse_limit_arg("latest_limit", default=10, request=request)
     if error_response is not None:
         return error_response, status_code
@@ -120,6 +127,7 @@ def platform_activity_health_check():
     )
     if error_response is not None:
         return error_response, status_code
+    # Optional filters and cursor IDs let operators narrow the feed and request older pages without results shifting when new activity is recorded.
     project_id, error_response, status_code = parse_optional_int_arg("project_id", request=request, min_value=1)
     if error_response is not None:
         return error_response, status_code

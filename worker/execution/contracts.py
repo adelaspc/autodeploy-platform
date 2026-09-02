@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ExecutionResult:
+    """Common result shape returned by every deployment executor step."""
     message: str
     metadata: dict = field(default_factory=dict)
     events: list = field(default_factory=list)
@@ -68,6 +69,7 @@ class WorkerExecutionError(Exception):
 
 
 class DeploymentExecutor:
+    """Runtime boundary shared by fake, local Docker, and Kubernetes modes."""
     deploy_target = "unknown"
     contract = ExecutorContract(
         name="unknown",

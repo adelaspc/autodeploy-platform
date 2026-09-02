@@ -2,6 +2,8 @@
 
 This repository implements a local, operator-facing PaaS control plane. It is designed as a realistic DevOps portfolio system, not as a public multi-tenant production PaaS.
 
+Start with the [simplified architecture overview](../diagrams/autodeploy-architecture-overview.png) for the primary component and ownership boundaries. The [detailed architecture diagram](../diagrams/autodeploy-architecture.png) expands the same model with executor internals, build systems, runtime modes, and reconciliation targets.
+
 ## System Context
 
 ```mermaid
@@ -55,6 +57,8 @@ sequenceDiagram
 
 Pending deployments are claimed atomically. Claims are renewed during long commands, and ownership is checked before important state writes. A lost claim stops processing without overwriting another worker's result.
 
+Stop requests are also cooperative cancellation signals. A deployment worker checks for an active stop command at step boundaries and through executor heartbeats, then releases its deployment claim without recording an execution failure. Command workers do not claim stop work while the deployment still has a live claim; after the deployment worker acknowledges cancellation, the command worker owns runtime cleanup and the final transition to `stopped`. This prevents deployment and stop workers from applying conflicting runtime side effects concurrently.
+
 Deployment execution reads a versioned project-spec snapshot stored with the deployment rather than the mutable Project row. Project edits therefore configure future deployments only. Retry preserves the original build's explicit test-command choice, including an explicit decision to disable tests.
 
 Deployment and build status changes go through their model transition methods in the API application layer, worker, command processor, and reconciler. Invalid internal transitions fail instead of silently creating an impossible lifecycle combination. Cleanup is the explicit exception that permits a failed deployment to become stopped after its runtime resources are removed.
@@ -79,6 +83,10 @@ Stop or cleanup removes Deployment, Service, and Ingress resources; Helm workloa
 ## Observability and Failure Recovery
 
 Deployment events record step-level progress for clone, build, test, push, preflight, rollout, healthcheck, stop, and cleanup. Known secret values are redacted before metadata and logs are returned.
+
+After a successful Kubernetes healthcheck, the worker captures a best-effort, 200-line snapshot from all workload containers into `runtime.log`. The same runtime-log API and console panel used by the local Docker executor expose this snapshot. It is a point-in-time capture, not a continuous log stream; Kubernetes diagnostics separately collect current and previous Pod logs when rollout or healthcheck failures occur.
+
+While the selected deployment is active, the operator console polls its summary and persisted events every two seconds. The event stream therefore advances without a page refresh through `pending`, clone, build, optional test, push, and deploy stages. Polling stops when the deployment reaches `running`, `failed`, or `stopped`, and the console reloads final logs and diagnostics once at that boundary.
 
 Application events are written as structured JSON to stdout. API completion records include request correlation, response status, and duration; worker and reconciler records use the same formatter. An optional, dedicated-token-protected `/metrics` endpoint exposes low-cardinality aggregates derived from persisted control-plane state. Metrics never use project, deployment, repository, branch, image, user, request, or error text as labels.
 

@@ -6,7 +6,7 @@ from sqlalchemy import and_, or_, select, update
 from control_plane.deployment_runtime_metadata import persist_helm_runtime_metadata
 from control_plane.deployment_spec import project_for_deployment
 from control_plane.extensions import db
-from control_plane.models import DeploymentCommand, DeploymentEvent
+from control_plane.models import DeploymentCommand, DeploymentEvent, PlatformDeployment
 from control_plane.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
 from worker.execution.contracts import WorkerExecutionError
 from worker.execution.factory import create_executor_for_deployment
@@ -42,6 +42,12 @@ def claim_next_pending_command(*, worker_id=None, claim_ttl_seconds=None):
                     DeploymentCommand.id == command_id,
                     DeploymentCommand.status.in_(("pending", "claimed")),
                     or_(DeploymentCommand.claimed_at.is_(None), DeploymentCommand.claimed_at < stale_before),
+                    DeploymentCommand.deployment.has(
+                        or_(
+                            PlatformDeployment.claimed_at.is_(None),
+                            PlatformDeployment.claimed_at < stale_before,
+                        )
+                    ),
                 )
             )
             .values(status="claimed", claimed_by=worker_name, claimed_at=claimed_at)
@@ -156,6 +162,9 @@ def process_deployment_command(command, executor=None):
         result = executor.stop(deployment)
         refresh_command_claim(command, expected_worker_id=expected_worker_id)
         deployment.transition_to("stopped")
+        if command_type == "stop" and deployment.build.status not in {"succeeded", "failed", "cancelled"}:
+            deployment.build.transition_to("cancelled")
+            deployment.build.finished_at = now_utc()
         deployment.service_url = None
         deployment.healthcheck_url = None
         deployment.container_name = None

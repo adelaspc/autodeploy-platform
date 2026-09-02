@@ -10,6 +10,7 @@ class ProjectConflictError(Exception):
 
 
 def serialize_preflight_fields(deployment):
+    # Keep the preflight fields consistent across deployment responses.
     return {
         "preflight_status": deployment.preflight_status,
         "preflight_summary": deployment.preflight_summary,
@@ -20,6 +21,7 @@ def serialize_preflight_fields(deployment):
 
 
 def build_project_from_payload(payload):
+    # Build the database model from the validated and normalized payload.
     return Project(
         name=payload["name"],
         repo_url=payload["repo_url"],
@@ -52,28 +54,33 @@ def create_project_record(payload):
 
 
 def update_project_record(project, update_data):
+    # PATCH payloads contain only the fields that need to change.
     for key, value in update_data.items():
         setattr(project, key, value)
 
     try:
         db.session.commit()
     except IntegrityError as exc:
+        # Keep database errors out of the API layer.
         db.session.rollback()
         raise ProjectConflictError("Project name must be unique") from exc
     return project
 
 
 def serialize_project_deployment(deployment, *, include_events=False):
+    # Include build details in every deployment response.
     payload = {
         **deployment.to_dict(),
         "build": deployment.build.to_dict(),
     }
+    # Events are only needed for detailed responses.
     if include_events:
         payload["events"] = [event.to_dict() for event in deployment.events]
     return payload
 
 
 def serialize_latest_project_deployment(deployment, *, branch):
+    # Return a compact view for the latest-deployment endpoint.
     build = deployment.build
     return {
         "deployment_id": deployment.id,
@@ -97,6 +104,7 @@ def serialize_triggered_deployment(
     source_deployment_field=None,
     source_deployment_id=None,
 ):
+    # Return the fields needed immediately after a deployment is queued.
     payload = {
         "deployment_id": deployment.id,
         "project_id": deployment.project_id,
@@ -106,12 +114,14 @@ def serialize_triggered_deployment(
         "image_tag": deployment.build.image_tag,
         "image_ref": deployment.build.image_ref,
     } | serialize_preflight_fields(deployment)
+    # Retry and redeploy responses also point to their source deployment.
     if source_deployment_field and source_deployment_id is not None:
         payload[source_deployment_field] = source_deployment_id
     return payload
 
 
 def list_project_deployments_query(project_id):
+    # Load related records up front to avoid extra queries during serialization.
     return (
         PlatformDeployment.query.options(
             selectinload(PlatformDeployment.project),
@@ -125,6 +135,7 @@ def list_project_deployments_query(project_id):
 
 
 def serialize_project_deployments_page(deployments, *, limit):
+    # Use the oldest item in this page as the cursor for the next request.
     return {
         "items": [serialize_project_deployment(deployment) for deployment in deployments],
         "pagination": {

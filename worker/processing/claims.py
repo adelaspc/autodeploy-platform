@@ -4,7 +4,7 @@ from flask import current_app
 from sqlalchemy import and_, or_, select, update
 
 from control_plane.extensions import db
-from control_plane.models import PlatformDeployment
+from control_plane.models import DeploymentCommand, PlatformDeployment
 from worker.processing.events import record_event
 
 
@@ -23,6 +23,21 @@ class ClaimLostError(Exception):
             "worker_id": self.worker_id,
             "current_claimed_by": self.current_claimed_by,
             "current_claimed_at": self.current_claimed_at.isoformat() if self.current_claimed_at else None,
+        }
+
+
+class DeploymentCancellationRequested(Exception):
+    def __init__(self, deployment_id, command_id, command_type):
+        super().__init__(f"Deployment {command_type} command requested while deployment was processing")
+        self.deployment_id = deployment_id
+        self.command_id = command_id
+        self.command_type = command_type
+
+    @property
+    def metadata(self):
+        return {
+            "command_id": self.command_id,
+            "command_type": self.command_type,
         }
 
 
@@ -64,6 +79,8 @@ def release_deployment_claim(deployment):
 
 
 def ensure_claim_owned(deployment, *, expected_worker_id=None):
+    # Long-running steps call this before important writes. A worker that lost
+    # ownership must stop instead of overwriting another worker's result.
     expected_worker_id = expected_worker_id or worker_id()
     claim_state = db.session.execute(
         select(
@@ -84,6 +101,21 @@ def ensure_claim_owned(deployment, *, expected_worker_id=None):
             current_claimed_at,
             current_status,
         )
+
+    cancellation = db.session.execute(
+        select(DeploymentCommand.id, DeploymentCommand.command_type)
+        .where(
+            DeploymentCommand.deployment_id == deployment.id,
+            DeploymentCommand.command_type == "stop",
+            DeploymentCommand.status.in_(("pending", "claimed")),
+            DeploymentCommand.active_key == "active",
+        )
+        .order_by(DeploymentCommand.requested_at.asc())
+        .limit(1)
+    ).one_or_none()
+    if cancellation is not None:
+        command_id, command_type = cancellation
+        raise DeploymentCancellationRequested(deployment.id, command_id, command_type)
     return current_claimed_at
 
 
@@ -134,6 +166,24 @@ def persist_claim_loss(deployment_id, error):
     return deployment
 
 
+def persist_cancellation_acknowledgement(deployment_id, error):
+    db.session.rollback()
+    deployment = db.session.get(PlatformDeployment, deployment_id)
+    if deployment is None:
+        return None
+
+    write_claim_event(
+        deployment,
+        "deployment.cancellation_acknowledged",
+        "Worker stopped deployment processing after observing a pending stop command",
+        level="warning",
+        metadata=error.metadata,
+    )
+    release_deployment_claim(deployment)
+    db.session.commit()
+    return deployment
+
+
 def claim_heartbeat(deployment, *, expected_worker_id=None):
     refresh_claim(deployment, expected_worker_id=expected_worker_id)
     db.session.commit()
@@ -151,6 +201,7 @@ def attach_claim_heartbeat(executor, deployment, *, expected_worker_id=None):
 
 
 def claim_next_pending_deployment(*, worker_id=None, claim_ttl_seconds=None):
+    """Atomically claim the oldest pending deployment available to this worker."""
     worker_name = worker_id or current_app.config.get("CONTROL_PLANE_WORKER_ID", "worker")
     claim_ttl_seconds = (
         current_app.config.get("CONTROL_PLANE_CLAIM_TTL_SECONDS", 300)

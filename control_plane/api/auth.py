@@ -8,6 +8,7 @@ from flask import current_app, jsonify, request
 from control_plane.api.request_context import error_payload
 
 
+# Higher roles inherit every permission granted to lower roles
 ROLE_LEVELS = {
     "read_only": 1,
     "deployer": 2,
@@ -69,6 +70,7 @@ def _truthy_config_value(value):
 
 def api_auth_disabled_allowed_for_config(config):
     env_name = (config.get("CONTROL_PLANE_ENV") or "").strip().lower()
+    # Disabling authentication requires both a safe local environment and an explicit opt-in
     return env_name in LOCAL_AUTH_DISABLED_ENVS and _truthy_config_value(
         config.get("CONTROL_PLANE_ALLOW_AUTH_DISABLED", False)
     )
@@ -151,12 +153,14 @@ def _extract_bearer_token():
 
 def authenticate_bearer_token(token):
     for token_config in configured_api_tokens():
+        # Use a timing-safe comparison because these values are credentials.
         if hmac.compare_digest(token, token_config.token):
             return ApiPrincipal(role=token_config.role)
     return None
 
 
 def _cached_request_principal():
+    # A blueprint-level check and a route decorator may authorize the same request; caching avoids parsing and comparing the token twice.
     cached_role = request.environ.get("control_plane.api_principal_role")
     if not cached_role:
         return None
@@ -197,6 +201,7 @@ def _record_denied_request_audit(*, reason, required_role, actor_role=None):
 
 
 def authorize_request(required_role):
+    # Local profiles may deliberately run without tokens
     if not api_auth_enabled():
         return None
 

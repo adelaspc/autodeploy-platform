@@ -1,12 +1,40 @@
 import json
 import subprocess
 
+from control_plane.deployment_spec import project_for_deployment
+from control_plane.security import redact_text, secret_values_from_env_vars
+
 
 class KubernetesDiagnosticsMixin:
     def runtime_pod_diagnostics(self, deployment, *, prefix="reconcile"):
         _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
         deployment_name = self._k8s_deployment_name(deployment)
         return self._collect_pod_diagnostics(deployment_name, prefix=prefix, logs_dir=logs_dir)
+
+    def _capture_runtime_logs(self, deployment, deployment_name, *, logs_dir):
+        """Persist a best-effort snapshot of the workload's current stdout/stderr."""
+        runtime_log_path = logs_dir / "runtime.log"
+        args = self._kubectl_args(
+            "logs",
+            f"deployment/{deployment_name}",
+            "--all-containers=true",
+            "--prefix=true",
+            "--tail=200",
+        )
+        try:
+            completed = self._execute_command(args, allow_heartbeat=False)
+            output = (completed.stdout or "") + (completed.stderr or "")
+        except Exception as exc:
+            output = str(exc)
+
+        secret_values = secret_values_from_env_vars(project_for_deployment(deployment).env_vars)
+        output = redact_text(self._sanitize_text(output), secret_values=secret_values)
+        self._write_log(runtime_log_path, args, output, redacted_values=secret_values)
+        return {
+            "runtime_log_path": str(runtime_log_path),
+            "runtime_log_summary": self._summarize_output(output),
+            "runtime_output_tail": self._tail_lines(output),
+        }
 
 
     def _collect_rollout_diagnostics(self, deployment_name, *, logs_dir):

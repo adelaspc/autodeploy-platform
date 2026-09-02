@@ -133,6 +133,9 @@ class HelmDeploymentMixin:
             health_metadata |= self._collect_pod_runtime_metadata(
                 deployment_name, prefix="healthcheck", logs_dir=logs_dir
             )
+            health_metadata |= self._capture_runtime_logs(
+                deployment, deployment_name, logs_dir=logs_dir
+            )
         except WorkerExecutionError as exc:
             diagnostics = self._collect_healthcheck_diagnostics(
                 deployment_name,
@@ -204,6 +207,7 @@ class HelmDeploymentMixin:
             service_url=service_url,
             deploy_target=self.deploy_target,
             healthcheck_url=healthcheck_url,
+            runtime_log_path=health_metadata.get("runtime_log_path"),
         )
 
 

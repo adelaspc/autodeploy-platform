@@ -141,6 +141,7 @@ def create_build_and_deployment_records(
     deployment_metadata=None,
     deployment_branch=None,
 ):
+    """Persist deployment intent without running any infrastructure commands."""
     resolved_image_name = image_name or sanitize_image_component(project.name)
     resolved_image_tag = image_tag or sanitize_image_component(commit_sha[:12])
     resolved_registry = registry if registry is not None else registry_prefix_from_config()
@@ -234,6 +235,8 @@ def create_requested_deployment(
 
 
 def create_user_facing_deployment(project, *, branch, test_command, message_prefix):
+    # Resolve the branch now and store the exact commit. This keeps queued work
+    # stable even if the branch moves before a worker picks it up.
     commit_sha = resolve_project_commit_sha(project, branch)
     return create_requested_deployment(
         project,
