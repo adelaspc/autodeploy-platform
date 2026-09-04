@@ -25,6 +25,10 @@ export function blankEnvVar() {
   return { name: "", value_source: "literal", value: "", is_secret: false, source_name: "", source_key: "" };
 }
 
+export function syncEnvVarSecretFlag(row) {
+  if (row.value_source === "secret_key_ref") row.is_secret = true;
+}
+
 export function projectToForm(project) {
   return {
     name: project.name || "",

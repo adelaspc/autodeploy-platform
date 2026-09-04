@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { blankProjectForm, projectPayload, projectToForm } from "./projectForm.js";
+import { blankProjectForm, projectPayload, projectToForm, syncEnvVarSecretFlag } from "./projectForm.js";
 
 test("blankProjectForm returns independent state", () => {
   const first = blankProjectForm();
@@ -27,6 +27,12 @@ test("projectPayload normalizes references and optional fields", () => {
   assert.deepEqual(payload.env_vars[0], {
     name: "DATABASE_URL", value_source: "secret_key_ref", source_name: "app-secret", source_key: "url", is_secret: true,
   });
+});
+
+test("selecting a secret key reference marks the environment variable as secret", () => {
+  const row = { value_source: "secret_key_ref", is_secret: false };
+  syncEnvVarSecretFlag(row);
+  assert.equal(row.is_secret, true);
 });
 
 test("projectPayload rejects incomplete environment variables", () => {

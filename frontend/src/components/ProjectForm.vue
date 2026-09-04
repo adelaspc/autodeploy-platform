@@ -1,5 +1,5 @@
 <script setup>
-import { blankEnvVar } from "../projectForm.js";
+import { blankEnvVar, syncEnvVarSecretFlag } from "../projectForm.js";
 
 const form = defineModel({ type: Object, required: true });
 defineProps({ mode: { type: String, required: true }, selectedProject: { type: Object, default: null }, saving: Boolean, deleting: Boolean });
@@ -34,7 +34,7 @@ function removeEnvVar(index) { form.value.env_vars.splice(index, 1); }
           <div v-if="form.env_vars.length" class="env-list">
             <div v-for="(envVar, index) in form.env_vars" :key="index" class="env-row">
               <label><span>Name</span><input v-model.trim="envVar.name" /></label>
-              <label><span>Source</span><select v-model="envVar.value_source"><option value="literal">literal</option><option value="configmap_key_ref">configmap key</option><option value="secret_key_ref">secret key</option></select></label>
+              <label><span>Source</span><select v-model="envVar.value_source" @change="syncEnvVarSecretFlag(envVar)"><option value="literal">literal</option><option value="configmap_key_ref">configmap key</option><option value="secret_key_ref">secret key</option></select></label>
               <label v-if="envVar.value_source === 'literal'"><span>Value</span><input v-model="envVar.value" :type="envVar.is_secret ? 'password' : 'text'" /></label>
               <label v-else><span>Source name</span><input v-model.trim="envVar.source_name" /></label>
               <label v-if="envVar.value_source !== 'literal'"><span>Source key</span><input v-model.trim="envVar.source_key" /></label>

@@ -1,5 +1,13 @@
+export function parseApiTimestamp(value) {
+  if (!value) return null;
+  if (typeof value !== "string") return new Date(value);
+
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+  return new Date(hasTimezone ? value : `${value}Z`);
+}
+
 export function formatTime(value) {
-  return value ? new Date(value).toLocaleString() : "not recorded";
+  return value ? parseApiTimestamp(value).toLocaleString() : "not recorded";
 }
 
 export function shortSha(value) {
