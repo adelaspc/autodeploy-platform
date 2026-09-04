@@ -28,4 +28,4 @@ awk -v server="$container_server" '
   { print }
 ' "$source_path" > "$dest_path"
 
-chmod 0600 "$dest_path"
+chmod 0640 "$dest_path"
