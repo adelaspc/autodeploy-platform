@@ -1,4 +1,7 @@
+"""Reconcile persisted deployments with Helm releases that use stable names."""
+
 from control_plane.extensions import db
+from control_plane.models import PlatformDeployment
 from worker.execution.contracts import WorkerExecutionError
 from worker.processing.claims import now_utc, release_deployment_claim
 from worker.reconciliation.events import record_reconcile_event
@@ -12,6 +15,25 @@ def deployment_has_helm_release_metadata(deployment):
         if isinstance(metadata, dict) and metadata.get("helm_release_name"):
             return True
     return False
+
+
+def newer_deployment_owns_workload(deployment):
+    # Helm releases are stable per project/environment, so only the newest
+    # deployment may clean one up. End the current read transaction first: on
+    # MySQL's repeatable-read isolation means a long reconciliation pass could
+    # otherwise miss a deployment created after the pass started.
+    deployment_id = deployment.id
+    project_id = deployment.project_id
+    environment = deployment.environment
+    db.session.commit()
+    return (
+        PlatformDeployment.query.filter(
+            PlatformDeployment.id > deployment_id,
+            PlatformDeployment.project_id == project_id,
+            PlatformDeployment.environment == environment,
+        ).first()
+        is not None
+    )
 
 
 def reconcile_running_missing_helm_release(deployment, *, executor_factory):
@@ -71,6 +93,8 @@ def reconcile_helm_nonrunning_release(deployment, *, executor_factory):
     if deployment.deploy_target != "kubernetes" or deployment.status not in {"failed", "stopped"}:
         return False
     if not deployment_has_helm_release_metadata(deployment):
+        return False
+    if newer_deployment_owns_workload(deployment):
         return False
 
     executor = executor_factory(deployment)

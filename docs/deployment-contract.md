@@ -89,7 +89,9 @@ Helm-managed workload naming follows this shape:
 paas-<project-slug>-<environment-slug>-<project-id-suffix>
 ```
 
-The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys upgrade the same release. Stop behavior uninstalls the release. Reconciliation uses persisted Helm release metadata for Helm-managed workloads.
+The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys upgrade the same release, while every attempt remains a separate immutable control-plane history record. Stop behavior uninstalls the release. Reconciliation uses persisted Helm release metadata for Helm-managed workloads.
+
+Because multiple history records refer to the same stable release, release ownership belongs to the newest deployment for that project and environment. Automatic reconciliation cleanup must not infer ownership from an older failed or stopped record. Before removing a leftover release, the reconciler ends its current read transaction and checks for newer deployment records against a fresh database view. If a newer record exists, the older record is historical and cannot uninstall the shared release. This also prevents a reconciliation pass that began before a redeployment was created from deleting the newly upgraded workload under MySQL repeatable-read isolation.
 
 An isolated Helm runner abstraction exists for the Helm-mode path. The Kubernetes executor can now use it for deploy and stop when `CONTROL_PLANE_K8S_DEPLOYMENT_MODE=helm`.
 
@@ -98,7 +100,7 @@ Current deployment modes:
 - `manifest`: default; keeps the existing direct manifest generation, `kubectl apply`, and `kubectl delete` behavior
 - `helm`: uses generated generic chart values, stable release naming, `HelmRunner.upgrade_install(...)` for deploy, and `HelmRunner.uninstall(...)` for stop
 
-Helm mode treats release-not-found uninstall failures as idempotently stopped. Reconciliation uses `helm status` for running Helm releases and `helm uninstall` for failed or stopped deployments with leftover releases. Kubernetes diagnostics still use direct resource and pod inspection.
+Helm mode treats release-not-found uninstall failures as idempotently stopped. Reconciliation uses `helm status` for running Helm releases. Only the newest deployment record for a project/environment workload may use `helm uninstall` to remove a leftover release; older records remain available for history and diagnostics without owning runtime cleanup. Kubernetes diagnostics still use direct resource and pod inspection.
 
 Helm-mode flow:
 

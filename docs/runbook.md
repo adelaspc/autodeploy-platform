@@ -271,7 +271,9 @@ Release names use:
 paas-<project-slug>-<environment-slug>-<project-id-suffix>
 ```
 
-The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys should upgrade the same release. Stop uninstalls the same release in Helm mode. Reconciliation uses the recorded Helm release metadata to verify and clean Helm-managed workloads.
+The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys should upgrade the same release. Stop uninstalls the same release in Helm mode. Deployment rows are immutable history records; the newest row for a project and environment owns the shared runtime release.
+
+Automatic Helm cleanup is ownership-aware. The reconciler refreshes its database view before cleanup and skips every failed or stopped record that has a newer deployment for the same project and environment. This matters with MySQL repeatable-read transactions: a reconciliation cycle may have started before a concurrent redeployment was created, but it must not uninstall the release after that redeployment upgrades it.
 
 An isolated Helm runner abstraction exists for the Helm-mode path. It only builds and executes Helm CLI commands from primitive inputs.
 
@@ -464,7 +466,7 @@ For `CONTROL_PLANE_EXECUTOR=kubernetes`, the worker still needs:
 
 Helm mode can be tuned with `CONTROL_PLANE_K8S_HELM_CHART_PATH`, `CONTROL_PLANE_K8S_HELM_BINARY`, and `CONTROL_PLANE_K8S_HELM_TIMEOUT`. `/health/platform` reports these values so operators can confirm the active workload deployment posture without shelling into the worker.
 
-Reconciliation is Helm-aware when persisted Helm release metadata is available: running deployments are checked with `helm status`, and leftover releases for failed or stopped deployments are removed with `helm uninstall`. Kubernetes failure diagnostics still use the existing direct resource and pod inspection behavior.
+Reconciliation is Helm-aware when persisted Helm release metadata is available: running deployments are checked with `helm status`, and the newest failed or stopped deployment may remove a genuinely leftover release with `helm uninstall`. Historical deployment records never clean a release referenced by a newer attempt. Kubernetes failure diagnostics still use the existing direct resource and pod inspection behavior.
 
 Only the worker and reconciler mount the kubeconfig Secret when configured; the API does not need Kubernetes credentials. Consequently, `/health/platform` reports API configuration posture rather than proving that the API Pod can read a kubeconfig. A shared PersistentVolumeClaim is used so the API can read runtime logs and diagnostics written by the worker.
 
@@ -738,7 +740,7 @@ curl -X POST http://127.0.0.1:5000/api/projects/<project-id>/deployments/<deploy
 
 Load `CONTROL_PLANE_API_TOKEN_DEPLOYER` from the trusted local `.env.secrets` file before running this command. The Authorization header may be omitted only when the selected local development profile explicitly uses `CONTROL_PLANE_ALLOW_AUTH_DISABLED=true`.
 
-The cleanup action removes the managed Deployment, Service, and Ingress in manifest mode, or uninstalls the Helm release in Helm mode. Use direct `kubectl delete` only as a break-glass fallback after identifying the exact stale resource names:
+The cleanup action removes the managed Deployment, Service, and Ingress in manifest mode. In Helm mode it uninstalls the stable project/environment release, not an attempt-specific revision. Therefore, issue an explicit Helm cleanup only for the newest deployment of that project and environment and only when the workload itself should be removed; historical records can remain in the UI without consuming Kubernetes resources. Use direct `kubectl delete` only as a break-glass fallback after identifying the exact stale resource names:
 
 ```bash
 docker compose exec control-plane-worker sh -lc \

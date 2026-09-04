@@ -44,7 +44,7 @@ Helm-managed user workloads use one stable release per project/environment workl
 paas-<project-slug>-<environment-slug>-<project-id-suffix>
 ```
 
-Redeploys upgrade the same release. Stop behavior uninstalls the release. Diagnostics and reconciliation are Helm-aware when persisted release metadata is available: running releases are checked with `helm status`, and failed or stopped deployments with leftover releases are cleaned up with `helm uninstall`.
+Redeploys upgrade the same release. Stop behavior uninstalls the release. The newest deployment record for a project/environment workload owns that shared release; older records are history, not independent Helm installations. Diagnostics and reconciliation are Helm-aware when persisted release metadata is available: running releases are checked with `helm status`, and only the newest failed or stopped record may clean up a genuinely leftover release with `helm uninstall`.
 
 ## Validation
 

@@ -465,6 +465,72 @@ def test_reconciler_removes_leftover_helm_release_from_failed_deployment(client,
         assert event.metadata_json["log_path"] == "/tmp/reconcile-helm-uninstall.log"
 
 
+def test_reconciler_preserves_helm_release_owned_by_newer_redeployment(client, app, monkeypatch):
+    deployment_payload = create_deployment(client, name="helm-redeploy-owner", status="stopped", build_status="succeeded")
+    old_deployment_id = deployment_payload["id"]
+    project_id = deployment_payload["project_id"]
+
+    new_deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={
+            "commit_sha": "def456abc123",
+            "image_name": "helm-redeploy-owner",
+            "image_tag": "def456abc123",
+            "status": "running",
+            "build_status": "succeeded",
+        },
+    )
+    new_deployment_id = new_deployment_response.get_json()["id"]
+
+    with app.app_context():
+        old_deployment = db.session.get(PlatformDeployment, old_deployment_id)
+        old_deployment.deploy_target = "kubernetes"
+        old_deployment.helm_release_name = "paas-helm-redeploy-owner-production-1"
+        old_deployment.helm_namespace = "apps"
+        old_deployment.helm_chart_path = "deploy/helm/generic-web-app"
+
+        new_deployment = db.session.get(PlatformDeployment, new_deployment_id)
+        new_deployment.deploy_target = "kubernetes"
+        # A reconciliation pass may have loaded this row while the worker was
+        # still building, before Helm identity fields were persisted.
+        new_deployment.helm_release_name = None
+        new_deployment.helm_namespace = None
+        db.session.commit()
+
+    class SharedHelmReleaseExecutor:
+        stop_calls = []
+
+        def runtime_helm_status(self, deployment):
+            return {
+                "release_exists": True,
+                "helm_release_name": deployment.helm_release_name,
+                "namespace": deployment.helm_namespace,
+                "release_status": "deployed",
+            }
+
+        def stop(self, deployment):
+            self.stop_calls.append(deployment.id)
+            raise AssertionError("active deployment's Helm release must not be removed")
+
+        def cleanup_workspace(self, deployment):
+            return {"workspace_removed": False, "log_removed": False}
+
+    executor = SharedHelmReleaseExecutor()
+    import worker.reconciliation.service as reconcile_module
+
+    monkeypatch.setattr(reconcile_module, "create_executor_for_deployment", lambda deployment: executor)
+
+    with app.app_context():
+        changes = reconcile_deployments()
+        assert changes == 0
+        assert executor.stop_calls == []
+        old_deployment = db.session.get(PlatformDeployment, old_deployment_id)
+        new_deployment = db.session.get(PlatformDeployment, new_deployment_id)
+        assert old_deployment.status == "stopped"
+        assert new_deployment.status == "running"
+        assert not any(event.event_type == "reconcile.helm_release_removed" for event in old_deployment.events)
+
+
 def test_reconciler_records_cleanup_failed_when_helm_release_removal_errors(client, app, monkeypatch):
     deployment_payload = create_deployment(client, name="helm-leftover-error", status="failed", build_status="failed")
     deployment_id = deployment_payload["id"]
