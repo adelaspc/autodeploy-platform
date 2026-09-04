@@ -4,7 +4,15 @@
 
 AutoDeploy is an operator-facing PaaS control plane that turns project specifications into observable, asynchronous deployments across simulated, local Docker, and Kubernetes runtimes.
 
-![AutoDeploy operator console](docs/assets/operator-console.png)
+## See it in action
+
+The primary demo follows one deployment from a declarative project specification through source checkout, container build and test, immutable registry push, Helm rollout, health verification, and persisted diagnostics.
+
+[![AutoDeploy happy-path Kubernetes deployment](docs/assets/demo/01-happy-path.gif)](docs/assets/demo/01-happy-path.mp4)
+
+**[Watch the happy-path deployment with playback controls (MP4, 5.0 MB)](docs/assets/demo/01-happy-path.mp4)**
+
+The [complete demo walkthrough](docs/demo.md) explains the configuration behind the recording and provides focused scenarios for configuration updates, controlled health and startup failures, Kubernetes self-healing, diagnostics, and cleanup.
 
 ## What this project demonstrates
 
@@ -208,12 +216,16 @@ Docker socket access and kubeconfig access are deliberate trusted-operator bound
 | Document | Canonical topic |
 | --- | --- |
 | [Architecture](docs/architecture.md) | System context, deployment execution, claims, reconciliation, runtime boundaries |
+| [Data model](docs/data-model.md) | Entity relationships, immutable snapshots, commands, evidence, and retention |
+| [Architectural decisions](docs/decisions/README.md) | Rationale and tradeoffs behind the queue, snapshots, executors, Helm identity, and healthchecks |
+| [Reliability and recovery](docs/reliability.md) | Processing guarantees, failure detection, recovery behavior, and operational boundaries |
 | [API reference](docs/api-reference.md) | Endpoints, roles, filters, pagination, response conventions, webhooks |
 | [Deployment model](docs/deployment.md) | Lifecycle states, valid transitions, failure reasons, deployment events |
 | [Runbook](docs/runbook.md) | Configuration, database, health, observability, Compose, Kubernetes, troubleshooting |
 | [Security](docs/security.md) | Authentication, roles, audit, correlation, secrets, Docker socket, Kubernetes RBAC |
 | [Development](docs/development.md) | Layout, setup, dependency locks, tests, builds, CI jobs |
-| [Portfolio demo](docs/demo-script.md) | Guided reviewer demonstration |
+| [Demo walkthrough](docs/demo.md) | Public, media-led tour of the Kubernetes deployment scenarios |
+| [Recording script](docs/demo-script.md) | Operator checklist and narration for recording the demo |
 | [Manual MicroK8s validation](docs/microk8s-manual-validation.md) | End-to-end local Kubernetes validation |
 | [Platform contract](docs/deployment-contract.md) | Control-plane, worker, and user-workload ownership boundaries |
 | [Application specification](docs/specs.md) | Supported project fields and workload assumptions |

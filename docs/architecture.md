@@ -27,6 +27,8 @@ flowchart LR
 
 The API persists desired work and presents status. The worker owns deployment execution. The reconciler repairs stale control-plane state and removes leftover runtime resources.
 
+The relational ownership graph is documented in the [Data model](data-model.md). The design rationale is captured in the [Architectural Decision Records](decisions/README.md), while concrete failure and recovery behavior is summarized in [Reliability and recovery](reliability.md).
+
 Stop and cleanup operations follow the same ownership boundary: the API creates a pending `DeploymentCommand`, returns `202 Accepted`, and the worker claims and executes the command. This keeps Docker, Kubernetes, and Helm calls out of HTTP request handlers.
 
 ## Deployment Flow

@@ -1,4 +1,4 @@
-## Future Enhancements
+# Future Enhancements
 
 - rollbacks
 - continuous background health monitoring with thresholds, recovery events, and retention

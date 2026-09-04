@@ -1,6 +1,17 @@
 # Portfolio Demo Script
 
-This script is a repeatable 3–5 minute walkthrough of the local PaaS control plane. The platform is the product; the selected sample application only exposes platform behavior.
+This script supports both a repeatable 3–5 minute walkthrough and the shorter scenario recordings linked from the public demo page. The platform is the product; the selected sample application only exposes platform behavior.
+
+The published recording set is:
+
+| Clip | Scenario |
+| --- | --- |
+| `01-happy-path.mp4` | Complete build, test, registry, Helm deployment, and workload verification |
+| `02-configuration-update.mp4` | Declarative configuration update and redeployment |
+| `03-healthcheck-failure.mp4` | Controlled healthcheck failure and recovery |
+| `04-crashloopbackoff.mp4` | Controlled startup failure and Kubernetes diagnostics |
+| `05-k8s-self-healing.mp4` | Pod deletion and automatic replacement |
+| `06-cleanup.mp4` | Helm resource cleanup and retained control-plane history |
 
 ## Before Recording
 
@@ -20,7 +31,9 @@ Confirm:
 - the current WSL `nip.io` domain is configured;
 - the Docker Hub workload repository is public or otherwise writable under the active plan;
 - the selected demo workload uses its configured port and healthcheck path;
+- the project uses the Kubernetes runtime and the platform reports Helm deployment mode;
 - the operator API token is kept for the current browser session in the UI if API authentication is enabled;
+- any existing deployment history shown during the take is intentional and supports the scenario;
 - no terminal, browser tab, or editor view exposes `.env.secrets`, tokens, passwords, or Secret values.
 
 Use these healthy workload variables:
@@ -36,7 +49,7 @@ DEMO_HEALTH_STATUS=healthy
 DEMO_RESPONSE_DELAY_MS=0
 ```
 
-If `DEMO_SECRET` is part of the recording, configure it through `secret_key_ref`. Do not use or show a literal secret.
+If `DEMO_SECRET` is part of the recording, select the **Secret key** source and provide only its Kubernetes resource name and key. Do not use or show a literal secret.
 
 ## Main Recording — 3–5 Minutes
 
@@ -57,12 +70,12 @@ Point out:
 
 Open the sample workload project and briefly show:
 
-- private GitHub repository with token reference, if used;
+- GitHub repository and symbolic token reference;
 - Dockerfile build context;
 - port `5000`;
 - healthcheck `/health`;
 - environment variables and Secret reference support;
-- CPU/memory fields and selected deployment mode.
+- CPU/memory fields and selected runtime.
 
 Do not spend time editing every field. The point is that application configuration is declarative and separate from control-plane configuration.
 
@@ -78,7 +91,7 @@ Narrate the persisted event sequence as it appears:
 4. tag and push the immutable commit-based image;
 5. verify the remote image with `docker buildx imagetools inspect`;
 6. validate referenced ConfigMaps and Secrets;
-7. apply the Kubernetes workload;
+7. install or upgrade the Helm-managed Kubernetes workload;
 8. wait for rollout;
 9. healthcheck through a temporary Service port-forward;
 10. persist Pod diagnostics and mark the deployment `running`.
@@ -135,9 +148,9 @@ Close with:
 
 > The project demonstrates the control-plane boundaries end to end: authenticated configuration, immutable build and registry flow, Kubernetes deployment, health and failure diagnostics, reconciliation, observability, and safe cleanup.
 
-## Optional Controlled Failure Takes
+## Focused Scenario Recordings
 
-Record these separately rather than forcing all of them into the main walkthrough.
+Record these separately rather than forcing every state transition into the main walkthrough. Keep the filenames from the recording-set table so the public walkthrough does not need to change when a clip is replaced.
 
 ### Configuration update
 
@@ -150,16 +163,6 @@ FEATURE_MESSAGE=Configuration update deployed successfully
 
 Save and redeploy. Show that the new workload receipt reflects the updated values and that deployment history retains the previous release.
 
-### Slow startup
-
-Set:
-
-```text
-DEMO_STARTUP_DELAY_SECONDS=8
-```
-
-Deploy with healthcheck path `/health`. Show the rollout waiting until the workload becomes ready. Restore `0` afterward.
-
 ### Healthcheck failure and recovery
 
 Set:
@@ -168,7 +171,7 @@ Set:
 DEMO_HEALTH_STATUS=failed
 ```
 
-Deploy and show the failed healthcheck, events, logs, and Kubernetes diagnostics. Restore `healthy` and deploy again to demonstrate recovery.
+Deploy and show the failed healthcheck, events, logs, and Kubernetes diagnostics. Helm waits for its configured rollout timeout before AutoDeploy can persist the failure, so remove most of that inactive wait from the final clip. Restore `healthy` and deploy again to demonstrate recovery as a new immutable history record.
 
 ### CrashLoopBackOff and previous logs
 
