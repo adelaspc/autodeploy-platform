@@ -1,3 +1,5 @@
+"""Authenticate GitHub webhooks and translate matching pushes into deployments."""
+
 import hashlib
 import hmac
 from urllib.parse import urlparse
@@ -129,6 +131,8 @@ def reserve_delivery_id(delivery_id, *, event_type, repository_url=None, branch=
     try:
         db.session.flush()
     except IntegrityError:
+        # Delivery IDs are GitHub's idempotency key. If concurrent requests race,
+        # the unique database constraint decides which one is accepted.
         db.session.rollback()
         existing = WebhookDelivery.query.filter_by(delivery_id=delivery_id).first()
         return existing, True
@@ -294,6 +298,8 @@ def github_webhook():
             commit_sha=commit_sha,
         )
 
+    # One repository and branch may intentionally feed more than one project.
+    # Commit all matching deployments together with the delivery record.
     deployments = []
     for project in branch_matches:
         _build, deployment, _commit_sha = create_requested_deployment(

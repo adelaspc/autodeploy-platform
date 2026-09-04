@@ -1,3 +1,5 @@
+"""Provide worker and reconciler entrypoints for one-shot and polling modes."""
+
 import signal
 import time
 

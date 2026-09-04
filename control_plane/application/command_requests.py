@@ -1,3 +1,5 @@
+"""Turn operator stop and cleanup actions into idempotent worker commands."""
+
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -11,8 +13,8 @@ ACTIVE_COMMAND_STATUSES = ("pending", "claimed")
 
 
 def request_deployment_command(deployment, command_type, *, message=None):
-    # Stop and cleanup cross the same database boundary as deployments. The API
-    # records the request here; a worker performs the runtime operation later.
+    # The API records intent only. Runtime changes stay in the worker, just like
+    # the main deployment pipeline.
     existing = db.session.scalar(
         select(DeploymentCommand)
         .where(
@@ -46,6 +48,8 @@ def request_deployment_command(deployment, command_type, *, message=None):
     try:
         db.session.flush()
     except IntegrityError:
+        # Two API requests can pass the first lookup together. The database
+        # constraint chooses the winner and both callers receive that command.
         db.session.rollback()
         existing = db.session.scalar(
             select(DeploymentCommand)

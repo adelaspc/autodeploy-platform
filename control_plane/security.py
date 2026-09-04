@@ -1,3 +1,5 @@
+"""Keep project secrets out of API responses, events, and operational logs."""
+
 from __future__ import annotations
 
 import re
@@ -83,7 +85,7 @@ def redact_text(text, *, secret_values=()):
 
 
 def redact_log_text(text, *, secret_values=()):
-    """Best-effort redaction for untrusted exception and infrastructure log text."""
+    """Redact known secret values and common credential-shaped log fragments."""
     sanitized = redact_text(text, secret_values=secret_values)
     for pattern in LOG_SECRET_PATTERNS:
         sanitized = pattern.sub(
@@ -95,6 +97,8 @@ def redact_log_text(text, *, secret_values=()):
 
 def _is_sensitive_key(key):
     lowered = str(key).strip().lower()
+    # Secret references identify Kubernetes or configuration objects; they are
+    # useful diagnostics and do not contain the referenced value.
     if lowered in NON_SENSITIVE_SECRET_REFERENCE_KEYS or lowered.endswith("_ref") or lowered.endswith("_refs"):
         return False
     return any(part in lowered for part in SENSITIVE_KEY_PARTS)

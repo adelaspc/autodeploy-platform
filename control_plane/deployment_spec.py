@@ -1,3 +1,5 @@
+"""Snapshot project settings so queued deployments do not change underneath the worker."""
+
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -22,7 +24,7 @@ PROJECT_SPEC_FIELDS = (
 
 
 def create_deployment_spec_snapshot(project, *, branch=None):
-    """Freeze the project settings that a queued deployment must use."""
+    """Freeze the project settings that this deployment must use."""
     project_spec = {field: deepcopy(getattr(project, field, None)) for field in PROJECT_SPEC_FIELDS}
     if branch is not None:
         project_spec["branch"] = branch
@@ -30,8 +32,8 @@ def create_deployment_spec_snapshot(project, *, branch=None):
 
 
 def project_for_deployment(deployment):
-    # Project edits apply to future deployments only. Older records without a
-    # snapshot keep the fallback for compatibility with pre-migration data.
+    # Project edits apply to future deployments only. The fallback keeps records
+    # created before deployment snapshots usable.
     snapshot = getattr(deployment, "spec_snapshot_json", None)
     if isinstance(snapshot, dict) and snapshot.get("version") == DEPLOYMENT_SPEC_VERSION:
         project_spec = snapshot.get("project")

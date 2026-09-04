@@ -1,3 +1,5 @@
+"""Simulate the deployment lifecycle without creating runtime infrastructure."""
+
 from control_plane.deployment_spec import project_for_deployment
 from worker.execution.contracts import DeploymentExecutor, ExecutionResult, ExecutorContract, PreflightResult
 
@@ -86,4 +88,3 @@ class FakeDeploymentExecutor(DeploymentExecutor):
 
     def cleanup_workspace(self, deployment):
         return {"workspace_removed": False, "log_removed": False}
-

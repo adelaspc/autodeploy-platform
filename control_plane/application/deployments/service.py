@@ -1,3 +1,5 @@
+"""Serialize deployment aggregates and apply operator-requested state updates."""
+
 from control_plane.application.deployments.orchestration import (
     create_build_and_deployment_records,
     create_deployment_event,

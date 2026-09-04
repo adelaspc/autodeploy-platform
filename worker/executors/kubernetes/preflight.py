@@ -1,3 +1,5 @@
+"""Fail early when Kubernetes credentials or referenced resources are unavailable."""
+
 import subprocess
 
 from control_plane.deployment_spec import project_for_deployment

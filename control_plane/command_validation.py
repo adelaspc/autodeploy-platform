@@ -1,3 +1,5 @@
+"""Reject shell command shapes outside the platform's execution contract."""
+
 from __future__ import annotations
 
 import shlex

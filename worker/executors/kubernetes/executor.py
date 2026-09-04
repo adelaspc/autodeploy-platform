@@ -1,3 +1,5 @@
+"""Compose Kubernetes source, image, Helm, manifest, and diagnostic capabilities."""
+
 from __future__ import annotations
 
 from control_plane.deployment_spec import project_for_deployment

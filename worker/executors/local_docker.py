@@ -1,3 +1,5 @@
+"""Run project workloads as local Docker containers."""
+
 from __future__ import annotations
 
 import subprocess

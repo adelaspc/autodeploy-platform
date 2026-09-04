@@ -1,3 +1,5 @@
+"""Persist the append-only timeline used for deployment diagnostics."""
+
 from datetime import datetime, timezone
 
 from control_plane.extensions import db

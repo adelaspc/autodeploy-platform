@@ -1,3 +1,5 @@
+"""Copy stable runtime identifiers from executor results onto deployments."""
+
 def persist_helm_runtime_metadata(deployment, metadata):
     if not isinstance(metadata, dict):
         return

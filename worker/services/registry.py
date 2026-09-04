@@ -1,3 +1,5 @@
+"""Push and verify images in the configured container registry."""
+
 from worker.execution.contracts import ExecutionResult, WorkerExecutionError
 
 

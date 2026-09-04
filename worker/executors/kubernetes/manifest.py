@@ -1,3 +1,5 @@
+"""Deploy and remove Kubernetes workloads using rendered manifests."""
+
 import json
 
 from control_plane.deployment_spec import project_for_deployment

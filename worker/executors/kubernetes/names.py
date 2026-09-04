@@ -1,3 +1,5 @@
+"""Derive stable, Kubernetes-safe names for project runtime resources."""
+
 import re
 
 

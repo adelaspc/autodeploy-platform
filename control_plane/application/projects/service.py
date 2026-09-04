@@ -1,3 +1,5 @@
+"""Persist project changes and serialize project-related deployment responses."""
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 

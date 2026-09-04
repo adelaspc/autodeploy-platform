@@ -1,3 +1,5 @@
+"""Translate a deployment snapshot into values for the generic web-app chart."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

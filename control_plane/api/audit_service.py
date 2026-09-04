@@ -1,3 +1,5 @@
+"""Persist a redacted audit trail without coupling it to API transactions."""
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
@@ -56,7 +58,8 @@ def record_audit_event(
         "metadata_json": sanitized_metadata,
     }
 
-    # Audit writes are best effort and use their own short transaction so an audit failure never changes the outcome of the API operation being recorded.
+    # Audit is best effort: its short transaction must not change the outcome of
+    # the API operation being recorded.
     try:
         with db.engine.begin() as connection:
             connection.execute(AuditEvent.__table__.insert().values(**payload))

@@ -1,3 +1,5 @@
+"""Coordinate deployment ownership across one or more worker processes."""
+
 from datetime import datetime, timedelta, timezone
 
 from flask import current_app
@@ -79,8 +81,8 @@ def release_deployment_claim(deployment):
 
 
 def ensure_claim_owned(deployment, *, expected_worker_id=None):
-    # Long-running steps call this before important writes. A worker that lost
-    # ownership must stop instead of overwriting another worker's result.
+    # Long-running steps check the database again before important writes. A
+    # worker that lost ownership must not overwrite the new owner's result.
     expected_worker_id = expected_worker_id or worker_id()
     claim_state = db.session.execute(
         select(
@@ -224,6 +226,8 @@ def claim_next_pending_deployment(*, worker_id=None, claim_ttl_seconds=None):
 
     claimed_at = now_utc()
     for deployment_id, previous_claimed_at, previous_claimed_by in candidate_rows:
+        # The guarded update is the actual lock. Candidate reads may race, but
+        # only one worker can change an unclaimed or expired row.
         claimed_count = db.session.execute(
             update(PlatformDeployment)
             .where(

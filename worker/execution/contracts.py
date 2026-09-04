@@ -1,9 +1,11 @@
+"""Define the result and executor contracts shared by every runtime backend."""
+
 from dataclasses import dataclass, field
 
 
 @dataclass
 class ExecutionResult:
-    """Common result shape returned by every deployment executor step."""
+    """Return step output without letting executors persist control-plane state."""
     message: str
     metadata: dict = field(default_factory=dict)
     events: list = field(default_factory=list)

@@ -1,3 +1,5 @@
+"""Clone the exact commit captured when a deployment was requested."""
+
 import base64
 import os
 import shutil

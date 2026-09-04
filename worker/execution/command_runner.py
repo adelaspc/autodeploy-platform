@@ -1,3 +1,5 @@
+"""Run external commands with retries, timeouts, redaction, and claim heartbeats."""
+
 import shlex
 import subprocess
 import tempfile

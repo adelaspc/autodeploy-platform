@@ -1,3 +1,5 @@
+"""Share Docker image and container operations across compatible executors."""
+
 import shutil
 import socket
 from datetime import datetime, timezone

@@ -1,3 +1,5 @@
+"""Verify Kubernetes Services from the worker through a temporary port-forward."""
+
 import subprocess
 
 from control_plane.deployment_spec import project_for_deployment

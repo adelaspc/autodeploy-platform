@@ -1,3 +1,5 @@
+"""Render the Kubernetes resources required by a project specification."""
+
 from control_plane.deployment_spec import project_for_deployment
 from control_plane.security import env_var_is_secret
 from worker.execution.contracts import WorkerExecutionError

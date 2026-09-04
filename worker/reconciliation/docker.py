@@ -1,3 +1,5 @@
+"""Detect running deployments whose local Docker container disappeared."""
+
 from control_plane.extensions import db
 from worker.processing.claims import now_utc, release_deployment_claim
 from worker.reconciliation.events import record_reconcile_event

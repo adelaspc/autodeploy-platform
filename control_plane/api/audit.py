@@ -1,3 +1,5 @@
+"""Expose the authenticated, paginated audit trail to operators."""
+
 from flask import Blueprint, jsonify, request
 
 from control_plane.api.audit_service import list_audit_events, serialize_audit_events_page

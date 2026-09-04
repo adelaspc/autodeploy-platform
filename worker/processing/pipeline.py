@@ -1,3 +1,5 @@
+"""Run claimed deployments through the ordered build-and-deploy pipeline."""
+
 from flask import current_app
 
 from control_plane.extensions import db
@@ -59,6 +61,8 @@ def process_deployment(deployment, executor=None):
             message="Worker started cloning repository",
         )
         clone_result = executor.clone_repo(deployment)
+        # Executor calls can take long enough for another worker to reclaim stale
+        # work. Never persist their result until ownership has been checked again.
         ensure_claim_owned(deployment)
         apply_execution_result(deployment, clone_result)
         commit_step_result(
@@ -98,8 +102,7 @@ def process_deployment(deployment, executor=None):
             extra_events=build_result.events,
         )
 
-        # Testing is optional, but all executors follow the same state machine
-        # when a test command was captured with the build.
+        # A deployment without a test command skips this state entirely.
         if deployment.build.test_command:
             begin_step(
                 deployment,

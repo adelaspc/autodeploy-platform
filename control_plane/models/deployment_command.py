@@ -1,3 +1,5 @@
+"""Persist asynchronous stop and cleanup requests for deployed workloads."""
+
 from datetime import datetime, timezone
 
 from control_plane.extensions import db
@@ -7,6 +9,8 @@ from control_plane.security import redact_text, secret_values_from_env_vars
 
 class DeploymentCommand(db.Model):
     __tablename__ = "deployment_commands"
+    # `active_key` is cleared on completion. While it is set, this constraint
+    # makes repeated operator requests reuse one active command.
     __table_args__ = (
         db.UniqueConstraint(
             "deployment_id",

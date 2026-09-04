@@ -1,3 +1,5 @@
+"""Authenticate API requests and enforce the control plane's role hierarchy."""
+
 import hmac
 import json
 from dataclasses import dataclass
@@ -8,7 +10,7 @@ from flask import current_app, jsonify, request
 from control_plane.api.request_context import error_payload
 
 
-# Higher roles inherit every permission granted to lower roles
+# Roles are ordered so one comparison covers inherited permissions.
 ROLE_LEVELS = {
     "read_only": 1,
     "deployer": 2,
@@ -70,7 +72,7 @@ def _truthy_config_value(value):
 
 def api_auth_disabled_allowed_for_config(config):
     env_name = (config.get("CONTROL_PLANE_ENV") or "").strip().lower()
-    # Disabling authentication requires both a safe local environment and an explicit opt-in
+    # A local environment name alone must never disable authentication.
     return env_name in LOCAL_AUTH_DISABLED_ENVS and _truthy_config_value(
         config.get("CONTROL_PLANE_ALLOW_AUTH_DISABLED", False)
     )
@@ -201,7 +203,8 @@ def _record_denied_request_audit(*, reason, required_role, actor_role=None):
 
 
 def authorize_request(required_role):
-    # Local profiles may deliberately run without tokens
+    # Local profiles may deliberately run without tokens; startup validation
+    # decides whether that configuration is safe.
     if not api_auth_enabled():
         return None
 

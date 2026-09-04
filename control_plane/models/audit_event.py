@@ -1,3 +1,5 @@
+"""Persist security and operator actions separately from deployment events."""
+
 from datetime import datetime, timezone
 
 from control_plane.extensions import db

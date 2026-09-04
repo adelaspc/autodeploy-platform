@@ -1,3 +1,5 @@
+"""Build and tag container images from a prepared project workspace."""
+
 from control_plane.command_validation import CommandValidationError, parse_optional_command
 from control_plane.deployment_spec import project_for_deployment
 from worker.execution.contracts import WorkerExecutionError

@@ -1,3 +1,5 @@
+"""Assemble project, platform, and activity views for the operator API."""
+
 from sqlalchemy.orm import selectinload
 
 from control_plane.api.auth import api_auth_disabled_allowed_for_config, api_auth_enabled, configured_api_roles

@@ -1,3 +1,5 @@
+"""Wrap Helm commands with consistent namespace, timeout, and error handling."""
+
 import subprocess
 from dataclasses import dataclass
 

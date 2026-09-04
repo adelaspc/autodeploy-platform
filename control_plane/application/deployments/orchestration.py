@@ -1,3 +1,5 @@
+"""Create immutable deployment requests for the background worker."""
+
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
@@ -76,6 +78,8 @@ def git_auth_environment(project):
     if not repo_url.startswith("https://github.com/"):
         raise ValueError("Token-based git auth currently supports only https://github.com/ repository URLs")
 
+    # Pass the token through Git's process environment so it never becomes part
+    # of the repository URL or the persisted deployment specification.
     auth_header = "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
     env = os.environ.copy()
     env.update(
@@ -141,7 +145,7 @@ def create_build_and_deployment_records(
     deployment_metadata=None,
     deployment_branch=None,
 ):
-    """Persist deployment intent without running any infrastructure commands."""
+    """Persist a build and its deployment as one unit of work for the worker."""
     resolved_image_name = image_name or sanitize_image_component(project.name)
     resolved_image_tag = image_tag or sanitize_image_component(commit_sha[:12])
     resolved_registry = registry if registry is not None else registry_prefix_from_config()
@@ -162,6 +166,8 @@ def create_build_and_deployment_records(
         test_command=test_command,
     )
     db.session.add(build)
+    # The deployment references this build, so obtain its ID without committing
+    # either record separately.
     db.session.flush()
 
     deployment = PlatformDeployment(
@@ -188,6 +194,8 @@ def create_build_and_deployment_records(
 
 
 def get_deployment_branch(deployment):
+    # Snapshots are authoritative. Event metadata is only a compatibility path
+    # for deployments created before snapshots were introduced.
     if deployment.spec_snapshot_json:
         return project_for_deployment(deployment).branch
     for event in deployment.events:

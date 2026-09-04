@@ -1,3 +1,5 @@
+"""Emit structured logs with request and deployment correlation fields."""
+
 import json
 import logging
 from datetime import datetime, timezone

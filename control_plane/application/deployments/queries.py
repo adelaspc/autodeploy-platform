@@ -1,3 +1,5 @@
+"""Load deployment aggregates with the relationships required by API services."""
+
 from flask import abort
 from sqlalchemy.orm import selectinload
 

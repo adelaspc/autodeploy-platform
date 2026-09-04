@@ -1,3 +1,5 @@
+"""Parse shared pagination and filtering parameters at the HTTP boundary."""
+
 from flask import jsonify
 
 

@@ -1,3 +1,5 @@
+"""Create runtime executors from current configuration or persisted deployment state."""
+
 from flask import current_app
 
 
@@ -68,8 +70,8 @@ def create_executor():
 
 
 def create_executor_for_deployment(deployment):
-    # Prefer the recorded target when revisiting existing work. Configuration may
-    # have changed since the deployment was originally created.
+    # Reconciliation and cleanup must return to the original runtime even if the
+    # platform executor changed after this deployment was created.
     return _create_executor_for_name(deployment.deploy_target or current_app.config.get("CONTROL_PLANE_EXECUTOR", "fake"))
 
 

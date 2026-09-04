@@ -1,3 +1,5 @@
+"""Load control-plane settings and validate combinations required at startup."""
+
 import os
 import socket
 from pathlib import Path

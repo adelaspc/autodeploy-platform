@@ -1,3 +1,5 @@
+"""Persist deployment state, runtime identity, and worker ownership."""
+
 from datetime import datetime, timezone
 
 from control_plane.extensions import db
@@ -18,6 +20,8 @@ class PlatformDeployment(db.Model):
         "failed",
         "stopped",
     )
+    # Statuses move forward through the pipeline. Runtime cleanup is represented
+    # by `stopped`, while failures remain visible as deployment history.
     STATUS_TRANSITIONS = {
         "pending": ("cloning", "failed", "stopped"),
         "cloning": ("building", "failed", "stopped"),

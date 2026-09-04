@@ -1,3 +1,5 @@
+"""Track GitHub delivery IDs so webhook processing remains idempotent."""
+
 from datetime import datetime, timezone
 
 from control_plane.extensions import db

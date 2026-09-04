@@ -1,3 +1,5 @@
+"""Build safe operator-facing views from deployment history and local logs."""
+
 from collections import deque
 from pathlib import Path
 
@@ -43,6 +45,8 @@ def recent_deployment_events(deployment, *, limit=5):
 
 
 def latest_meaningful_event(deployment):
+    # Claim and reconciliation events are useful diagnostics, but they should not
+    # replace the latest pipeline action in the deployment summary.
     ignored_prefixes = ("claim_", "reconcile.")
     for event in sorted(deployment.events, key=lambda item: (item.created_at, item.id or 0), reverse=True):
         if event.event_type.startswith(ignored_prefixes):
@@ -59,6 +63,8 @@ def is_safe_log_path(path):
             current_app.instance_path,
         }
     ]
+    # Paths come from persisted executor metadata. Resolve them before reading so
+    # a crafted path cannot escape the controlled log directories.
     resolved = path.resolve()
     return any(root == resolved or root in resolved.parents for root in allowed_roots)
 

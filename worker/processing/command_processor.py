@@ -1,3 +1,5 @@
+"""Claim and execute asynchronous stop or cleanup commands."""
+
 from datetime import datetime, timedelta, timezone
 
 from flask import current_app
@@ -35,6 +37,8 @@ def claim_next_pending_command(*, worker_id=None, claim_ttl_seconds=None):
 
     for command_id in command_ids:
         claimed_at = now_utc()
+        # A command cannot run while another worker owns its deployment. This
+        # prevents stop and cleanup from racing the main deployment pipeline.
         claimed = db.session.execute(
             update(DeploymentCommand)
             .where(
@@ -200,6 +204,8 @@ def process_deployment_command(command, executor=None):
             },
         )
         command.status = "succeeded"
+        # Releasing `active_key` allows a later request of the same type while
+        # preserving this command as history.
         command.active_key = None
         command.claimed_by = None
         command.claimed_at = None

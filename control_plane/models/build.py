@@ -1,3 +1,5 @@
+"""Persist source and image-build state independently from runtime deployment state."""
+
 from datetime import datetime, timezone
 
 from control_plane.extensions import db
@@ -17,6 +19,8 @@ class Build(db.Model):
         "cancelled",
     )
     VALID_REGISTRY_PUSH_STATUSES = ("skipped", "succeeded", "failed")
+    # A successful image may later be marked failed if deployment or runtime
+    # reconciliation proves that the overall artifact is no longer usable.
     STATUS_TRANSITIONS = {
         "pending": ("cloning", "failed", "cancelled"),
         "cloning": ("building", "failed", "cancelled"),

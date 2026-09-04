@@ -1,3 +1,5 @@
+"""Record sanitized executor and lifecycle events for operator diagnostics."""
+
 from control_plane.extensions import db
 from control_plane.deployment_spec import project_for_deployment
 from control_plane.models import DeploymentEvent

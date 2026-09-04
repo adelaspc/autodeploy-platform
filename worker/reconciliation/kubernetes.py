@@ -1,3 +1,5 @@
+"""Reconcile manifest-managed deployments with their Kubernetes resources."""
+
 from flask import current_app
 
 from control_plane.extensions import db

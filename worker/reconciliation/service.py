@@ -1,3 +1,5 @@
+"""Compare persisted deployment state with runtime state and repair safe drift."""
+
 from __future__ import annotations
 
 from flask import current_app
@@ -21,6 +23,7 @@ from worker.reconciliation.events import record_reconcile_event
 
 class ReconciliationContext:
     """Reuse one executor while checking a single deployment for drift."""
+
     def __init__(self, deployment, *, executor_factory=create_executor_for_deployment):
         self.deployment_id = deployment.id
         self._executor_factory = executor_factory
@@ -85,8 +88,8 @@ def reconcile_missing_deploy_target(deployment):
 
 
 def reconcile_deployment(deployment):
-    # Each handler describes one repair rule. Keeping the order explicit makes
-    # the pass predictable when a deployment has more than one inconsistency.
+    # Earlier repairs may change the record consumed by later checks, so reload
+    # after every change and keep the rule order explicit.
     changes = 0
     context = ReconciliationContext(deployment, executor_factory=create_executor_for_deployment)
     if reconcile_stale_claim(deployment):

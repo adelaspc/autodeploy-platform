@@ -1,3 +1,5 @@
+"""Release expired deployment claims so unfinished work can be retried."""
+
 from datetime import timedelta
 
 from flask import current_app

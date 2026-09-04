@@ -1,3 +1,5 @@
+"""Attach one correlation ID to each request, response, event, and audit record."""
+
 import re
 from time import perf_counter
 from uuid import uuid4

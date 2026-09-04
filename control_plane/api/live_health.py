@@ -1,3 +1,5 @@
+"""Probe the live runtime behind a deployment without changing persisted state."""
+
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit

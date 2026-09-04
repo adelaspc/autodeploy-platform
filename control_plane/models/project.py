@@ -1,3 +1,5 @@
+"""Persist the reusable project specification used to create deployments."""
+
 from datetime import datetime, timezone
 
 from control_plane.extensions import db

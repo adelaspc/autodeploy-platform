@@ -1,3 +1,5 @@
+"""Remove runtime artifacts left behind by failed deployments."""
+
 from control_plane.extensions import db
 from worker.execution.contracts import WorkerExecutionError
 from worker.reconciliation.events import record_reconcile_event

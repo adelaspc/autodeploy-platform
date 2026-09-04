@@ -1,3 +1,5 @@
+"""Remove disposable diagnostics without erasing deployment history."""
+
 from __future__ import annotations
 
 import shutil
@@ -34,6 +36,8 @@ def old_terminal_deployments(cutoff):
 def safe_deployment_workspace(deployment):
     root = Path(current_app.config.get("CONTROL_PLANE_WORKSPACE_ROOT", "/tmp/paas-workspaces")).resolve()
     candidate = (root / f"project-{deployment.project_id}" / f"deployment-{deployment.id}").resolve()
+    # Keep cleanup confined to the configured workspace tree even if path
+    # construction changes later.
     if root not in candidate.parents:
         return None
     return candidate
@@ -67,6 +71,8 @@ def cleanup_observability_data(*, older_than_days, apply=False, include_audit_ev
         "audit_events_removed": 0,
         "errors": [],
     }
+    # Dry-run is the default because workspace deletion cannot be recovered from
+    # the database.
     if not apply:
         return result
 

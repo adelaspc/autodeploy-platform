@@ -1,3 +1,5 @@
+"""Expose bounded operational counters in Prometheus text format."""
+
 import hmac
 from datetime import timezone
 

@@ -1,3 +1,5 @@
+"""Apply pipeline results while keeping deployment, build, and event state aligned."""
+
 from control_plane.deployment_runtime_metadata import persist_helm_runtime_metadata
 from control_plane.extensions import db
 from control_plane.security import redact_sensitive_data, redact_text
@@ -176,6 +178,8 @@ def mark_failed(deployment, step, message, *, metadata=None):
         )
     ensure_claim_owned(deployment)
     refresh_claim(deployment)
+    # Failures often contain command output. Redact once before copying the same
+    # information into models and operator-visible events.
     secret_values = deployment_secret_values(deployment)
     sanitized_message = redact_text(message, secret_values=secret_values)
     sanitized_metadata = redact_sensitive_data(metadata, secret_values=secret_values)

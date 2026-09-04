@@ -1,3 +1,5 @@
+"""Implement Kubernetes deployment and cleanup through the bundled Helm chart."""
+
 import json
 
 from control_plane.deployment_spec import project_for_deployment
@@ -124,6 +126,8 @@ class HelmDeploymentMixin:
             )
         )
 
+        # Health checks use a temporary Service port-forward. The public ingress
+        # may depend on local DNS or routing that is not available to the worker.
         try:
             health_metadata = self._port_forward_healthcheck(
                 deployment,
@@ -371,6 +375,8 @@ class HelmDeploymentMixin:
         return f"{release_name}-generic-web-app"[:63].rstrip("-")
 
     def _helm_release_name_for_deployment(self, deployment):
+        # Prefer the recorded name so later naming changes do not orphan existing
+        # releases. Event metadata covers deployments created before the column.
         persisted_release_name = getattr(deployment, "helm_release_name", None)
         if persisted_release_name:
             return str(persisted_release_name)

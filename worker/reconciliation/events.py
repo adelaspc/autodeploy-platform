@@ -1,3 +1,5 @@
+"""Record reconciliation decisions in the deployment timeline."""
+
 from worker.processing.events import record_event
 
 

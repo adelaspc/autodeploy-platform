@@ -1,3 +1,5 @@
+"""Expose process, database, platform-readiness, and activity health views."""
+
 from flask import Blueprint, current_app, jsonify
 from sqlalchemy import text
 
@@ -13,17 +15,19 @@ health_bp = Blueprint("health", __name__)
 
 @health_bp.get("/health")
 def health_check():
-    # Liveness is intentionally lightweight and public: it only proves that the HTTP process can answer requests
+    # Liveness stays independent of downstream services so an orchestrator can
+    # distinguish a dead process from a temporarily unavailable database.
     return jsonify({"status": "ok"}), 200
 
 
 @health_bp.get("/health/ready") # public endpoint
 def readiness_health_check():
-    # Readiness also verifies the database because the API cannot serve its core workload without persistence
+    # Readiness includes the database because the API cannot serve its core work
+    # without persistence.
     try:
         db.session.execute(text("SELECT 1"))
     except Exception as exc:
-        # Log only the exception type and return a stable error code so database credentials or internal addresses cannot leak through the response
+        # Keep connection details out of this public response and its log entry.
         current_app.logger.warning(
             "API readiness check failed",
             extra={"event": "api_readiness_failed", "error_type": type(exc).__name__},
@@ -36,7 +40,7 @@ def readiness_health_check():
 @health_bp.get("/health/db") # protected endpoint
 @require_api_role("read_only")
 def database_health_check():
-    # This operator-facing check exposes database reachability, so unlike the generic readiness endpoint it is protected by API authentication
+    # This detailed database result is operator-facing and therefore protected.
     try:
         db.session.execute(text("SELECT 1"))
     except Exception as exc:
@@ -52,7 +56,7 @@ def database_health_check():
 @health_bp.get("/health/platform")
 @require_api_role("read_only")
 def platform_health_check():
-    # The read model summarizes executor, authentication, registry, and Kubernetes readiness without exposing their secret configuration values
+    # Report capabilities and missing prerequisites, never configured secrets.
     return jsonify(platform_status_payload()), 200
 
 

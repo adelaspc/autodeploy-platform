@@ -1,3 +1,5 @@
+"""Poll workload health endpoints with bounded retries."""
+
 import time
 from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, build_opener

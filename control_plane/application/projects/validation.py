@@ -1,3 +1,5 @@
+"""Validate and normalize project specifications at the API boundary."""
+
 from pathlib import Path, PurePosixPath
 import re
 from urllib.parse import urlparse
@@ -266,7 +268,8 @@ def validate_project_env_vars(env_vars):
     if not isinstance(env_vars, list):
         return "Invalid env_vars. Expected a list of environment variable definitions"
 
-    # Kubernetes deployments require stricter names and secret handling.
+    # Apply Kubernetes naming and secret rules only when that executor is active;
+    # the fake and local Docker modes intentionally accept a wider input set.
     kubernetes_mode = kubernetes_project_validation_enabled()
     seen_names = set()
 
@@ -284,7 +287,7 @@ def validate_project_env_vars(env_vars):
         seen_names.add(name)
 
         value_source = item.get("value_source")
-        # Keep literal values compatible with payloads that predate value_source.
+        # Older clients sent only `value`; treat that shape as a literal.
         if value_source is None:
             value_source = "literal" if item.get("value") is not None else None
 
@@ -377,7 +380,7 @@ def validate_deployment_patch_payload(payload, deployment):
     if not update_data:
         return None, "Provide at least one updatable field: status, build_status"
 
-    # A valid status value still has to follow the deployment state machine.
+    # Valid status names can still be invalid at this point in the state machine.
     next_status = update_data.get("status")
     if next_status:
         if next_status not in PlatformDeployment.VALID_STATUSES:
@@ -398,7 +401,7 @@ def validate_deployment_patch_payload(payload, deployment):
 
 
 def resolve_effective_test_command(project, *, requested_test_command, payload_includes_test_command):
-    # An explicit request value overrides the project default, including null.
+    # An explicit null disables the project default for this deployment.
     if payload_includes_test_command:
         return requested_test_command
     return project.default_test_command

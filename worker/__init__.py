@@ -1,3 +1,5 @@
+"""Register background worker and reconciler commands with Flask."""
+
 from worker.cli import (
     check_worker_readiness,
     run_reconciler,
