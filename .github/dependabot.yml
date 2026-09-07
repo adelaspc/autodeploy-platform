@@ -29,6 +29,10 @@ updates:
       time: "06:10"
       timezone: "Europe/Bucharest"
     open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "vite"
+        update-types:
+          - "version-update:semver-major"
     groups:
       npm-minor-and-patch:
         patterns:
