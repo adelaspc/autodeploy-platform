@@ -15,7 +15,7 @@
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.2.1",
     "@vue/test-utils": "2.4.6",
-    "jsdom": "26.1.0",
+    "jsdom": "30.0.1",
     "vite": "^6.3.5",
     "vitest": "3.2.7"
   }
