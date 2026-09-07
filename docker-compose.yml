@@ -91,7 +91,7 @@ services:
     restart: unless-stopped
 
   db:
-    image: mysql:8.4@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
+    image: mysql:26.7@sha256:66aec17cd21a956029b83f083b813073859e8355dc1a00e55df6ba02f0e32345
     env_file:
       - path: ${CONTROL_PLANE_ENV_FILE:-.env.demo}
         required: false
