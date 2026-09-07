@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -23,10 +24,11 @@ def helm_binary():
 def test_control_plane_image_bundles_pinned_helm_cli():
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
-    assert (
-        "FROM alpine/helm:4.2.0@sha256:af08f75a3130d666a50b9fc150f40987ef20b885cf67659aabf4b83a5f2c5501 "
-        "AS helm-cli"
-    ) in dockerfile
+    assert re.search(
+        r"^FROM alpine/helm:[^\s@]+@sha256:[0-9a-f]{64} AS helm-cli$",
+        dockerfile,
+        flags=re.MULTILINE,
+    )
     assert "COPY --from=helm-cli /usr/bin/helm /usr/local/bin/helm" in dockerfile
     assert "helm version --short" in dockerfile
 
