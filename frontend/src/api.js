@@ -1,22 +1,14 @@
-const TOKEN_STORAGE_KEY = "autodeploy-control-plane-token";
+let inMemoryToken = "";
 
 export function storedToken() {
-  // Remove tokens saved by older versions of the UI. Tokens intentionally live
-  // only for the current browser tab/session instead of persistent local storage.
-  window.localStorage.removeItem(TOKEN_STORAGE_KEY);
-  return window.sessionStorage.getItem(TOKEN_STORAGE_KEY) || "";
+  return inMemoryToken;
 }
 
 export function storeToken(token) {
   // Normalize user input so accidental surrounding whitespace is not sent as
   // part of the Bearer token.
   const normalized = (token || "").trim();
-  window.localStorage.removeItem(TOKEN_STORAGE_KEY);
-  if (normalized) {
-    window.sessionStorage.setItem(TOKEN_STORAGE_KEY, normalized);
-  } else {
-    window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-  }
+  inMemoryToken = normalized;
 }
 
 export async function apiRequest(path, options = {}) {

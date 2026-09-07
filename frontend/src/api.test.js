@@ -15,6 +15,7 @@ beforeEach(() => {
     localStorage: storageApi(localStorage),
     sessionStorage: storageApi(sessionStorage),
   };
+  storeToken("");
   mock.restoreAll();
 });
 
@@ -29,11 +30,11 @@ describe("api token storage", () => {
     assert.equal(storedToken(), "");
   });
 
-  it("does not restore legacy persistent tokens", () => {
+  it("does not read tokens from browser storage", () => {
     window.localStorage.setItem("autodeploy-control-plane-token", "legacy-token");
+    window.sessionStorage.setItem("autodeploy-control-plane-token", "session-token");
 
     assert.equal(storedToken(), "");
-    assert.equal(window.localStorage.getItem("autodeploy-control-plane-token"), null);
   });
 });
 

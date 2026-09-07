@@ -1,0 +1,90 @@
+version: 2
+
+updates:
+  - package-ecosystem: "pip"
+    directories:
+      - "/"
+      - "/paas-demo-app/demo-app"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Bucharest"
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "npm"
+    directories:
+      - "/frontend"
+      - "/paas-demo-app/demo-app/frontend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:10"
+      timezone: "Europe/Bucharest"
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "docker"
+    directories:
+      - "/"
+      - "/paas-demo-app/demo-app"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:20"
+      timezone: "Europe/Bucharest"
+    open-pull-requests-limit: 5
+    groups:
+      docker-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "docker-compose"
+    directories:
+      - "/"
+      - "/paas-demo-app/demo-app"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:30"
+      timezone: "Europe/Bucharest"
+    open-pull-requests-limit: 5
+    groups:
+      compose-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:40"
+      timezone: "Europe/Bucharest"
+    open-pull-requests-limit: 5
+    groups:
+      actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"

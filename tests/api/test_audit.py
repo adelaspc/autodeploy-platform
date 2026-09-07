@@ -1,4 +1,5 @@
 import control_plane.application.deployments.orchestration as deployment_orchestration_api
+from flask import jsonify
 from sqlalchemy.pool import StaticPool
 
 from control_plane import create_app
@@ -92,7 +93,7 @@ def test_audit_ignores_untrusted_forwarded_for(client, app):
 
 def test_configured_trusted_proxy_resolves_forwarded_client_address():
     proxy_app = create_app(TrustedProxyTestConfig)
-    proxy_app.add_url_rule("/test-client-ip", view_func=lambda: {"ip_address": client_ip_address()})
+    proxy_app.add_url_rule("/test-client-ip", view_func=lambda: jsonify(ip_address=client_ip_address()))
 
     response = proxy_app.test_client().get(
         "/test-client-ip",

@@ -15,6 +15,7 @@ from worker.execution.factory import executor_contract_for_name
 VALID_ENV_VALUE_SOURCES = {"literal", "configmap_key_ref", "secret_key_ref"}
 KUBERNETES_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 KUBERNETES_RESOURCE_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
+GIT_BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
 
 
 def validate_non_empty_string(value, field_name):
@@ -31,6 +32,22 @@ def validate_healthcheck_path(value):
         return string_error
     if not value.startswith("/"):
         return "Invalid healthcheck_path. Expected an absolute path starting with '/'"
+    return None
+
+
+def validate_branch_name(value):
+    string_error = validate_non_empty_string(value, "branch")
+    if string_error:
+        return string_error
+    if (
+        GIT_BRANCH_NAME_RE.fullmatch(value) is None
+        or ".." in value
+        or "//" in value
+        or "@{" in value
+        or value.endswith(("/", "."))
+        or value.endswith(".lock")
+    ):
+        return "Invalid branch. Expected a safe Git branch name"
     return None
 
 
@@ -67,18 +84,27 @@ def validate_repo_url(value):
     if normalized_remote is not None:
         return None
 
-    # Local repositories are useful for development but must not reach other environments.
+    # Local repositories are useful for development but must stay inside the
+    # explicitly configured local repository root.
     app_env = (current_app.config.get("CONTROL_PLANE_ENV") or "").strip().lower()
-    repo_path = Path(value)
-    if app_env == "development" and repo_path.exists():
+    local_repo_root = Path(
+        current_app.config.get("CONTROL_PLANE_LOCAL_REPO_ROOT", "/tmp/paas-local-repos")
+    ).resolve()
+    repo_path = Path(value).resolve()
+    try:
+        repo_path.relative_to(local_repo_root)
+    except ValueError:
+        repo_is_allowed = False
+    else:
+        repo_is_allowed = repo_path.is_dir()
+
+    if app_env == "development" and repo_is_allowed:
         return None
 
-    if repo_path.exists():
-        return "Invalid repo_url. Local repository paths are allowed only when CONTROL_PLANE_ENV=development"
-
     return (
-        "Invalid repo_url. Expected a canonical GitHub HTTPS repository URL like "
-        "https://github.com/<owner>/<repo> or https://github.com/<owner>/<repo>.git"
+        "Invalid repo_url. Local repository paths are allowed only when "
+        "CONTROL_PLANE_ENV=development and under CONTROL_PLANE_LOCAL_REPO_ROOT; otherwise "
+        "use a canonical GitHub HTTPS repository URL"
     )
 
 
@@ -100,11 +126,16 @@ def validate_repo_relative_path(value, field_name, *, allow_dot=False):
 
 def validate_project_spec_fields(payload):
     # This validation is shared by create and patch requests.
-    for field_name in ("name", "branch"):
+    for field_name in ("name",):
         if field_name in payload:
             string_error = validate_non_empty_string(payload[field_name], field_name)
             if string_error:
                 return string_error
+
+    if "branch" in payload:
+        branch_error = validate_branch_name(payload["branch"])
+        if branch_error:
+            return branch_error
 
     if "repo_url" in payload:
         repo_url_error = validate_repo_url(payload["repo_url"])

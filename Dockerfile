@@ -13,6 +13,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 COPY --from=helm-cli /usr/bin/helm /usr/local/bin/helm
 
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
         docker-cli \
         docker-buildx \

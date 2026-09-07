@@ -1,6 +1,6 @@
 """Expose project configuration, deployment actions, and diagnostic read models."""
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 
 from control_plane.api.audit_service import record_audit_event
 from control_plane.api.auth import authorize_request, require_api_role
@@ -321,7 +321,8 @@ def deploy_project(project_id):
             message_prefix="Deployment requested",
         )
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 409
+        current_app.logger.warning("Deployment source resolution failed: %s", exc)
+        return jsonify({"error": "Unable to resolve deployment source"}), 409
     record_audit_event(
         action="deployment.deploy_triggered",
         resource_type="deployment",
@@ -358,7 +359,8 @@ def retry_project_deployment(project_id, deployment_id):
             message_prefix="Deployment retry requested",
         )
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 409
+        current_app.logger.warning("Deployment source resolution failed: %s", exc)
+        return jsonify({"error": "Unable to resolve deployment source"}), 409
     record_audit_event(
         action="deployment.retry_triggered",
         resource_type="deployment",
@@ -406,7 +408,8 @@ def redeploy_project(project_id):
             message_prefix="Project redeploy requested",
         )
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 409
+        current_app.logger.warning("Deployment source resolution failed: %s", exc)
+        return jsonify({"error": "Unable to resolve deployment source"}), 409
     record_audit_event(
         action="deployment.redeploy_triggered",
         resource_type="deployment",

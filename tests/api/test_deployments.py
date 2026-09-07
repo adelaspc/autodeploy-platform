@@ -345,7 +345,7 @@ def test_deploy_project_returns_conflict_when_commit_resolution_fails(client, mo
     response = client.post(f"/api/projects/{project_id}/deploy", json={})
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": "Unable to resolve commit for branch 'main': boom"}
+    assert response.get_json() == {"error": "Unable to resolve deployment source"}
 
 
 def test_deploy_project_resolves_private_github_commit_with_token_env(client, monkeypatch):
@@ -396,12 +396,7 @@ def test_deploy_project_reports_missing_git_token_env_for_private_repo(client, m
     response = client.post(f"/api/projects/{project_id}/deploy", json={})
 
     assert response.status_code == 409
-    assert response.get_json() == {
-        "error": (
-            "Unable to resolve commit for branch 'main': "
-            "Git token environment variable 'CONTROL_PLANE_GIT_TOKEN_GITHUB' is not set"
-        )
-    }
+    assert response.get_json() == {"error": "Unable to resolve deployment source"}
 
 
 def test_deploy_project_rejects_kubernetes_executor_without_required_settings(client, app):
@@ -527,7 +522,7 @@ def test_retry_deployment_returns_conflict_when_commit_resolution_fails(client, 
     response = client.post(f"/api/projects/{project_id}/deployments/{original_deployment_id}/retry")
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": "Unable to resolve commit for branch 'main': boom"}
+    assert response.get_json() == {"error": "Unable to resolve deployment source"}
 
 
 def test_retry_deployment_rejects_kubernetes_executor_without_required_settings(client, app, monkeypatch):
@@ -747,7 +742,7 @@ def test_redeploy_project_returns_conflict_when_commit_resolution_fails(client, 
     response = client.post(f"/api/projects/{project_id}/redeploy")
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": "Unable to resolve commit for branch 'main': boom"}
+    assert response.get_json() == {"error": "Unable to resolve deployment source"}
 
 
 def test_redeploy_project_rejects_kubernetes_executor_without_required_settings(client, app, monkeypatch):

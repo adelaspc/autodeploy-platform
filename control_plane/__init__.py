@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from flask import Flask, send_from_directory
+from werkzeug.exceptions import NotFound
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from control_plane.api import register_blueprints
@@ -81,8 +82,11 @@ def create_app(config_class=None):
         if path == "health" or path.startswith(("api/", "health/")):
             return {"error": "Not found"}, 404
 
-        if path and (dist_dir / path).is_file():
-            return send_from_directory(dist_dir, path)
+        if path:
+            try:
+                return send_from_directory(dist_dir, path)
+            except NotFound:
+                pass
 
         if dist_dir.is_dir():
             return send_from_directory(dist_dir, "index.html")

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import base64
 import os
+import re
 import subprocess
 
 from flask import current_app
@@ -13,6 +14,9 @@ from control_plane.extensions import db
 from control_plane.deployment_spec import create_deployment_spec_snapshot, project_for_deployment
 from control_plane.models import Build, DeploymentEvent, PlatformDeployment
 from control_plane.api.request_context import current_request_id
+
+
+GIT_BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
 
 
 def create_deployment_event(
@@ -94,9 +98,20 @@ def git_auth_environment(project):
 
 
 def resolve_project_commit_sha(project, branch):
+    if (
+        not isinstance(branch, str)
+        or GIT_BRANCH_NAME_RE.fullmatch(branch) is None
+        or ".." in branch
+        or "//" in branch
+        or "@{" in branch
+        or branch.endswith(("/", "."))
+        or branch.endswith(".lock")
+    ):
+        raise ValueError("Invalid branch. Expected a safe Git branch name")
+
     repo_path = Path(project.repo_url)
     if repo_path.exists():
-        command = ["git", "-C", str(repo_path), "rev-parse", branch]
+        command = ["git", "-C", str(repo_path), "rev-parse", "--verify", "--end-of-options", f"{branch}^{{commit}}"]
         env = None
     else:
         command = ["git", "ls-remote", project.repo_url, f"refs/heads/{branch}"]

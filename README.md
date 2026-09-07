@@ -233,3 +233,9 @@ Docker socket access and kubeconfig access are deliberate trusted-operator bound
 | [Future work](docs/future.md) | Deliberately deferred capabilities |
 
 The API and deployment model are intentionally stable enough to inspect, while the fake path keeps first contact independent of platform infrastructure.
+
+## Usage rights
+
+This repository is publicly visible for portfolio and evaluation purposes only.
+No license is granted to use, copy, modify, or distribute its contents. All
+rights are reserved by the copyright holder.
