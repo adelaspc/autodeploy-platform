@@ -65,6 +65,9 @@ config:
 secrets:
   create: true
   existingSecret: ""
+  # Git token keys are inferred from non-empty chart-managed values. List them
+  # explicitly when existingSecret is used because Helm cannot inspect it.
+  gitTokenKeys: []
   values:
     CONTROL_PLANE_DATABASE_URL: ""
     CONTROL_PLANE_GITHUB_WEBHOOK_SECRET: ""
@@ -75,6 +78,7 @@ secrets:
     CONTROL_PLANE_REGISTRY_USERNAME: ""
     CONTROL_PLANE_REGISTRY_PASSWORD: ""
     CONTROL_PLANE_METRICS_TOKEN: ""
+    CONTROL_PLANE_GIT_TOKEN_GITHUB: ""
 
 resources: {}
 

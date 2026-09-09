@@ -61,6 +61,23 @@ def test_metrics_configuration_fails_fast_without_token():
         create_app(InvalidMetricsConfig)
 
 
+def test_non_api_component_does_not_require_metrics_token():
+    class WorkerMetricsConfig(TestConfig):
+        CONTROL_PLANE_COMPONENT = "worker"
+        CONTROL_PLANE_METRICS_ENABLED = True
+        CONTROL_PLANE_METRICS_TOKEN = ""
+
+        @staticmethod
+        def init_app(app):
+            from control_plane.config import Config
+
+            Config.init_app(app)
+
+    app = create_app(WorkerMetricsConfig)
+
+    assert app.config["CONTROL_PLANE_COMPONENT"] == "worker"
+
+
 def test_metrics_exports_only_bounded_aggregate_labels(metrics_app, metrics_client):
     with metrics_app.app_context():
         project = Project(

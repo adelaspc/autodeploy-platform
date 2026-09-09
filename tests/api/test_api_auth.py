@@ -133,6 +133,31 @@ def test_token_config_allows_production_startup():
     assert app.config["CONTROL_PLANE_API_TOKEN_ADMIN"] == "admin-token"
 
 
+@pytest.mark.parametrize("component", ["worker", "reconciler", "migrate"])
+def test_non_api_components_do_not_require_api_tokens(component):
+    class NonApiProductionConfig(TestConfig):
+        CONTROL_PLANE_COMPONENT = component
+        CONTROL_PLANE_ENV = "production"
+        CONTROL_PLANE_ALLOW_AUTH_DISABLED = False
+        CONTROL_PLANE_API_TOKEN_READ_ONLY = None
+        CONTROL_PLANE_API_TOKEN_DEPLOYER = None
+        CONTROL_PLANE_API_TOKEN_ADMIN = None
+        CONTROL_PLANE_API_TOKENS_JSON = None
+
+        @staticmethod
+        def init_app(app):
+            from control_plane.config import Config
+
+            Config.init_app(app)
+
+    app = create_app(NonApiProductionConfig)
+
+    assert app.config["CONTROL_PLANE_COMPONENT"] == component
+    response = app.test_client().get("/api/projects")
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "API authentication is not configured"
+
+
 def test_public_health_endpoint_remains_open(client, app):
     configure_api_tokens(app)
 

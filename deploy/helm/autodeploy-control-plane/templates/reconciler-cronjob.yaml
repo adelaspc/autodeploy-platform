@@ -38,9 +38,8 @@ spec:
               envFrom:
                 - configMapRef:
                     name: {{ include "autodeploy-control-plane.fullname" . }}-config
-                - secretRef:
-                    name: {{ include "autodeploy-control-plane.runtimeSecretName" . }}
               env:
+                {{- include "autodeploy-control-plane.secretEnv" (dict "root" . "component" "reconciler") | nindent 16 }}
                 - name: CONTROL_PLANE_COMPONENT
                   value: reconciler
               {{- if .Values.kubeconfig.existingSecret }}

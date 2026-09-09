@@ -172,14 +172,19 @@ class Config:
         validate_numeric_config(app)
         if app.config.get("CONTROL_PLANE_TRUSTED_PROXY_COUNT", 0) < 0:
             raise RuntimeError("CONTROL_PLANE_TRUSTED_PROXY_COUNT cannot be negative")
-        if app.config.get("CONTROL_PLANE_METRICS_ENABLED"):
+        component = app.config.get("CONTROL_PLANE_COMPONENT", "api")
+        if component == "api" and app.config.get("CONTROL_PLANE_METRICS_ENABLED"):
             token = app.config.get("CONTROL_PLANE_METRICS_TOKEN")
             if not isinstance(token, str) or not token.strip():
                 raise RuntimeError(
                     "CONTROL_PLANE_METRICS_TOKEN must be set when CONTROL_PLANE_METRICS_ENABLED is true"
                 )
             app.config["CONTROL_PLANE_METRICS_TOKEN"] = token.strip()
-        if not api_token_configs_from_config(app.config) and not api_auth_disabled_allowed_for_config(app.config):
+        if (
+            component == "api"
+            and not api_token_configs_from_config(app.config)
+            and not api_auth_disabled_allowed_for_config(app.config)
+        ):
             raise RuntimeError(
                 "API bearer tokens must be configured unless CONTROL_PLANE_ALLOW_AUTH_DISABLED=true "
                 "is explicitly set for a local development or test environment"

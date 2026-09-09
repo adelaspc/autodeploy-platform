@@ -38,9 +38,8 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "autodeploy-control-plane.fullname" . }}-config
-            - secretRef:
-                name: {{ include "autodeploy-control-plane.runtimeSecretName" . }}
           env:
+            {{- include "autodeploy-control-plane.secretEnv" (dict "root" . "component" "worker") | nindent 12 }}
             - name: CONTROL_PLANE_COMPONENT
               value: worker
           {{- if .Values.kubeconfig.existingSecret }}

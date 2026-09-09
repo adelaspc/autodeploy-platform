@@ -5,6 +5,10 @@ from werkzeug.exceptions import NotFound
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from control_plane.api import register_blueprints
+from control_plane.api.auth import (
+    AUTH_DISABLED_ALLOWED_CONFIG_KEY,
+    api_auth_disabled_allowed_for_config,
+)
 from control_plane.api.request_context import (
     attach_request_id_header,
     install_request_logging,
@@ -34,6 +38,7 @@ def create_app(config_class=None):
     init_app = getattr(config_class, "init_app", None)
     if callable(init_app):
         init_app(app)
+    app.config[AUTH_DISABLED_ALLOWED_CONFIG_KEY] = api_auth_disabled_allowed_for_config(app.config)
     validate_numeric_config(app)
     trusted_proxy_count = app.config.get("CONTROL_PLANE_TRUSTED_PROXY_COUNT", 0)
     if trusted_proxy_count < 0:
