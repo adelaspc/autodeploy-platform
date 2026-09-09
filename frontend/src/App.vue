@@ -363,9 +363,8 @@ onBeforeUnmount(() => {
     <main class="screen">
       <section class="topbar">
         <button class="icon-button" type="button" aria-label="Dashboard menu">=</button>
-        <div class="search-shell">
-          <span>Search apps, deployments, logs...</span>
-          <kbd>/</kbd>
+        <div class="search-shell" role="status">
+          <span>Search and history filters are available through the API, not this console.</span>
         </div>
         <OperatorTokenForm v-model="apiToken" @save="saveToken" @clear="clearToken" />
       </section>
@@ -419,7 +418,7 @@ onBeforeUnmount(() => {
     </section>
     <LogViewer
       v-model:tail-lines="logTailLines" :build-log="buildLog" :runtime-log="runtimeLog"
-      :enabled="Boolean(deploymentSummary)" @reload="loadLogsAndDiagnostics"
+      :summary="deploymentSummary" :enabled="Boolean(deploymentSummary)" @reload="loadLogsAndDiagnostics"
     />
     <DiagnosticsPanel
       :diagnostics="diagnostics"

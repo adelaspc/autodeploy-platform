@@ -4,9 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
+from control_plane.extensions import db
+from control_plane.models import PlatformDeployment
 from worker.helm.runner import HelmCommandError, HelmResult
 from worker.execution.contracts import WorkerExecutionError
-from worker.execution.factory import create_executor, executor_contract_for_name
+from worker.execution.factory import create_executor, create_executor_for_deployment, executor_contract_for_name
 from worker.executors.kubernetes.executor import KubernetesExecutor
 from worker.processing.pipeline import process_next_pending_deployment
 
@@ -73,15 +75,47 @@ def test_kubernetes_port_forward_retries_bind_collision(tmp_path):
     assert metadata["port_forward_attempts"] == 2
 
 
+def test_helm_command_adapter_forwards_heartbeat(tmp_path):
+    heartbeat_calls = []
+
+    def fake_runner(args, **kwargs):
+        heartbeat_cb = kwargs.get("heartbeat_cb")
+        if heartbeat_cb is not None:
+            heartbeat_cb()
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="ok\n", stderr="")
+
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=fake_runner,
+    )
+    executor.set_heartbeat(lambda: heartbeat_calls.append(True))
+
+    result = executor._run_helm_command(["helm", "status", "release"])
+
+    assert result.returncode == 0
+    assert heartbeat_calls == [True]
+
+
 class RecordingHelmRunner:
     instances = []
 
-    def __init__(self, *, namespace, helm_binary="helm", chart_path=None, helm_timeout="180s", kubeconfig=None):
+    def __init__(
+        self,
+        *,
+        namespace,
+        helm_binary="helm",
+        chart_path=None,
+        helm_timeout="180s",
+        kubeconfig=None,
+        runner=None,
+    ):
         self.namespace = namespace
         self.helm_binary = helm_binary
         self.chart_path = chart_path
         self.helm_timeout = helm_timeout
         self.kubeconfig = kubeconfig
+        self.runner = runner
         self.upgrade_install_calls = []
         self.status_calls = []
         RecordingHelmRunner.instances.append(self)
@@ -240,14 +274,17 @@ def test_kubernetes_manifest_generation_uses_registry_image_and_service():
         {
             "id": 7,
             "project_id": 3,
-            "build": type("BuildStub", (), {"image_ref": "docker.io/example/demo:abc123"})(),
+                "build": type("BuildStub", (), {"image_ref": "docker.io/example/demo:abc123", "commit_sha": "abc123def456", "image_tag": "demo:abc123def456-7"})(),
             "project": type(
                 "ProjectStub",
                 (),
                 {
                     "name": "Demo App",
                     "port": 5000,
+                    "healthcheck_path": "/ready",
                     "env_vars": [{"name": "APP_ENV", "value": "production"}],
+                    "cpu": "250m",
+                    "memory": "256Mi",
                 },
             )(),
         },
@@ -263,10 +300,25 @@ def test_kubernetes_manifest_generation_uses_registry_image_and_service():
     deployment_manifest, service_manifest = manifest["items"]
     assert deployment_manifest["kind"] == "Deployment"
     assert deployment_manifest["metadata"]["namespace"] == "apps"
-    assert deployment_manifest["spec"]["template"]["spec"]["containers"][0]["image"] == "docker.io/example/demo:abc123"
-    assert deployment_manifest["spec"]["template"]["spec"]["containers"][0]["env"] == [
-        {"name": "APP_ENV", "value": "production"}
+    container = deployment_manifest["spec"]["template"]["spec"]["containers"][0]
+    assert container["image"] == "docker.io/example/demo:abc123"
+    assert container["env"] == [
+        {"name": "APP_ENV", "value": "production"},
+        {"name": "APP_COMMIT_SHA", "value": "abc123def456"},
+        {"name": "APP_VERSION", "value": "demo:abc123def456-7"},
     ]
+    assert container["ports"] == [{"name": "http", "containerPort": 5000}]
+    assert container["resources"] == {"requests": {"cpu": "250m", "memory": "256Mi"}}
+    assert container["readinessProbe"] == {
+        "httpGet": {"path": "/ready", "port": "http"},
+        "initialDelaySeconds": 5,
+        "periodSeconds": 10,
+    }
+    assert container["livenessProbe"] == {
+        "httpGet": {"path": "/ready", "port": "http"},
+        "initialDelaySeconds": 15,
+        "periodSeconds": 20,
+    }
     pod_spec = deployment_manifest["spec"]["template"]["spec"]
     assert pod_spec["automountServiceAccountToken"] is False
     assert pod_spec["securityContext"] == {"seccompProfile": {"type": "RuntimeDefault"}}
@@ -274,6 +326,27 @@ def test_kubernetes_manifest_generation_uses_registry_image_and_service():
     assert "imagePullSecrets" not in deployment_manifest["spec"]["template"]["spec"]
     assert service_manifest["kind"] == "Service"
     assert service_manifest["spec"]["ports"][0]["port"] == 5000
+
+
+def test_kubernetes_manifest_uses_healthcheck_fallback_and_omits_empty_resource_requests():
+    executor = KubernetesExecutor(workspace_root="/tmp/test-k8s", command_timeout=30)
+    deployment = SimpleNamespace(
+        id=11,
+        project_id=3,
+        build=SimpleNamespace(image_ref="docker.io/example/demo:abc123"),
+        project=SimpleNamespace(name="Demo App", port=5000, env_vars=[], healthcheck_path=" ", cpu=" ", memory=None),
+    )
+
+    manifest = executor._manifest(
+        deployment,
+        deployment_name="paas-demo-app-11",
+        service_name="paas-demo-app-11-svc",
+    )
+
+    container = manifest["items"][0]["spec"]["template"]["spec"]["containers"][0]
+    assert container["resources"] == {}
+    assert container["readinessProbe"]["httpGet"] == {"path": "/", "port": "http"}
+    assert container["livenessProbe"]["httpGet"] == {"path": "/", "port": "http"}
 
 
 def test_kubernetes_manifest_generation_includes_image_pull_secret_when_configured():
@@ -290,7 +363,7 @@ def test_kubernetes_manifest_generation_includes_image_pull_secret_when_configur
         {
             "id": 8,
             "project_id": 3,
-            "build": type("BuildStub", (), {"image_ref": "docker.io/example/demo:abc123"})(),
+                "build": type("BuildStub", (), {"image_ref": "docker.io/example/demo:abc123", "commit_sha": "abc123def456", "image_tag": "demo:abc123def456-9"})(),
             "project": type(
                 "ProjectStub",
                 (),
@@ -404,7 +477,15 @@ def test_kubernetes_manifest_generation_supports_configmap_and_secret_env_refs()
         {
             "id": 9,
             "project_id": 3,
-            "build": type("BuildStub", (), {"image_ref": "docker.io/example/demo:abc123"})(),
+            "build": type(
+                "BuildStub",
+                (),
+                {
+                    "image_ref": "docker.io/example/demo:abc123",
+                    "commit_sha": "abc123def456",
+                    "image_tag": "demo:abc123def456-9",
+                },
+            )(),
             "project": type(
                 "ProjectStub",
                 (),
@@ -436,6 +517,8 @@ def test_kubernetes_manifest_generation_supports_configmap_and_secret_env_refs()
             "name": "DATABASE_URL",
             "valueFrom": {"secretKeyRef": {"name": "my-app-secret", "key": "database-url"}},
         },
+        {"name": "APP_COMMIT_SHA", "value": "abc123def456"},
+        {"name": "APP_VERSION", "value": "demo:abc123def456-9"},
     ]
 
 
@@ -462,6 +545,8 @@ def test_kubernetes_executor_processes_mixed_env_sources_and_records_summary(cli
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="clone ok\n", stderr="")
         if args[:2] == ["git", "-C"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="checkout ok\n", stderr="")
+        if args[:2] == ["docker", "push"]:
+            return subprocess.CompletedProcess(args, 0, "digest: sha256:" + "a" * 64, "")
         if args[:2] in (["docker", "build"], ["docker", "tag"], ["docker", "push"]) or args[:4] == [
             "docker",
             "buildx",
@@ -550,6 +635,40 @@ def test_create_executor_rejects_invalid_kubernetes_deployment_mode(app):
 
         with pytest.raises(ValueError, match="CONTROL_PLANE_K8S_DEPLOYMENT_MODE"):
             create_executor()
+
+
+def test_create_executor_for_deployment_uses_persisted_kubernetes_identity(client, app):
+    _project_id, pending = create_pending_deployment(client, name="persisted-runtime")
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, pending["id"])
+        deployment.deploy_target = "kubernetes"
+        deployment.kubernetes_deployment_mode = "manifest"
+        deployment.kubernetes_namespace = "original-apps"
+        db.session.commit()
+
+        app.config["CONTROL_PLANE_K8S_DEPLOYMENT_MODE"] = "helm"
+        app.config["CONTROL_PLANE_K8S_NAMESPACE"] = "replacement-apps"
+        executor = create_executor_for_deployment(deployment)
+
+    assert executor.deployment_mode == "manifest"
+    assert executor.namespace == "original-apps"
+
+
+def test_create_executor_for_legacy_manifest_does_not_infer_current_helm_mode(client, app):
+    _project_id, pending = create_pending_deployment(client, name="legacy-runtime")
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, pending["id"])
+        deployment.deploy_target = "kubernetes"
+        deployment.kubernetes_deployment_mode = None
+        deployment.helm_release_name = None
+        deployment.preflight_metadata_json = {"namespace": "legacy-apps"}
+        db.session.commit()
+
+        app.config["CONTROL_PLANE_K8S_DEPLOYMENT_MODE"] = "helm"
+        executor = create_executor_for_deployment(deployment)
+
+    assert executor.deployment_mode == "manifest"
+    assert executor.namespace == "legacy-apps"
 
 
 def test_executor_contract_for_kubernetes_is_explicit():
@@ -651,6 +770,7 @@ def test_kubernetes_executor_helm_mode_deploys_with_generated_values_and_release
     assert helm_runner.namespace == "apps"
     assert helm_runner.kubeconfig == "/tmp/test-kubeconfig"
     assert helm_runner.chart_path == "deploy/helm/generic-web-app"
+    assert helm_runner.runner == executor._run_helm_command
     assert helm_runner.upgrade_install_calls[0]["release"] == "paas-helm-app-production-3"
     values_file = Path(helm_runner.upgrade_install_calls[0]["values_file"])
     assert values_file.name == "generic-web-app-values.yaml"
@@ -722,6 +842,41 @@ def test_kubernetes_executor_manifest_mode_stop_still_uses_kubectl_delete(tmp_pa
     assert result.metadata["stopped"] is True
     assert any(command[:4] == ["kubectl", "--namespace", "default", "delete"] for command in commands)
     assert commands[0][-2:] == ["--ignore-not-found=true", "--wait=false"]
+
+
+def test_kubernetes_stop_uses_persisted_manifest_mode_and_namespace_after_config_change(tmp_path):
+    commands = []
+
+    def fake_runner(args, **_kwargs):
+        commands.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="deleted\n", stderr="")
+
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        runner=fake_runner,
+        namespace="replacement-apps",
+        deployment_mode="helm",
+        popen_factory=DummyPopen,
+    )
+    deployment = make_kubernetes_deployment_stub(deployment_id=9, name="stop-app")
+    deployment.deploy_target = "kubernetes"
+    deployment.kubernetes_deployment_mode = "manifest"
+    deployment.kubernetes_namespace = "original-apps"
+    deployment.kubernetes_deployment_name = "persisted-deployment"
+    deployment.kubernetes_service_name = "persisted-service"
+    deployment.kubernetes_ingress_name = "persisted-ingress"
+
+    result = executor.stop(deployment)
+
+    assert result.metadata["namespace"] == "original-apps"
+    assert result.metadata["deployment_name"] == "persisted-deployment"
+    assert result.metadata["service_name"] == "persisted-service"
+    assert result.metadata["ingress_name"] == "persisted-ingress"
+    assert commands[0][:4] == ["kubectl", "--namespace", "original-apps", "delete"]
+    assert "deployment/persisted-deployment" in commands[0]
+    assert "service/persisted-service" in commands[0]
+    assert "ingress/persisted-ingress" in commands[0]
 
 
 def test_kubernetes_executor_helm_mode_stop_uninstalls_release(tmp_path):
@@ -842,6 +997,31 @@ def test_kubernetes_executor_helm_runtime_status_reports_existing_release(tmp_pa
     assert status["namespace"] == "apps"
 
 
+def test_helm_stop_and_status_use_persisted_namespace_after_config_change(tmp_path):
+    RecordingHelmRunner.instances = []
+    executor = KubernetesExecutor(
+        workspace_root=tmp_path,
+        command_timeout=30,
+        namespace="replacement-apps",
+        deployment_mode="manifest",
+        helm_runner_factory=RecordingHelmRunner,
+        popen_factory=DummyPopen,
+    )
+    deployment = make_kubernetes_deployment_stub(deployment_id=9, name="status-app", project_id=3)
+    deployment.deploy_target = "kubernetes"
+    deployment.kubernetes_deployment_mode = "helm"
+    deployment.kubernetes_namespace = "original-apps"
+    deployment.helm_release_name = "paas-status-app-production-3"
+
+    status = executor.runtime_helm_status(deployment)
+    stop_result = executor.stop(deployment)
+
+    assert RecordingHelmRunner.instances[0].namespace == "original-apps"
+    assert RecordingHelmRunner.instances[1].namespace == "original-apps"
+    assert status["namespace"] == "original-apps"
+    assert stop_result.metadata["namespace"] == "original-apps"
+
+
 def test_kubernetes_executor_helm_runtime_status_reports_missing_release(tmp_path):
     RecordingHelmRunner.instances = []
     executor = KubernetesExecutor(
@@ -947,7 +1127,7 @@ def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, t
         if args[:2] == ["docker", "tag"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="tag ok\n", stderr="")
         if args[:2] == ["docker", "push"]:
-            return subprocess.CompletedProcess(args=args, returncode=0, stdout="push ok\n", stderr="")
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="digest: sha256:" + "a" * 64, stderr="")
         if args[:4] == ["docker", "buildx", "imagetools", "inspect"]:
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="manifest ok\n", stderr="")
         if args[:3] == ["kubectl", "--namespace", "default"]:
@@ -982,9 +1162,30 @@ def test_kubernetes_executor_processes_deployment_with_stubbed_kubectl(client, t
     assert processed.id == pending["id"]
     assert processed.status == "running"
     assert processed.deploy_target == "kubernetes"
+    assert processed.kubernetes_deployment_mode == "manifest"
+    assert processed.kubernetes_namespace == "default"
+    assert processed.kubernetes_deployment_name == f"paas-k8s-success-{processed.id}"
+    assert processed.kubernetes_service_name == f"paas-k8s-success-{processed.id}-svc"
+    assert processed.kubernetes_ingress_name == f"paas-k8s-success-{processed.id}"
     assert processed.service_url is None
+    pinned = "docker.io/example/k8s-success@sha256:" + "a" * 64
+    assert processed.build.image_ref == pinned
+    summary = client.get(f"/api/projects/{processed.project_id}/deployments/{processed.id}/summary").get_json()
+    assert summary["image_ref"] == pinned
+    assert summary["kubernetes_deployment_mode"] == "manifest"
+    assert summary["kubernetes_namespace"] == "default"
+    assert summary["kubernetes_deployment_name"] == processed.kubernetes_deployment_name
+    assert summary["kubernetes_service_name"] == processed.kubernetes_service_name
+    manifest = executor._manifest(processed, deployment_name="test", service_name="test-svc")
+    workload = next(item for item in manifest["items"] if item["kind"] == "Deployment")
+    assert workload["spec"]["template"]["spec"]["containers"][0]["image"] == pinned
 
     deployment = client.get(f"/api/projects/{processed.project_id}/deployments/{processed.id}").get_json()
+    assert deployment["kubernetes_deployment_mode"] == "manifest"
+    assert deployment["kubernetes_namespace"] == "default"
+    assert deployment["kubernetes_deployment_name"] == processed.kubernetes_deployment_name
+    assert deployment["kubernetes_service_name"] == processed.kubernetes_service_name
+    assert deployment["kubernetes_ingress_name"] == processed.kubernetes_ingress_name
     event_types = [event["event_type"] for event in deployment["events"]]
     assert "kubernetes.preflight_started" in event_types
     assert "kubernetes.preflight_succeeded" in event_types

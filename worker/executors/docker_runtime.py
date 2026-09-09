@@ -9,6 +9,7 @@ from control_plane.deployment_spec import project_for_deployment
 from control_plane.security import env_var_is_secret, redact_text, secret_values_from_env_vars
 from worker.execution.contracts import ExecutionResult, WorkerExecutionError
 from worker.services.healthcheck import DockerHealthcheckServiceMixin
+from worker.workload_environment import resolved_workload_environment
 
 
 class DockerRuntimeMixin(DockerHealthcheckServiceMixin):
@@ -37,7 +38,7 @@ class DockerRuntimeMixin(DockerHealthcheckServiceMixin):
                         "--publish",
                         published_port,
                         *env_args,
-                        deployment.build.image_tag,
+                        deployment.build.image_ref if self.registry_enabled else deployment.build.image_tag,
                     ],
                     log_path=log_path,
                     redacted_values=secret_values,
@@ -272,10 +273,9 @@ class DockerRuntimeMixin(DockerHealthcheckServiceMixin):
 
     @staticmethod
     def _env_args_with_redaction(deployment):
-        project = project_for_deployment(deployment)
         args = []
         redacted_values = []
-        for item in project.env_vars or []:
+        for item in resolved_workload_environment(deployment):
             if not isinstance(item, dict):
                 continue
             name = item.get("name")

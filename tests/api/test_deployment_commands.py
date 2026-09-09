@@ -3,6 +3,7 @@ from control_plane.models import DeploymentCommand, PlatformDeployment
 from tests.api.project_test_helpers import create_project, event_by_type, process_queued_command
 from worker.execution.contracts import ExecutionResult, WorkerExecutionError
 import worker.processing.command_processor as worker_commands
+import pytest
 
 
 def test_stop_deployment_calls_executor_and_records_events(client, app, monkeypatch):
@@ -193,6 +194,126 @@ def test_cleanup_kubernetes_deployment_removes_resources_and_preserves_history(c
     ]
     audit_events = client.get("/api/audit-events").get_json()["items"]
     assert audit_events[0]["action"] == "deployment.cleanup_requested"
+
+
+@pytest.mark.parametrize(
+    ("command_type", "endpoint", "event_type"),
+    [
+        ("stop", "stop", "deployment.stop_skipped"),
+        ("cleanup", "cleanup", "deployment.cleanup_skipped"),
+    ],
+)
+def test_historical_helm_commands_skip_shared_release_owned_by_newer_deployment(
+    client, app, monkeypatch, command_type, endpoint, event_type
+):
+    project_id = create_project(client, name=f"historical-helm-{command_type}").get_json()["id"]
+    old_deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    ).get_json()["id"]
+    newer_deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "def456abc123", "status": "running", "build_status": "succeeded"},
+    ).get_json()["id"]
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, old_deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.helm_release_name = "paas-historical-helm-production-1"
+        deployment.helm_namespace = "default"
+        db.session.commit()
+
+    class UnsafeHelmExecutor:
+        def stop(self, _deployment):
+            raise AssertionError("a historical command must not uninstall the shared Helm release")
+
+    monkeypatch.setattr(worker_commands, "create_executor_for_deployment", lambda _deployment: UnsafeHelmExecutor())
+
+    response = client.post(f"/api/projects/{project_id}/deployments/{old_deployment_id}/{endpoint}")
+
+    assert response.status_code == 202
+    payload = process_queued_command(app, client, project_id, old_deployment_id)
+    assert payload["status"] == "running"
+    skipped_event = event_by_type(payload["events"], event_type)
+    assert skipped_event["metadata_json"]["newer_deployment_id"] == newer_deployment_id
+    assert skipped_event["metadata_json"]["reason"] == "newer_deployment_owns_shared_helm_release"
+    with app.app_context():
+        command = db.session.scalar(
+            db.select(DeploymentCommand).where(
+                DeploymentCommand.deployment_id == old_deployment_id,
+                DeploymentCommand.command_type == command_type,
+            )
+        )
+        assert command.status == "skipped"
+        assert command.active_key is None
+
+
+def test_newest_helm_cleanup_uninstalls_shared_release(client, app, monkeypatch):
+    project_id = create_project(client, name="newest-helm-cleanup").get_json()["id"]
+    deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    ).get_json()["id"]
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        deployment.helm_release_name = "paas-newest-helm-cleanup-production-1"
+        deployment.helm_namespace = "default"
+        db.session.commit()
+
+    class HelmExecutor:
+        calls = 0
+
+        def stop(self, deployment):
+            self.calls += 1
+            return ExecutionResult(
+                "Helm release uninstalled successfully.",
+                metadata={"deployment_mode": "helm", "helm_release_name": deployment.helm_release_name},
+                deploy_target="kubernetes",
+            )
+
+    executor = HelmExecutor()
+    monkeypatch.setattr(worker_commands, "create_executor_for_deployment", lambda _deployment: executor)
+
+    response = client.post(f"/api/projects/{project_id}/deployments/{deployment_id}/cleanup")
+
+    assert response.status_code == 202
+    payload = process_queued_command(app, client, project_id, deployment_id)
+    assert executor.calls == 1
+    assert payload["status"] == "stopped"
+    assert event_by_type(payload["events"], "deployment.cleanup_succeeded")
+
+
+def test_historical_manifest_cleanup_remains_attempt_specific(client, app, monkeypatch):
+    project_id = create_project(client, name="historical-manifest-cleanup").get_json()["id"]
+    old_deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    ).get_json()["id"]
+    client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "def456abc123", "status": "running", "build_status": "succeeded"},
+    )
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, old_deployment_id)
+        deployment.deploy_target = "kubernetes"
+        db.session.commit()
+
+    class ManifestExecutor:
+        calls = 0
+
+        def stop(self, _deployment):
+            self.calls += 1
+            return ExecutionResult("Kubernetes resources deleted successfully.", deploy_target="kubernetes")
+
+    executor = ManifestExecutor()
+    monkeypatch.setattr(worker_commands, "create_executor_for_deployment", lambda _deployment: executor)
+
+    response = client.post(f"/api/projects/{project_id}/deployments/{old_deployment_id}/cleanup")
+
+    assert response.status_code == 202
+    payload = process_queued_command(app, client, project_id, old_deployment_id)
+    assert executor.calls == 1
+    assert payload["status"] == "stopped"
 
 
 def test_stop_command_is_deduplicated_while_active(client, app):

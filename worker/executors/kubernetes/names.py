@@ -5,6 +5,7 @@ import re
 
 MAX_DNS_LABEL_LENGTH = 63
 MAX_HELM_RELEASE_LENGTH = 53
+MANIFEST_SERVICE_SUFFIX = "-svc"
 
 
 def dns_slug(value, *, fallback="app", max_length=MAX_DNS_LABEL_LENGTH):
@@ -17,6 +18,21 @@ def dns_slug(value, *, fallback="app", max_length=MAX_DNS_LABEL_LENGTH):
 
 def workload_name(project, *, max_length=MAX_DNS_LABEL_LENGTH):
     return dns_slug(getattr(project, "name", None), max_length=max_length)
+
+
+def manifest_deployment_name(project, deployment, *, max_length=MAX_DNS_LABEL_LENGTH):
+    """Return an attempt-specific name with room for the Service suffix."""
+    deployment_suffix = project_id_suffix(getattr(deployment, "id", None), max_length=20)
+    base_max_length = max_length - len(MANIFEST_SERVICE_SUFFIX)
+    reserved = len("paas") + len(deployment_suffix) + 2
+    project_max_length = max(1, base_max_length - reserved)
+    project_slug = workload_name(project, max_length=project_max_length)
+    return f"paas-{project_slug}-{deployment_suffix}"
+
+
+def manifest_service_name(project, deployment, *, max_length=MAX_DNS_LABEL_LENGTH):
+    deployment_name = manifest_deployment_name(project, deployment, max_length=max_length)
+    return f"{deployment_name}{MANIFEST_SERVICE_SUFFIX}"
 
 
 def helm_release_name(project, deployment=None, *, max_length=MAX_HELM_RELEASE_LENGTH):

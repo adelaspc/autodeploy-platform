@@ -31,6 +31,19 @@ def create_deployment_spec_snapshot(project, *, branch=None):
     return {"version": DEPLOYMENT_SPEC_VERSION, "project": project_spec}
 
 
+def copy_deployment_spec_snapshot(deployment, *, project_id):
+    """Return a validated copy suitable for an exact historical retry."""
+    snapshot = getattr(deployment, "spec_snapshot_json", None)
+    if not isinstance(snapshot, dict) or snapshot.get("version") != DEPLOYMENT_SPEC_VERSION:
+        raise ValueError("Historical deployment specification is unavailable")
+    project_spec = snapshot.get("project")
+    if not isinstance(project_spec, dict) or any(field not in project_spec for field in PROJECT_SPEC_FIELDS):
+        raise ValueError("Historical deployment specification is incomplete")
+    if project_spec.get("id") != project_id or getattr(deployment, "project_id", None) != project_id:
+        raise ValueError("Historical deployment specification belongs to another project")
+    return deepcopy(snapshot)
+
+
 def project_for_deployment(deployment):
     # Project edits apply to future deployments only. The fallback keeps records
     # created before deployment snapshots usable.

@@ -1,3 +1,5 @@
+import pytest
+
 from control_plane.extensions import db
 from control_plane.models import PlatformDeployment
 from tests.api.project_test_helpers import create_project, github_headers
@@ -41,6 +43,45 @@ def test_create_project_rejects_invalid_trigger(client):
 
     assert response.status_code == 400
     assert "Invalid trigger" in response.get_json()["error"]
+
+
+def test_create_project_rejects_unknown_fields(client):
+    response = create_project(client, unexpected_setting="value")
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "Unsupported project fields: unexpected_setting"}
+
+
+def test_create_project_rejects_boolean_port(client):
+    response = create_project(client, port=True)
+
+    assert response.status_code == 400
+    assert "integer between 1 and 65535" in response.get_json()["error"]
+
+
+def test_create_project_rejects_overlong_name(client):
+    response = create_project(client, name="a" * 121)
+
+    assert response.status_code == 400
+    assert "at most 120 characters" in response.get_json()["error"]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("cpu", "0.0005"),
+        ("cpu", "500x"),
+        ("cpu", 1),
+        ("memory", "400m"),
+        ("memory", "1.5Gi"),
+        ("memory", -1),
+    ],
+)
+def test_create_project_rejects_invalid_resource_quantities(client, field_name, value):
+    response = create_project(client, **{field_name: value})
+
+    assert response.status_code == 400
+    assert field_name in response.get_json()["error"]
 
 
 def test_create_project_rejects_non_github_repo_url_that_does_not_exist(client):
@@ -850,6 +891,77 @@ def test_create_project_accepts_kubernetes_env_var_references(client):
     assert payload["env_vars"][1]["is_secret"] is True
 
 
+def test_create_project_rejects_invalid_reference_name_outside_kubernetes_mode(client, app):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "fake"
+
+    response = create_project(
+        client,
+        name="invalid-reference-name-project",
+        env_vars=[
+            {
+                "name": "APP_ENV",
+                "value_source": "configmap_key_ref",
+                "source_name": "invalid..name",
+                "source_key": "app-env",
+            },
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "source_name" in response.get_json()["error"]
+
+
+@pytest.mark.parametrize("source_key", ["invalid/key", "invalid key", "..data", ".", "a" * 254])
+def test_create_project_rejects_invalid_kubernetes_source_key(client, app, source_key):
+    with app.app_context():
+        app.config["CONTROL_PLANE_EXECUTOR"] = "fake"
+
+    response = create_project(
+        client,
+        name="invalid-source-key-project",
+        env_vars=[
+            {
+                "name": "APP_ENV",
+                "value_source": "secret_key_ref",
+                "source_name": "my-app-secret",
+                "source_key": source_key,
+            },
+        ],
+    )
+
+    assert response.status_code == 400
+    assert "source_key" in response.get_json()["error"]
+
+
+def test_create_project_accepts_kubernetes_source_key_character_set(client):
+    response = create_project(
+        client,
+        name="valid-source-key-project",
+        env_vars=[
+            {
+                "name": "APP_ENV",
+                "value_source": "secret_key_ref",
+                "source_name": "my-app-secret",
+                "source_key": ".config_KEY-1",
+            },
+        ],
+    )
+
+    assert response.status_code == 201
+
+
+def test_create_project_rejects_non_string_literal_env_value(client):
+    response = create_project(
+        client,
+        name="invalid-literal-value-project",
+        env_vars=[{"name": "REPLICAS", "value_source": "literal", "value": 3}],
+    )
+
+    assert response.status_code == 400
+    assert "value' must be a string" in response.get_json()["error"]
+
+
 def test_create_project_rejects_env_var_without_value_or_source(client):
     response = create_project(
         client,
@@ -1039,4 +1151,4 @@ def test_create_project_rejects_unsupported_env_ref_field_names(client):
     )
 
     assert response.status_code == 400
-    assert "configmap_ref" in response.get_json()["error"]
+    assert "secret_ref" in response.get_json()["error"]

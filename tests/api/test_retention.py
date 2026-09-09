@@ -29,6 +29,8 @@ def prepare_old_deployment(app, deployment_id, workspace_root, *, now):
     logs.mkdir(parents=True)
     build_log = logs / "build.log"
     build_log.write_text("old build output", encoding="utf-8")
+    runtime_log = logs / "runtime.log"
+    runtime_log.write_text("old runtime output", encoding="utf-8")
     deployment.build.workspace_path = str(workspace)
     deployment.build.log_path = str(build_log)
     deployment.build.build_log_path = str(build_log)
@@ -45,6 +47,7 @@ def prepare_old_deployment(app, deployment_id, workspace_root, *, now):
                 event_type="deployment.failed",
                 status=deployment.status,
                 message="lifecycle history",
+                metadata_json={"runtime_log_path": str(runtime_log)},
             ),
         ]
     )
@@ -85,6 +88,15 @@ def test_cleanup_observability_removes_only_safe_disposable_data(client, app, tm
         assert deployment.build.build_log_path is None
         assert DeploymentEvent.query.filter_by(event_type="claim_acquired").count() == 0
         assert DeploymentEvent.query.filter_by(event_type="deployment.failed").count() == 1
+        retention_event = DeploymentEvent.query.filter_by(event_type="observability.artifacts_removed").one()
+        assert retention_event.metadata_json["removed_artifacts"] == ["build_log", "runtime_log"]
+        project_id = deployment.project_id
+
+    summary = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/summary").get_json()
+    assert summary["build_log_available"] is False
+    assert summary["runtime_log_available"] is False
+    assert summary["build_log_state"] == "retention_removed"
+    assert summary["runtime_log_state"] == "retention_removed"
 
 
 def test_cleanup_observability_requires_explicit_audit_retention(client, app, tmp_path):

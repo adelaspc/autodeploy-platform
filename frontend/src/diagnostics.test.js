@@ -122,6 +122,7 @@ describe("buildDiagnosticsView", () => {
 
   it("formats first-class pod runtime fields", () => {
     const view = buildDiagnosticsView({
+      diagnostics_snapshot_at: "2026-09-08T12:00:00Z",
       pod_phase: "Running",
       container_reason: "CrashLoopBackOff",
       restart_count: 3,
@@ -136,6 +137,7 @@ describe("buildDiagnosticsView", () => {
       { label: "Images", value: "docker.io/example/app:v1" },
       { label: "Image pull secrets", value: "dockerhub-pull" },
     ]);
+    assert.equal(view.snapshotAt, "2026-09-08T12:00:00Z");
   });
 
   it("uses safe fallback values for empty diagnostics", () => {
@@ -144,9 +146,37 @@ describe("buildDiagnosticsView", () => {
     assert.equal(view.stageLabel, "No failure");
     assert.equal(view.summary, "No failure summary recorded.");
     assert.equal(view.eventType, "not recorded");
+    assert.equal(view.snapshotAt, null);
     assert.equal(view.hasHelm, false);
     assert.equal(view.hasResourceContext, false);
     assert.deepEqual(view.insights, []);
     assert.equal(view.rawJson, "");
+  });
+});
+
+
+describe("Helm failure snapshots", () => {
+  it("uses structured container reasons and exposes partial collection", () => {
+    const view = buildDiagnosticsView({
+      failure_stage: "helm", failure_summary: "context deadline exceeded",
+      pod_runtime: [{ name: "demo-pod", containers: [{ reason: "CrashLoopBackOff" }] }],
+      diagnostics_collection_status: "partial", diagnostics_collected_at: "2026-09-06T10:00:00Z",
+      diagnostics_collection_errors: [{ operation: "previous-logs", reason: "previous_logs_unavailable" }],
+      pod_logs_summary: "Starting application", deployment_describe_summary: "Available: 0/1",
+    });
+    assert.equal(view.stage, "helm");
+    assert.equal(view.summary, "context deadline exceeded");
+    assert.equal(view.insights[0].title, "Container is restarting");
+    assert.equal(view.collectionStatus, "partial");
+    assert.equal(view.collectedAt, "2026-09-06T10:00:00Z");
+    assert.equal(view.collectionErrors[0].reason, "previous_logs_unavailable");
+    assert.equal(view.deploymentDescribeSummary, "Available: 0/1");
+  });
+
+  it("does not infer CrashLoopBackOff from an old Helm timeout alone", () => {
+    const view = buildDiagnosticsView({ failure_stage: "helm", failure_summary: "context deadline exceeded" });
+    assert.deepEqual(view.insights, []);
+    assert.equal(view.collectionStatus, null);
+    assert.equal(view.collectedAt, null);
   });
 });

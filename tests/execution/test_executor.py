@@ -54,8 +54,8 @@ def test_local_docker_executor_processes_deployment_with_stubbed_commands(client
     assert processed.status == "running"
     assert processed.deploy_target == "local-docker"
     assert processed.build.workspace_path.startswith(str(tmp_path))
-    assert processed.build.image_tag == "local-executor-app:abc123def456"
-    assert processed.build.image_ref == "local-executor-app:abc123def456"
+    assert processed.build.image_tag.startswith("local-executor-app:abc123def456-")
+    assert processed.build.image_ref == processed.build.image_tag
 
     assert [command[:2] for command in commands[:3]] == [
         ["git", "clone"],
@@ -159,6 +159,8 @@ def test_worker_uses_deployment_snapshot_after_project_is_edited(client, app, tm
     assert f"paas-snapshot-app-{deployment_id}" in run_command
     assert "127.0.0.1:18080:5000" in run_command
     assert "APP_MODE=original" in run_command
+    assert "APP_COMMIT_SHA=abc123def456" in run_command
+    assert f"APP_VERSION={processed.build.image_tag}" in run_command
     assert health_urls == ["http://127.0.0.1:18080/health"]
 
 
@@ -245,6 +247,8 @@ def test_local_docker_executor_pushes_registry_image_when_enabled(tmp_path):
 
     def registry_runner(args, capture_output, text, timeout, check, input=None, heartbeat_cb=None, heartbeat_interval_seconds=None):
         commands.append({"args": args, "input": input})
+        if args[:2] == ["docker", "push"]:
+            return subprocess.CompletedProcess(args, 0, "digest: sha256:" + "a" * 64, "")
         if args[:2] == ["git", "clone"]:
             repo_dir = Path(args[-1])
             repo_dir.mkdir(parents=True, exist_ok=True)
@@ -314,15 +318,19 @@ def test_local_docker_executor_pushes_registry_image_when_enabled(tmp_path):
     deployment.build.image_ref = build_result.image_ref
     tag_result = executor.tag_image(deployment)
     push_result = executor.push_image(deployment)
+    deployment.build.image_ref = push_result.image_ref
     verify_result = executor.verify_image(deployment)
 
-    assert build_result.image_tag == "demo-app:abc123def456"
-    assert build_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
-    assert tag_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
-    assert push_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
-    assert verify_result.image_ref == "registry.example.com/paas/demo-app:abc123def456"
+    assert build_result.image_tag.startswith("demo-app:abc123def456-")
+    assert build_result.image_ref == "registry.example.com/paas/" + build_result.image_tag
+    assert tag_result.image_ref == build_result.image_ref
+    assert push_result.image_ref == "registry.example.com/paas/demo-app@sha256:" + "a" * 64
+    assert verify_result.image_ref == push_result.image_ref
+    executor.deploy(deployment)
+    run_call = next(item for item in commands if item["args"][:3] == ["docker", "run", "--detach"])
+    assert run_call["args"][-1] == push_result.image_ref
     build_call = next(item for item in commands if item["args"][:2] == ["docker", "build"])
-    assert build_call["args"][3] == "demo-app:abc123def456"
+    assert build_call["args"][3] == build_result.image_tag
     assert any(item["args"][:2] == ["docker", "tag"] for item in commands)
     assert any(item["args"][:2] == ["docker", "push"] for item in commands)
     assert any(item["args"][:4] == ["docker", "buildx", "imagetools", "inspect"] for item in commands)
@@ -356,7 +364,7 @@ def test_local_docker_executor_fails_when_registry_image_verification_fails(tmp_
                 (),
                 {
                     "image_tag": "demo-app:abc123def456",
-                    "image_ref": "registry.example.com/paas/demo-app:abc123def456",
+                    "image_ref": "registry.example.com/paas/demo-app@sha256:" + "a" * 64,
                 },
             )(),
             "project": type("ProjectStub", (), {"env_vars": []})(),
@@ -391,6 +399,7 @@ def test_local_docker_executor_skips_push_when_registry_disabled(tmp_path):
 
     tag_result = executor.tag_image(deployment)
     push_result = executor.push_image(deployment)
+    deployment.build.image_ref = push_result.image_ref
     verify_result = executor.verify_image(deployment)
 
     assert tag_result.metadata["skipped"] is True

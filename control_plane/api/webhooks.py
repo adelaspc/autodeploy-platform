@@ -4,13 +4,17 @@ import hashlib
 import hmac
 from urllib.parse import urlparse
 
-from control_plane.application.deployments.orchestration import create_requested_deployment
-from control_plane.application.projects.service import serialize_triggered_deployment
-from control_plane.api.request_context import error_payload
-from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, current_app, jsonify, request
+from sqlalchemy.exc import IntegrityError
 
-from control_plane.application.projects.validation import kubernetes_deployment_prereq_error
+from control_plane.api.request_context import error_payload
+from control_plane.api.request_parsing import parse_json_object
+from control_plane.application.deployments.orchestration import create_requested_deployment
+from control_plane.application.projects.validation import (
+    kubernetes_deployment_prereq_error,
+    validate_git_commit_sha,
+)
+from control_plane.application.projects.service import serialize_triggered_deployment
 from control_plane.extensions import db
 from control_plane.models import Project, WebhookDelivery
 
@@ -205,7 +209,9 @@ def github_webhook():
 
     event_type = request.headers.get("X-GitHub-Event", "").strip().lower()
     delivery_id = request.headers.get("X-GitHub-Delivery")
-    payload = request.get_json(silent=True) or {}
+    payload, error_response, status_code = parse_json_object(request=request)
+    if error_response is not None:
+        return error_response, status_code
     repository = payload.get("repository") or {}
     repository_url = repository.get("clone_url") or repository.get("html_url") or repository.get("ssh_url")
     branch = github_branch_from_ref(payload.get("ref"))
@@ -244,6 +250,11 @@ def github_webhook():
             branch=branch,
             commit_sha=commit_sha,
         )
+
+    commit_error = validate_git_commit_sha(commit_sha, allow_abbreviated=False)
+    if commit_error:
+        return jsonify(error_payload(commit_error)), 400
+    commit_sha = commit_sha.lower()
 
     repository_matches, branch_matches = github_push_project_matches(repository_url, branch)
     if not repository_matches:

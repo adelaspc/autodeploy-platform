@@ -3,8 +3,10 @@
 import json
 
 from control_plane.deployment_spec import project_for_deployment
+from control_plane.security import redact_log_text
 from worker.execution.contracts import ExecutionResult, WorkerExecutionError
 from worker.executors.kubernetes.names import helm_release_name
+from worker.executors.kubernetes.helm_diagnostics import collect_helm_failure_diagnostics, helm_failure_secret_values
 from worker.helm.runner import HelmCommandError
 from worker.helm.values import GenericWebAppValuesConfig, generic_web_app_values
 
@@ -19,6 +21,7 @@ class HelmDeploymentMixin:
         release_name = helm_release_name(project, deployment)
         service_name = self._helm_resource_name(release_name)
         deployment_name = service_name
+        pod_selector = f"app.kubernetes.io/instance={release_name}"
         internal_service_url = self._service_url(service_name, project.port)
         ingress_host = self._ingress_host(deployment.id)
         service_url = self._ingress_url(ingress_host)
@@ -61,18 +64,31 @@ class HelmDeploymentMixin:
             chart_path=self.helm_chart_path,
             helm_timeout=self.helm_timeout,
             kubeconfig=self.kubeconfig,
+            runner=self._run_helm_command,
         )
 
         try:
             helm_result = helm_runner.upgrade_install(release_name, str(values_path))
         except HelmCommandError as exc:
-            output = "\n".join(part for part in (exc.result.stdout, exc.result.stderr) if part)
-            self._write_log(helm_log_path, exc.result.args, output)
-            failure_metadata = metadata | {
-                "helm_args": exc.result.args,
+            secret_values = helm_failure_secret_values(self, deployment)
+            output = redact_log_text("\n".join(part for part in (exc.result.stdout, exc.result.stderr) if part), secret_values=secret_values)
+            log_error = None
+            try:
+                self._write_log(helm_log_path, exc.result.args, output, redacted_values=secret_values)
+            except OSError:
+                log_error = "log_write_failed"
+            diagnostics = collect_helm_failure_diagnostics(
+                self, deployment, deployment_name=deployment_name, service_name=service_name,
+                pod_selector=pod_selector, logs_dir=logs_dir,
+            )
+            failure_metadata = metadata | diagnostics | {
+                "deployment_name": deployment_name,
+                "service_name": service_name,
+                "helm_args": self._sanitize_args(exc.result.args, redacted_values=secret_values),
+                "helm_log_error": log_error,
                 "helm_returncode": exc.result.returncode,
-                "helm_stdout_summary": self._summarize_output(exc.result.stdout),
-                "helm_stderr_summary": self._summarize_output(exc.result.stderr),
+                "helm_stdout_summary": self._summarize_output(redact_log_text(exc.result.stdout, secret_values=secret_values)),
+                "helm_stderr_summary": self._summarize_output(redact_log_text(exc.result.stderr, secret_values=secret_values)),
                 "helm_log_path": str(helm_log_path),
             }
             raise WorkerExecutionError(
@@ -135,7 +151,7 @@ class HelmDeploymentMixin:
                 log_path=port_forward_log_path,
             )
             health_metadata |= self._collect_pod_runtime_metadata(
-                deployment_name, prefix="healthcheck", logs_dir=logs_dir
+                deployment_name, prefix="healthcheck", logs_dir=logs_dir, pod_selector=pod_selector
             )
             health_metadata |= self._capture_runtime_logs(
                 deployment, deployment_name, logs_dir=logs_dir
@@ -145,6 +161,7 @@ class HelmDeploymentMixin:
                 deployment_name,
                 service_name=service_name,
                 logs_dir=logs_dir,
+                pod_selector=pod_selector,
             )
             raise WorkerExecutionError(
                 exc.step,
@@ -219,10 +236,11 @@ class HelmDeploymentMixin:
         _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
         log_path = logs_dir / "helm-uninstall.log"
         release_name = self._helm_release_name_for_deployment(deployment)
+        namespace = self._namespace_for_deployment(deployment)
         metadata = {
             "deployment_mode": "helm",
             "helm_release_name": release_name,
-            "namespace": self.namespace,
+            "namespace": namespace,
             "chart_path": self.helm_chart_path,
             "helm_log_path": str(log_path),
         }
@@ -234,11 +252,12 @@ class HelmDeploymentMixin:
             metadata=metadata,
         )
         helm_runner = self.helm_runner_factory(
-            namespace=self.namespace,
+            namespace=namespace,
             helm_binary=self.helm_binary,
             chart_path=self.helm_chart_path,
             helm_timeout=self.helm_timeout,
             kubeconfig=self.kubeconfig,
+            runner=self._run_helm_command,
         )
 
         try:
@@ -316,12 +335,14 @@ class HelmDeploymentMixin:
 
     def runtime_helm_status(self, deployment):
         release_name = self._helm_release_name_for_deployment(deployment)
+        namespace = self._namespace_for_deployment(deployment)
         helm_runner = self.helm_runner_factory(
-            namespace=self.namespace,
+            namespace=namespace,
             helm_binary=self.helm_binary,
             chart_path=self.helm_chart_path,
             helm_timeout=self.helm_timeout,
             kubeconfig=self.kubeconfig,
+            runner=self._run_helm_command,
         )
         try:
             result = helm_runner.status(release_name)
@@ -330,7 +351,7 @@ class HelmDeploymentMixin:
                 return {
                     "release_exists": False,
                     "helm_release_name": release_name,
-                    "namespace": self.namespace,
+                    "namespace": namespace,
                     "chart_path": self.helm_chart_path,
                     "helm_args": exc.result.args,
                     "helm_returncode": exc.result.returncode,
@@ -342,7 +363,7 @@ class HelmDeploymentMixin:
                 f"Failed to inspect Helm release '{release_name}'",
                 metadata={
                     "helm_release_name": release_name,
-                    "namespace": self.namespace,
+                    "namespace": namespace,
                     "chart_path": self.helm_chart_path,
                     "helm_args": exc.result.args,
                     "helm_returncode": exc.result.returncode,
@@ -360,7 +381,7 @@ class HelmDeploymentMixin:
         return {
             "release_exists": True,
             "helm_release_name": release_name,
-            "namespace": self.namespace,
+            "namespace": namespace,
             "chart_path": self.helm_chart_path,
             "release_status": release_status,
             "helm_args": result.args,

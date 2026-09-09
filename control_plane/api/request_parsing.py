@@ -1,6 +1,17 @@
-"""Parse shared pagination and filtering parameters at the HTTP boundary."""
+"""Parse shared request inputs at the HTTP boundary."""
 
 from flask import jsonify
+
+
+def parse_json_object(*, request):
+    """Return an object body, accepting an absent body as an empty object."""
+    raw_body = request.get_data(cache=True)
+    payload = request.get_json(silent=True)
+    if isinstance(payload, dict):
+        return payload, None, None
+    if not raw_body.strip():
+        return {}, None, None
+    return None, jsonify({"error": "Request body must be a JSON object"}), 400
 
 
 def parse_limit_arg(name, *, default, request, min_value=1, max_value=100):

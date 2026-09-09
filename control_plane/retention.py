@@ -54,8 +54,31 @@ def disposable_event_query(cutoff):
     )
 
 
+def artifact_paths(deployment, metadata_key, *, event_type=None):
+    paths = []
+    for event in deployment.events:
+        if event_type is not None and event.event_type != event_type:
+            continue
+        value = (event.metadata_json or {}).get(metadata_key)
+        if isinstance(value, str) and value:
+            paths.append(Path(value))
+    return paths
+
+
+def artifact_exists_in_workspace(paths, workspace):
+    for path in paths:
+        try:
+            candidate = path.resolve()
+        except OSError:
+            continue
+        if (candidate == workspace or workspace in candidate.parents) and candidate.is_file():
+            return True
+    return False
+
+
 def cleanup_observability_data(*, older_than_days, apply=False, include_audit_events=False, now=None):
-    cutoff = retention_cutoff(older_than_days=older_than_days, now=now)
+    current = now or datetime.now(timezone.utc)
+    cutoff = retention_cutoff(older_than_days=older_than_days, now=current)
     deployments = old_terminal_deployments(cutoff)
     workspaces = [path for deployment in deployments if (path := safe_deployment_workspace(deployment)).exists()]
     disposable_events = disposable_event_query(cutoff).count()
@@ -80,6 +103,16 @@ def cleanup_observability_data(*, older_than_days, apply=False, include_audit_ev
         workspace = safe_deployment_workspace(deployment)
         if workspace is None or not workspace.exists():
             continue
+        removed_artifacts = []
+        build_paths = [
+            Path(value)
+            for value in (deployment.build.build_log_path, deployment.build.log_path)
+            if value
+        ] + artifact_paths(deployment, "log_path", event_type="image.build_succeeded")
+        if artifact_exists_in_workspace(build_paths, workspace):
+            removed_artifacts.append("build_log")
+        if artifact_exists_in_workspace(artifact_paths(deployment, "runtime_log_path"), workspace):
+            removed_artifacts.append("runtime_log")
         try:
             shutil.rmtree(workspace)
         except OSError as exc:
@@ -90,6 +123,21 @@ def cleanup_observability_data(*, older_than_days, apply=False, include_audit_ev
         build.workspace_path = None
         build.log_path = None
         build.build_log_path = None
+        db.session.add(
+            DeploymentEvent(
+                deployment=deployment,
+                event_type="observability.artifacts_removed",
+                step="observability.retention",
+                level="info",
+                status=deployment.status,
+                message="Removed workspace artifacts under the explicit retention policy",
+                metadata_json={
+                    "removed_artifacts": removed_artifacts,
+                    "retention_cutoff": cutoff.isoformat(),
+                },
+                created_at=current,
+            )
+        )
 
     result["disposable_events_removed"] = disposable_event_query(cutoff).delete(synchronize_session=False)
     if include_audit_events:

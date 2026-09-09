@@ -32,7 +32,8 @@ def make_deployment(
         image_ref=image_ref,
         registry=registry,
         image_name=image_name,
-        image_tag=image_tag,
+        image_tag=image_tag or "build-42",
+        commit_sha="0123456789abcdef",
         test_command=test_command,
     )
     return SimpleNamespace(project=project, build=build)
@@ -47,12 +48,16 @@ def test_minimal_config_produces_generic_web_app_values():
     assert values["image"] == {
         "repository": "registry.example.com/team/app",
         "tag": "abc123",
+        "digest": "",
         "pullPolicy": "IfNotPresent",
         "pullSecrets": [{"name": "registry-pull-secret"}],
     }
     assert values["replicaCount"] == 1
     assert values["container"] == {"port": 8080}
-    assert values["env"] == []
+    assert values["env"] == [
+        {"name": "APP_COMMIT_SHA", "value": "0123456789abcdef"},
+        {"name": "APP_VERSION", "value": "build-42"},
+    ]
     assert values["envFrom"] == {"configMaps": [], "secrets": []}
     assert values["service"]["type"] == "ClusterIP"
     assert values["resources"] == {}
@@ -99,6 +104,27 @@ def test_literal_env_vars_map_to_env_values():
     assert values["env"] == [
         {"name": "APP_ENV", "value": "production"},
         {"name": "FEATURE_FLAG", "value": "True"},
+        {"name": "APP_COMMIT_SHA", "value": "0123456789abcdef"},
+        {"name": "APP_VERSION", "value": "build-42"},
+    ]
+
+
+def test_platform_identity_replaces_project_values_with_build_identity():
+    values = generic_web_app_values(
+        make_deployment(
+            image_tag="demo:commit-17",
+            env_vars=[
+                {"name": "APP_COMMIT_SHA", "value": "project-value"},
+                {"name": "APP_VERSION", "value": "project-version"},
+                {"name": "APP_ENV", "value": "production"},
+            ],
+        )
+    )
+
+    assert values["env"] == [
+        {"name": "APP_ENV", "value": "production"},
+        {"name": "APP_COMMIT_SHA", "value": "0123456789abcdef"},
+        {"name": "APP_VERSION", "value": "demo:commit-17"},
     ]
 
 
@@ -126,6 +152,9 @@ def test_configmap_key_references_map_to_value_from():
                 }
             },
         }
+        ,
+        {"name": "APP_COMMIT_SHA", "value": "0123456789abcdef"},
+        {"name": "APP_VERSION", "value": "build-42"},
     ]
     assert values["envFrom"] == {"configMaps": [], "secrets": []}
 
@@ -154,6 +183,9 @@ def test_secret_key_references_map_to_value_from():
                 }
             },
         }
+        ,
+        {"name": "APP_COMMIT_SHA", "value": "0123456789abcdef"},
+        {"name": "APP_VERSION", "value": "build-42"},
     ]
     assert values["envFrom"] == {"configMaps": [], "secrets": []}
 
@@ -165,6 +197,17 @@ def test_healthcheck_path_maps_to_readiness_and_liveness_probe_paths():
     assert values["probes"]["readiness"]["httpGet"] == {"path": "/ready", "port": "http"}
     assert values["probes"]["liveness"]["enabled"] is True
     assert values["probes"]["liveness"]["httpGet"] == {"path": "/ready", "port": "http"}
+    assert values["probes"]["readiness"]["initialDelaySeconds"] == 5
+    assert values["probes"]["readiness"]["periodSeconds"] == 10
+    assert values["probes"]["liveness"]["initialDelaySeconds"] == 15
+    assert values["probes"]["liveness"]["periodSeconds"] == 20
+
+
+def test_blank_healthcheck_path_uses_root_probe_path():
+    values = generic_web_app_values(make_deployment(healthcheck_path=" "))
+
+    assert values["probes"]["readiness"]["httpGet"] == {"path": "/", "port": "http"}
+    assert values["probes"]["liveness"]["httpGet"] == {"path": "/", "port": "http"}
 
 
 def test_startup_probe_is_disabled_by_default():

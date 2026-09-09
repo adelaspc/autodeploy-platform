@@ -14,29 +14,158 @@ from worker.execution.factory import executor_contract_for_name
 
 VALID_ENV_VALUE_SOURCES = {"literal", "configmap_key_ref", "secret_key_ref"}
 KUBERNETES_ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-KUBERNETES_RESOURCE_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
+KUBERNETES_RESOURCE_NAME_RE = re.compile(
+    r"^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$"
+)
+KUBERNETES_CONFIG_KEY_RE = re.compile(r"^[-._A-Za-z0-9]+$")
 GIT_BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
+GIT_COMMIT_RE = re.compile(r"^(?:[0-9a-fA-F]{7,40}|[0-9a-fA-F]{64})$")
+FULL_GIT_COMMIT_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+CPU_QUANTITY_RE = re.compile(r"^(?:[1-9][0-9]*m|(?:0\.[0-9]{1,3}|[1-9][0-9]*(?:\.[0-9]{1,3})?))$")
+MEMORY_QUANTITY_RE = re.compile(r"^[1-9][0-9]*(?:[KMGTPE]i|[kMGTPE])?$")
+
+PROJECT_ALLOWED_FIELDS = {
+    "name",
+    "repo_url",
+    "branch",
+    "git_auth_type",
+    "git_secret_ref",
+    "dockerfile_path",
+    "build_context",
+    "port",
+    "healthcheck_path",
+    "env_vars",
+    "default_test_command",
+    "migration_command",
+    "cpu",
+    "memory",
+    "trigger",
+    "runtime",
+}
+MANUAL_DEPLOYMENT_ALLOWED_FIELDS = {
+    "commit_sha",
+    "registry",
+    "image_name",
+    "image_tag",
+    "image_ref",
+    "build_status",
+    "test_command",
+    "environment",
+    "status",
+    "service_url",
+    "message",
+}
+DEPLOY_ALLOWED_FIELDS = {"branch", "test_command"}
+ENV_VAR_ALLOWED_FIELDS = {"name", "value", "value_source", "source_name", "source_key", "is_secret"}
+
+PROJECT_STRING_LIMITS = {
+    "name": 120,
+    "repo_url": 255,
+    "branch": 120,
+    "git_secret_ref": 120,
+    "dockerfile_path": 255,
+    "build_context": 255,
+    "healthcheck_path": 255,
+}
+MANUAL_DEPLOYMENT_STRING_LIMITS = {
+    "registry": 255,
+    "image_name": 255,
+    "image_tag": 255,
+    "image_ref": 512,
+    "environment": 64,
+    "service_url": 255,
+    "message": 2000,
+}
+MAX_ENV_VARS = 100
+MAX_ENV_VAR_NAME_LENGTH = 253
+MAX_ENV_VALUE_LENGTH = 65535
+KUBERNETES_NAME_MAX_LENGTH = 253
+KUBERNETES_CONFIG_KEY_MAX_LENGTH = 253
 
 
-def validate_non_empty_string(value, field_name):
+def validate_bounded_string(value, field_name, max_length, *, allow_none=False, allow_empty=False):
+    if value is None and allow_none:
+        return None
     if not isinstance(value, str):
         return f"Invalid {field_name}. Expected a string"
-    if not value.strip():
+    if not allow_empty and not value.strip():
         return f"Invalid {field_name}. Expected a non-empty string"
+    if len(value) > max_length:
+        return f"Invalid {field_name}. Expected at most {max_length} characters"
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return f"Invalid {field_name}. Control characters are not allowed"
+    return None
+
+
+def unsupported_fields_error(payload, allowed_fields, payload_name):
+    unsupported = sorted(set(payload) - allowed_fields)
+    if unsupported:
+        return f"Unsupported {payload_name} fields: {', '.join(unsupported)}"
+    return None
+
+
+def validate_git_commit_sha(value, *, allow_abbreviated=True):
+    if not isinstance(value, str):
+        return "Invalid commit_sha. Expected a string"
+    commit_re = GIT_COMMIT_RE if allow_abbreviated else FULL_GIT_COMMIT_RE
+    if commit_re.fullmatch(value) is None:
+        expected = "7 to 40, or exactly 64" if allow_abbreviated else "exactly 40 or 64"
+        return f"Invalid commit_sha. Expected a hexadecimal Git object ID with {expected} characters"
+    return None
+
+
+def validate_resource_quantity(value, field_name):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return f"Invalid {field_name}. Expected a string"
+    if len(value) > 32:
+        return f"Invalid {field_name}. Expected at most 32 characters"
+    if field_name == "cpu" and CPU_QUANTITY_RE.fullmatch(value) is None:
+        return "Invalid cpu. Expected a positive CPU quantity such as '250m', '0.5', or '1'"
+    if field_name == "memory" and MEMORY_QUANTITY_RE.fullmatch(value) is None:
+        return "Invalid memory. Expected a positive byte quantity such as '512Mi', '1Gi', or '100M'"
+    return None
+
+
+def validate_kubernetes_resource_name(value, field_name):
+    string_error = validate_bounded_string(value, field_name, KUBERNETES_NAME_MAX_LENGTH)
+    if string_error:
+        return string_error
+    if KUBERNETES_RESOURCE_NAME_RE.fullmatch(value) is None:
+        return f"Invalid {field_name}. Expected a valid Kubernetes resource name using DNS subdomain syntax"
+    return None
+
+
+def validate_kubernetes_config_key(value, field_name):
+    string_error = validate_bounded_string(value, field_name, KUBERNETES_CONFIG_KEY_MAX_LENGTH)
+    if string_error:
+        return string_error
+    if KUBERNETES_CONFIG_KEY_RE.fullmatch(value) is None or value in {".", ".."} or value.startswith(".."):
+        return (
+            f"Invalid {field_name}. Expected a valid Kubernetes Secret/ConfigMap key containing only "
+            "letters, digits, '-', '_' or '.'"
+        )
     return None
 
 
 def validate_healthcheck_path(value):
-    string_error = validate_non_empty_string(value, "healthcheck_path")
+    string_error = validate_bounded_string(
+        value,
+        "healthcheck_path",
+        PROJECT_STRING_LIMITS["healthcheck_path"],
+    )
     if string_error:
         return string_error
     if not value.startswith("/"):
         return "Invalid healthcheck_path. Expected an absolute path starting with '/'"
+    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in value):
+        return "Invalid healthcheck_path. Whitespace and control characters are not allowed"
     return None
 
 
 def validate_branch_name(value):
-    string_error = validate_non_empty_string(value, "branch")
+    string_error = validate_bounded_string(value, "branch", PROJECT_STRING_LIMITS["branch"])
     if string_error:
         return string_error
     if (
@@ -76,12 +205,14 @@ def normalize_github_repo_url(value):
 
 
 def validate_repo_url(value):
-    string_error = validate_non_empty_string(value, "repo_url")
+    string_error = validate_bounded_string(value, "repo_url", PROJECT_STRING_LIMITS["repo_url"])
     if string_error:
         return string_error
 
     normalized_remote = normalize_github_repo_url(value)
     if normalized_remote is not None:
+        if len(normalized_remote) > PROJECT_STRING_LIMITS["repo_url"]:
+            return f"Invalid repo_url. Expected at most {PROJECT_STRING_LIMITS['repo_url']} characters after normalization"
         return None
 
     # Local repositories are useful for development but must stay inside the
@@ -109,7 +240,7 @@ def validate_repo_url(value):
 
 
 def validate_repo_relative_path(value, field_name, *, allow_dot=False):
-    string_error = validate_non_empty_string(value, field_name)
+    string_error = validate_bounded_string(value, field_name, PROJECT_STRING_LIMITS[field_name])
     if string_error:
         return string_error
 
@@ -128,7 +259,11 @@ def validate_project_spec_fields(payload):
     # This validation is shared by create and patch requests.
     for field_name in ("name",):
         if field_name in payload:
-            string_error = validate_non_empty_string(payload[field_name], field_name)
+            string_error = validate_bounded_string(
+                payload[field_name],
+                field_name,
+                PROJECT_STRING_LIMITS[field_name],
+            )
             if string_error:
                 return string_error
 
@@ -167,6 +302,25 @@ def validate_project_spec_fields(payload):
             if command_error:
                 return command_error
 
+    if "git_secret_ref" in payload:
+        git_secret_ref = payload["git_secret_ref"]
+        string_error = validate_bounded_string(
+            git_secret_ref,
+            "git_secret_ref",
+            PROJECT_STRING_LIMITS["git_secret_ref"],
+            allow_none=True,
+        )
+        if string_error:
+            return string_error
+        if git_secret_ref is not None and KUBERNETES_ENV_VAR_NAME_RE.fullmatch(git_secret_ref) is None:
+            return "Invalid git_secret_ref. Expected an environment-variable identifier"
+
+    for resource_field in ("cpu", "memory"):
+        if resource_field in payload:
+            quantity_error = validate_resource_quantity(payload[resource_field], resource_field)
+            if quantity_error:
+                return quantity_error
+
     return None
 
 
@@ -184,6 +338,10 @@ def normalize_project_spec_fields(payload):
 
 
 def validate_project_payload(payload):
+    unsupported_error = unsupported_fields_error(payload, PROJECT_ALLOWED_FIELDS, "project")
+    if unsupported_error:
+        return unsupported_error
+
     required_fields = ("name", "repo_url", "branch", "port", "healthcheck_path")
     missing_fields = [field for field in required_fields if payload.get(field) in (None, "")]
     if missing_fields:
@@ -196,6 +354,9 @@ def validate_project_payload(payload):
         "dockerfile_path": payload.get("dockerfile_path", "Dockerfile"),
         "build_context": payload.get("build_context", "."),
         "healthcheck_path": payload.get("healthcheck_path"),
+        "git_secret_ref": payload.get("git_secret_ref"),
+        "cpu": payload.get("cpu"),
+        "memory": payload.get("memory"),
     }
     for command_field in ("default_test_command", "migration_command"):
         if command_field in payload:
@@ -220,11 +381,8 @@ def validate_project_payload(payload):
     git_secret_ref = payload.get("git_secret_ref")
     if git_auth_type == "token" and not git_secret_ref:
         return "git_secret_ref is required when git_auth_type is 'token'"
-    if git_secret_ref is not None and not isinstance(git_secret_ref, str):
-        return "Invalid git_secret_ref. Expected a string"
-
     port = payload.get("port")
-    if not isinstance(port, int) or port < 1 or port > 65535:
+    if type(port) is not int or port < 1 or port > 65535:
         return "Invalid port. Expected an integer between 1 and 65535"
 
     env_vars = payload.get("env_vars", [])
@@ -236,26 +394,11 @@ def validate_project_payload(payload):
 
 
 def validate_project_patch_payload(payload, project):
-    allowed_fields = {
-        "name",
-        "repo_url",
-        "branch",
-        "git_auth_type",
-        "git_secret_ref",
-        "dockerfile_path",
-        "build_context",
-        "port",
-        "healthcheck_path",
-        "env_vars",
-        "default_test_command",
-        "migration_command",
-        "cpu",
-        "memory",
-        "trigger",
-        "runtime",
-    }
-    # Ignore fields that cannot be updated through this endpoint.
-    update_data = {key: value for key, value in payload.items() if key in allowed_fields}
+    unsupported_error = unsupported_fields_error(payload, PROJECT_ALLOWED_FIELDS, "project")
+    if unsupported_error:
+        return None, unsupported_error
+
+    update_data = dict(payload)
     if not update_data:
         return None, "Provide at least one updatable field"
 
@@ -272,10 +415,6 @@ def validate_project_patch_payload(payload, project):
     if "git_auth_type" in update_data and update_data["git_auth_type"] not in Project.VALID_GIT_AUTH_TYPES:
         return None, "Invalid git_auth_type. Expected one of: " + ", ".join(Project.VALID_GIT_AUTH_TYPES)
 
-    if "git_secret_ref" in update_data and update_data["git_secret_ref"] is not None:
-        if not isinstance(update_data["git_secret_ref"], str):
-            return None, "Invalid git_secret_ref. Expected a string"
-
     # Validate the final auth configuration, including values already stored on the project.
     effective_git_auth_type = update_data.get("git_auth_type", project.git_auth_type)
     effective_git_secret_ref = update_data.get("git_secret_ref", project.git_secret_ref)
@@ -284,7 +423,7 @@ def validate_project_patch_payload(payload, project):
 
     if "port" in update_data:
         port = update_data["port"]
-        if not isinstance(port, int) or port < 1 or port > 65535:
+        if type(port) is not int or port < 1 or port > 65535:
             return None, "Invalid port. Expected an integer between 1 and 65535"
 
     if "env_vars" in update_data:
@@ -298,19 +437,27 @@ def validate_project_patch_payload(payload, project):
 def validate_project_env_vars(env_vars):
     if not isinstance(env_vars, list):
         return "Invalid env_vars. Expected a list of environment variable definitions"
+    if len(env_vars) > MAX_ENV_VARS:
+        return f"Invalid env_vars. Expected at most {MAX_ENV_VARS} entries"
 
-    # Apply Kubernetes naming and secret rules only when that executor is active;
-    # the fake and local Docker modes intentionally accept a wider input set.
+    # Reference names and keys are Kubernetes-specific and are always validated
+    # so a later executor switch cannot activate an invalid persisted spec. The
+    # fake and local Docker modes intentionally keep broader literal-name rules.
     kubernetes_mode = kubernetes_project_validation_enabled()
     seen_names = set()
 
     for index, item in enumerate(env_vars):
         if not isinstance(item, dict):
             return f"Invalid env_vars[{index}]. Expected an object"
+        unsupported_error = unsupported_fields_error(item, ENV_VAR_ALLOWED_FIELDS, f"env_vars[{index}]")
+        if unsupported_error:
+            return unsupported_error
 
         name = item.get("name")
         if not isinstance(name, str) or not name.strip():
             return f"Invalid env_vars[{index}]. 'name' is required"
+        if len(name) > MAX_ENV_VAR_NAME_LENGTH:
+            return f"Invalid env_vars[{index}]. 'name' must be at most {MAX_ENV_VAR_NAME_LENGTH} characters"
         if kubernetes_mode and not KUBERNETES_ENV_VAR_NAME_RE.fullmatch(name):
             return f"Invalid env_vars[{index}]. 'name' must be a valid Kubernetes environment variable name"
         if kubernetes_mode and name in seen_names:
@@ -326,17 +473,11 @@ def validate_project_env_vars(env_vars):
         source_key = item.get("source_key")
         value = item.get("value")
         is_secret = item.get("is_secret")
-        configmap_ref = item.get("configmap_ref")
-        secret_ref = item.get("secret_ref")
-
-        if configmap_ref is not None or secret_ref is not None:
-            return (
-                f"Invalid env_vars[{index}]. Use 'source_name' and 'source_key' for Kubernetes references; "
-                "'configmap_ref' and 'secret_ref' are not supported field names"
-            )
 
         if value_source is None:
             return f"Invalid env_vars[{index}]. Provide a literal 'value' or a supported 'value_source'"
+        if not isinstance(value_source, str):
+            return f"Invalid env_vars[{index}]. 'value_source' must be a string"
         if value_source not in VALID_ENV_VALUE_SOURCES:
             return (
                 f"Invalid env_vars[{index}]. 'value_source' must be one of: "
@@ -346,6 +487,10 @@ def validate_project_env_vars(env_vars):
         if value_source == "literal":
             if value is None:
                 return f"Invalid env_vars[{index}]. 'value' is required when value_source is 'literal'"
+            if not isinstance(value, str):
+                return f"Invalid env_vars[{index}]. 'value' must be a string"
+            if len(value) > MAX_ENV_VALUE_LENGTH:
+                return f"Invalid env_vars[{index}]. 'value' must be at most {MAX_ENV_VALUE_LENGTH} characters"
             if source_name is not None or source_key is not None:
                 return f"Invalid env_vars[{index}]. Literal env vars cannot include 'source_name' or 'source_key'"
             if is_secret is not None and not isinstance(is_secret, bool):
@@ -362,23 +507,46 @@ def validate_project_env_vars(env_vars):
                 return f"Invalid env_vars[{index}]. 'is_secret' must be a boolean when provided"
             if not isinstance(source_name, str) or not source_name.strip():
                 return f"Invalid env_vars[{index}]. 'source_name' is required for referenced env vars"
-            if kubernetes_mode and not KUBERNETES_RESOURCE_NAME_RE.fullmatch(source_name):
-                return f"Invalid env_vars[{index}]. 'source_name' must be a valid Kubernetes resource name"
-            if not isinstance(source_key, str) or not source_key.strip():
-                return f"Invalid env_vars[{index}]. 'source_key' is required for referenced env vars"
+            source_name_error = validate_kubernetes_resource_name(
+                source_name,
+                f"env_vars[{index}].source_name",
+            )
+            if source_name_error:
+                return source_name_error
+            source_key_error = validate_kubernetes_config_key(
+                source_key,
+                f"env_vars[{index}].source_key",
+            )
+            if source_key_error:
+                return source_key_error
 
     return None
 
 
 def validate_deployment_request_payload(payload):
-    if not payload.get("commit_sha"):
+    unsupported_error = unsupported_fields_error(
+        payload,
+        MANUAL_DEPLOYMENT_ALLOWED_FIELDS,
+        "manual deployment",
+    )
+    if unsupported_error:
+        return unsupported_error
+
+    if payload.get("commit_sha") in (None, ""):
         return "Missing required field: commit_sha"
+    commit_error = validate_git_commit_sha(payload["commit_sha"])
+    if commit_error:
+        return commit_error
 
     status = payload.get("status", "pending")
+    if not isinstance(status, str):
+        return "Invalid deployment status. Expected a string"
     if status not in PlatformDeployment.VALID_STATUSES:
         return "Invalid deployment status. Expected one of: " + ", ".join(PlatformDeployment.VALID_STATUSES)
 
     build_status = payload.get("build_status", "pending")
+    if not isinstance(build_status, str):
+        return "Invalid build status. Expected a string"
     if build_status not in Build.VALID_STATUSES:
         return "Invalid build status. Expected one of: " + ", ".join(Build.VALID_STATUSES)
 
@@ -387,15 +555,51 @@ def validate_deployment_request_payload(payload):
         if test_command_error:
             return test_command_error
 
+    for field_name, max_length in MANUAL_DEPLOYMENT_STRING_LIMITS.items():
+        if field_name not in payload:
+            continue
+        allow_none = field_name not in {"environment"}
+        string_error = validate_bounded_string(
+            payload[field_name],
+            field_name,
+            max_length,
+            allow_none=allow_none,
+            allow_empty=field_name == "message",
+        )
+        if string_error:
+            return string_error
+
+    environment = payload.get("environment", "production")
+    if re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", environment) is None:
+        return "Invalid environment. Expected an alphanumeric name containing only '-', '_' or '.'"
+
+    service_url = payload.get("service_url")
+    if service_url is not None:
+        parsed_service_url = urlparse(service_url)
+        if parsed_service_url.scheme not in {"http", "https"} or not parsed_service_url.netloc:
+            return "Invalid service_url. Expected an absolute HTTP or HTTPS URL"
+
     return None
 
 
+def normalize_deployment_request_payload(payload):
+    normalized = dict(payload)
+    commit_sha = normalized.get("commit_sha")
+    if isinstance(commit_sha, str):
+        normalized["commit_sha"] = commit_sha.lower()
+    return normalized
+
+
 def validate_project_deploy_payload(payload):
+    unsupported_error = unsupported_fields_error(payload, DEPLOY_ALLOWED_FIELDS, "deploy")
+    if unsupported_error:
+        return unsupported_error
+
     branch = payload.get("branch")
-    if branch is not None and not isinstance(branch, str):
-        return "Invalid branch. Expected a string"
-    if isinstance(branch, str) and not branch.strip():
-        return "Invalid branch. Expected a non-empty string"
+    if branch is not None:
+        branch_error = validate_branch_name(branch)
+        if branch_error:
+            return branch_error
 
     test_command = payload.get("test_command")
     test_command_error = validate_optional_command(test_command, "test_command")
@@ -407,13 +611,18 @@ def validate_project_deploy_payload(payload):
 
 def validate_deployment_patch_payload(payload, deployment):
     allowed_fields = {"status", "build_status", "message"}
-    update_data = {key: value for key, value in payload.items() if key in allowed_fields}
-    if not update_data:
+    unsupported_error = unsupported_fields_error(payload, allowed_fields, "deployment patch")
+    if unsupported_error:
+        return None, unsupported_error
+    update_data = dict(payload)
+    if not ({"status", "build_status"} & set(update_data)):
         return None, "Provide at least one updatable field: status, build_status"
 
     # Valid status names can still be invalid at this point in the state machine.
-    next_status = update_data.get("status")
-    if next_status:
+    if "status" in update_data:
+        next_status = update_data["status"]
+        if not isinstance(next_status, str):
+            return None, "Invalid deployment status. Expected a string"
         if next_status not in PlatformDeployment.VALID_STATUSES:
             return None, "Invalid deployment status. Expected one of: " + ", ".join(PlatformDeployment.VALID_STATUSES)
         if not deployment.can_transition_to(next_status):
@@ -422,11 +631,25 @@ def validate_deployment_patch_payload(payload, deployment):
                 f"Allowed transitions: {', '.join(deployment.allowed_transitions) or 'none'}"
             )
 
-    build_status = update_data.get("build_status")
-    if build_status and build_status not in Build.VALID_STATUSES:
-        return None, "Invalid build status. Expected one of: " + ", ".join(Build.VALID_STATUSES)
-    if build_status and not deployment.build.can_transition_to(build_status):
-        return None, f"Invalid build transition from {deployment.build.status} to {build_status}"
+    if "build_status" in update_data:
+        build_status = update_data["build_status"]
+        if not isinstance(build_status, str):
+            return None, "Invalid build status. Expected a string"
+        if build_status not in Build.VALID_STATUSES:
+            return None, "Invalid build status. Expected one of: " + ", ".join(Build.VALID_STATUSES)
+        if not deployment.build.can_transition_to(build_status):
+            return None, f"Invalid build transition from {deployment.build.status} to {build_status}"
+
+    if "message" in update_data:
+        message_error = validate_bounded_string(
+            update_data["message"],
+            "message",
+            MANUAL_DEPLOYMENT_STRING_LIMITS["message"],
+            allow_none=True,
+            allow_empty=True,
+        )
+        if message_error:
+            return None, message_error
 
     return update_data, None
 

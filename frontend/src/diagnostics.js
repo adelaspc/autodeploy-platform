@@ -76,6 +76,8 @@ function stringList(value) {
 function combinedDiagnosticText(diagnostics) {
   return [
     diagnostics?.failure_summary,
+    diagnostics?.container_reason,
+    ...(diagnostics?.pod_runtime || []).flatMap((pod) => (pod.containers || []).map((container) => container.reason)),
     diagnostics?.pod_describe_summary,
     diagnostics?.pod_logs_summary,
     diagnostics?.pod_previous_logs_summary,
@@ -149,6 +151,12 @@ export function buildDiagnosticsView(diagnostics) {
   return {
     stage,
     stageLabel: diagnosticStageLabel(stage),
+    snapshotAt: diagnostics?.diagnostics_snapshot_at || null,
+    collectedAt: diagnostics?.diagnostics_collected_at || null,
+    collectionStatus: diagnostics?.diagnostics_collection_status || null,
+    collectionErrors: diagnostics?.diagnostics_collection_errors || [],
+    deploymentDescribeSummary: diagnostics?.deployment_describe_summary || "",
+    serviceDescribeSummary: diagnostics?.service_describe_summary || "",
     summary: diagnostics?.failure_summary || "No failure summary recorded.",
     eventType: diagnostics?.failure_event_type || "not recorded",
     eventAt: diagnostics?.failure_event_at || null,

@@ -131,6 +131,8 @@ def test_get_build_log_returns_404_when_unavailable(client):
 
     assert response.status_code == 404
     assert response.get_json() == {"error": "No build log is available for this deployment"}
+    summary = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/summary").get_json()
+    assert summary["build_log_state"] == "not_produced"
 
 
 def test_get_build_log_rejects_paths_outside_allowed_roots(client, app, tmp_path):

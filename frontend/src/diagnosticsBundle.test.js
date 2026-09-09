@@ -22,3 +22,16 @@ test("builds a deployment diagnostics bundle", () => {
   assert.match(diagnosticsBundleText(parts), /deployment.failed/);
   assert.equal(diagnosticsBundleFilename(parts.summary), "paas-deployment-42-diagnostics.json");
 });
+
+
+test("exports persisted Helm evidence even when runtime logs are unavailable", () => {
+  const diagnostics = {
+    failure_stage: "helm", diagnostics_collection_status: "partial",
+    diagnostics_collected_at: "2026-09-06T10:00:00Z",
+    diagnostics_collection_errors: [{ operation: "service", reason: "access_denied" }],
+    pod_previous_logs_summary: "Boot failed [REDACTED]",
+  };
+  const bundle = JSON.parse(diagnosticsBundleText({ diagnostics, runtimeLog: null }));
+  assert.deepEqual(bundle.kubernetes_diagnostics, diagnostics);
+  assert.equal(bundle.runtime_log, null);
+});

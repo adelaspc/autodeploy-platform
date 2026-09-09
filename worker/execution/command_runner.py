@@ -82,7 +82,7 @@ class CommandExecutionMixin:
                 )
                 if completed.returncode == 0:
                     message = self._summarize_output(combined_output) or f"{step} completed successfully"
-                    return ExecutionResult(message, metadata=metadata, log_path=str(log_path))
+                    return ExecutionResult(message, metadata=metadata, log_path=str(log_path), command_output=combined_output)
 
                 last_error = WorkerExecutionError(
                     step,
@@ -96,7 +96,8 @@ class CommandExecutionMixin:
 
         raise last_error
 
-    def _execute_command(self, args, *, allow_heartbeat=True, stdin_input=None, env=None):
+    def _execute_command(self, args, *, allow_heartbeat=True, stdin_input=None, env=None, timeout=None):
+        command_timeout = self.command_timeout if timeout is None else timeout
         heartbeat_cb = self.heartbeat if allow_heartbeat else None
         if self.runner is not None:
             try:
@@ -104,7 +105,7 @@ class CommandExecutionMixin:
                     args,
                     capture_output=True,
                     text=True,
-                    timeout=self.command_timeout,
+                    timeout=command_timeout,
                     check=False,
                     input=stdin_input,
                     env=env,
@@ -117,7 +118,7 @@ class CommandExecutionMixin:
                         args,
                         capture_output=True,
                         text=True,
-                        timeout=self.command_timeout,
+                        timeout=command_timeout,
                         check=False,
                         input=stdin_input,
                         env=env,
@@ -129,7 +130,7 @@ class CommandExecutionMixin:
                         args,
                         capture_output=True,
                         text=True,
-                        timeout=self.command_timeout,
+                        timeout=command_timeout,
                         check=False,
                         input=stdin_input,
                         heartbeat_cb=heartbeat_cb,
@@ -142,7 +143,7 @@ class CommandExecutionMixin:
                         args,
                         capture_output=True,
                         text=True,
-                        timeout=self.command_timeout,
+                        timeout=command_timeout,
                         check=False,
                         input=stdin_input,
                     )
@@ -153,7 +154,7 @@ class CommandExecutionMixin:
                         args,
                         capture_output=True,
                         text=True,
-                        timeout=self.command_timeout,
+                        timeout=command_timeout,
                         check=False,
                         heartbeat_cb=heartbeat_cb,
                         heartbeat_interval_seconds=self.heartbeat_interval,
@@ -164,7 +165,7 @@ class CommandExecutionMixin:
                     args,
                     capture_output=True,
                     text=True,
-                    timeout=self.command_timeout,
+                    timeout=command_timeout,
                     check=False,
                 )
 
@@ -173,7 +174,7 @@ class CommandExecutionMixin:
                 args,
                 capture_output=True,
                 text=True,
-                timeout=self.command_timeout,
+                timeout=command_timeout,
                 check=False,
                 input=stdin_input,
                 env=env,
@@ -189,7 +190,7 @@ class CommandExecutionMixin:
                 text=True,
                 env=env,
             )
-            deadline = time.monotonic() + self.command_timeout
+            deadline = time.monotonic() + command_timeout
             last_heartbeat = time.monotonic()
 
             while True:
@@ -203,7 +204,7 @@ class CommandExecutionMixin:
                     process.kill()
                     process.wait()
                     stdout, stderr = self._read_captured_output(stdout_handle, stderr_handle)
-                    raise subprocess.TimeoutExpired(args, self.command_timeout, output=stdout, stderr=stderr)
+                    raise subprocess.TimeoutExpired(args, command_timeout, output=stdout, stderr=stderr)
 
                 try:
                     last_heartbeat = self._heartbeat_if_due(last_heartbeat, heartbeat=heartbeat_cb)
