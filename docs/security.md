@@ -40,6 +40,7 @@ If none of those variables are configured, the app fails fast unless `CONTROL_PL
 Public:
 
 - `GET /health`
+- `GET /health/ready`
 
 Protected by bearer token:
 
@@ -84,7 +85,7 @@ Project configuration now distinguishes readable config from secret-bearing conf
 Current redaction behavior:
 
 - project list/show/create/update responses mask secret literal values as `[REDACTED]`
-- deployment events, summaries, diagnostics, and log API responses redact known secret values
+- deployment events, preflight summaries and metadata, deployment summaries, diagnostics, and log API responses redact the project secret values supplied to their serialization path
 - audit metadata redacts sensitive keys and secret-bearing env var payloads
 - error responses that include deployment metadata use the same redaction layer
 
@@ -93,16 +94,25 @@ Executor-specific behavior:
 - `local-docker` still receives the real secret value for `docker run`, but the worker redacts that value from command metadata, deploy logs, runtime-log capture, and healthcheck summaries
 - `kubernetes` does not allow literal secret values in rendered manifests; secret env vars must use `secret_key_ref`
 
-Current storage tradeoff:
+Current storage tradeoff — **Accepted risk for local/portfolio use; not production-approved**:
 
-- when `is_secret: true` is used, the control plane stores the literal value in the project record so the local executor can inject it at runtime
-- those values are masked on read rather than encrypted at rest
-- this is an intentional portfolio-stage tradeoff because the project does not yet include key management, envelope encryption, or an external secret manager
+- when `is_secret: true` is used with a literal value, the control plane stores that value in plaintext in `Project.env_vars` so the local executor can inject it at runtime
+- each new deployment copies the project environment into `PlatformDeployment.spec_snapshot_json`; consequently, a literal secret can exist in both the mutable project row and one or more historical deployment snapshots
+- database replicas, exports, and backups can retain the same plaintext values after a project or deployment is removed from the live database
+- API masking and log redaction reduce accidental disclosure but do not encrypt stored values and do not protect against an actor with direct database or backup access
+- global API, webhook, Git, metrics, and registry credentials remain environment/Kubernetes-Secret backed and are not intentionally persisted by this mechanism
+- `secret_key_ref` and `configmap_key_ref` store resource names and keys only; the referenced Kubernetes value is not copied into the control-plane database
+- this is an explicit portfolio-stage risk acceptance because the project does not yet include key management, envelope encryption, or an external secret manager; do not use real production credentials as literal project values
+
+Compensating controls for the accepted scope are restricted database and backup access, secret-aware API/log/audit redaction, the Kubernetes-mode prohibition on literal secret values, and operator guidance to prefer `secret_key_ref`. This decision must be revisited before multi-tenant use, untrusted operator access, regulated data, or production credentials. An acceptable production design would either reject literal secrets entirely or encrypt each value with a data-encryption key protected by a KMS/secret-manager key, including key versioning and rotation.
 
 Log-redaction boundaries:
 
-- API responses, deployment read models, audit metadata, and worker command metadata are redacted before returning or persisting operator-visible data
-- redaction is best-effort for values the control plane knows about through token config, project secret fields, registry credentials, and secret env vars
+- API responses, deployment read models, audit metadata, and worker command metadata apply redaction before returning or persisting operator-visible data
+- general deployment/event/read-model paths receive literal project environment values marked `is_secret`; they do not automatically receive the registry password, API/metrics tokens, webhook secret, or every configured Git token
+- mapping redaction masks values under credential-like keys such as `password`, `token`, and `authorization`; log redaction additionally masks common bearer, key/value credential, and URL-userinfo shapes, even when the exact value was not supplied
+- Helm failure diagnostics are a deliberate wider boundary: they explicitly collect project secret values, configured global Git/API/metrics/webhook/registry values available to that process, and the executor registry password before sanitizing captured diagnostic output
+- redaction remains best-effort and path-dependent; configuration alone does not make a global credential known to every redaction call
 - the platform cannot redact an unknown secret if a user application prints it under an unrelated value or generates it independently at runtime
 - for Kubernetes deployments, prefer `secret_key_ref` entries so secret values stay in Kubernetes Secrets instead of the control-plane database
 
@@ -187,7 +197,7 @@ Prometheus labels are limited to bounded operational dimensions. Request, projec
 
 ## Live Workload Health Boundary
 
-The protected deployment `live-health` route probes only the worker-owned `service_url` recorded by the platform for an existing deployment and appends that project's validated healthcheck path. The generic deployment PATCH endpoint cannot modify this URL. The probe accepts only a plain HTTP(S) origin without credentials, query, fragment, or base path, and it does not follow redirects. Local executor URLs may intentionally resolve to loopback or private addresses, so those address ranges cannot be rejected without breaking the trusted local demo. Results contain only status, safe message, HTTP status, and check timestamp; response bodies are neither returned nor persisted.
+The protected deployment `live-health` route probes only the worker-owned `service_url` recorded by the platform for an existing deployment and appends that project's validated healthcheck path. The HTTP request originates from the control-plane API process; the browser only requests this protected route. The generic deployment PATCH endpoint cannot modify this URL. The probe accepts only a plain HTTP(S) origin without credentials, query, fragment, or base path, and it does not follow redirects. Local executor URLs may intentionally resolve to loopback or private addresses, so those address ranges cannot be rejected without breaking the trusted local demo. Results contain only status, safe message, HTTP status, and check timestamp; response bodies are neither returned nor persisted.
 
 API request bodies are capped at 2 MiB by default through `CONTROL_PLANE_MAX_CONTENT_LENGTH`. This limit applies before webhook payloads are read into memory. Browser-facing responses include a same-origin Content Security Policy, clickjacking protection, MIME-sniffing protection, and a no-referrer policy.
 
@@ -208,7 +218,20 @@ The control-plane Helm chart supports two mutually exclusive runtime Secret mode
 - `secrets.create=true`: the chart creates the Secret from `secrets.values`; this mode is intended for local demos in a controlled, trusted environment.
 - `secrets.create=false` with `secrets.existingSecret`: the chart references a Secret managed outside the Helm release and does not create, modify, or delete it.
 
-The chart fails rendering when `secrets.create=true` is combined with `secrets.existingSecret`, or when `secrets.create=false` has no external Secret name. API, worker, reconciler, and migration Job all resolve the runtime Secret through the same chart helper.
+The chart fails rendering when `secrets.create=true` is combined with `secrets.existingSecret`, or when `secrets.create=false` has no external Secret name. The components can reference one shared Secret object, but the chart does not import that entire object with `envFrom`. It creates individual `secretKeyRef` entries so each process receives only its intended keys:
+
+| Component | Secret-backed environment |
+| --- | --- |
+| API | database URL, webhook secret, API role tokens/token JSON, metrics token, configured Git tokens |
+| Worker | database URL, registry username/password, configured Git tokens |
+| Reconciler | database URL |
+| Migration Job | database URL |
+
+Git credentials are intentionally available to both API and worker because API-side deploy and webhook admission resolve source revisions, while the worker clones the selected revision. With chart-managed secrets, non-empty keys matching `CONTROL_PLANE_GIT_TOKEN_*` are selected automatically. With `secrets.existingSecret`, their names must be listed in `secrets.gitTokenKeys` because Helm cannot inspect an external Secret during template rendering.
+
+All four commands construct the shared Flask application. Startup validation therefore applies API-token and metrics-token requirements only when `CONTROL_PLANE_COMPONENT=api`; otherwise migration, worker, and reconciliation could not start after scoping. Protected routes still fail closed when tokens are absent, even if a non-API process were accidentally exposed as an HTTP server.
+
+Docker Compose applies the same process-level split. `.env.secrets` is an input to Compose interpolation, not a whole-file `env_file` mounted into every service. The committed Compose file maps the documented `CONTROL_PLANE_GIT_TOKEN_GITHUB` key to API and worker; a custom `git_secret_ref` requires an explicit matching environment mapping for those two services.
 
 The local `values.secrets.local.yaml` workflow has important boundaries:
 
@@ -221,6 +244,8 @@ The local `values.secrets.local.yaml` workflow has important boundaries:
 
 When `secrets.existingSecret` is used, Helm receives and stores the Secret name but not its data, provided secret values are not also passed through other Helm values or command-line arguments.
 
+This limits credentials present in each process environment; it is not a complete Kubernetes authorization split. Worker and reconciler currently share the chart ServiceAccount, whose namespace Role can read referenced Secrets for workload validation. Separate ServiceAccounts and narrower Roles remain a stronger production hardening option.
+
 ## Docker Socket Boundary
 
 The local Docker executor and the local MicroK8s demo can use `/var/run/docker.sock` so the worker can build, test, tag, push, and run workload images from inside the control-plane runtime. This is intentionally a trusted local-demo shortcut.
@@ -231,7 +256,7 @@ Current posture:
 
 - Docker Compose does not mount the socket by default. Local profiles that need Docker-backed builds opt into `docker-compose.docker-socket.yml` with `CONTROL_PLANE_COMPOSE_DOCKER_SOCKET_ENABLED=true`.
 - The base control-plane Helm chart does not mount the Docker socket by default.
-- `values.local-microk8s.yaml` enables the socket explicitly for local MicroK8s demonstrations.
+- `values.local-microk8s.yaml` keeps the socket disabled because it uses the fake executor to validate the control-plane chart without building workloads.
 - A production-oriented build path should replace this with an isolated builder such as a dedicated Kubernetes build Job, rootless BuildKit, Kaniko-style builder, or external CI build.
 
 ## Kubernetes RBAC Boundary
@@ -257,6 +282,8 @@ Helm mode is a separate trust boundary. Helm v3 stores release metadata in Secre
 - Docker socket access remains a trusted local-demo boundary, not a production isolation model
 
 These are intentional scope limits for this project stage. The current model is meant to demonstrate a credible operator-facing security boundary with clean code structure, not a full enterprise identity system.
+
+The plaintext secret-literal limitation is specifically an **accepted local/portfolio risk**, not a resolved finding and not a production security guarantee.
 
 ## Suggested Next Hardening Steps
 

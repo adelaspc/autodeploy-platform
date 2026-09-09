@@ -8,7 +8,7 @@ The reference workload is [Deployment Lab](https://github.com/adelaspc/paas-demo
 
 - Project configuration is declarative and separated from control-plane configuration.
 - HTTP requests persist desired work while a leased worker owns build and deployment side effects.
-- Images are built, tested, tagged with immutable source identity, pushed, and verified before rollout.
+- Images are built, tested, uniquely tagged per build, pushed, and verified by their reported digest before registry-backed rollout.
 - Kubernetes resources are installed through Helm and observed through rollout, health, logs, and diagnostics.
 - ConfigMap and Secret references reach the workload without storing secret values in the project specification.
 - Deployment history remains immutable across configuration changes, failures, recovery, and cleanup.
@@ -27,6 +27,8 @@ The recording uses the `local-kubernetes` profile with the control plane and MyS
 | Image pull Secret | `dockerhub-pull` | Keeps registry credentials outside project data. |
 
 Credentials remain in ignored local configuration or Kubernetes Secrets. No token, password, kubeconfig content, or Secret value should appear in a recording or in this document.
+
+The console presents the selected project's recent activity and deployment history. API filters, cursors, and cross-project search are not exposed in this UI; do not present the top bar as a working search control in a recording.
 
 ## Project configuration
 
@@ -50,8 +52,8 @@ The migration command is intentionally empty. It is reserved by the v1 applicati
 | Variable | Source | Initial value or reference | What it demonstrates |
 | --- | --- | --- | --- |
 | `APP_ENV` | ConfigMap key | `demo-app-config` / `app-env` | Kubernetes-native non-secret configuration. |
-| `APP_VERSION` | literal | `1.0.0` | Visible release configuration and redeploy behavior. |
-| `APP_COMMIT_SHA` | literal | published Git commit SHA | Comparison between source identity and the running workload. |
+| `APP_VERSION` | platform-injected | unique build image tag | Visible release identity for the workload. |
+| `APP_COMMIT_SHA` | platform-injected | exact build commit SHA | Comparison between source identity and the running workload. |
 | `FEATURE_MESSAGE` | literal | `Running through the local PaaS` | A visible configuration update. |
 | `DEMO_SECRET` | Secret key | `demo-app-secret` / `demo-secret` | Secret presence without returning its value. |
 | `DEMO_STARTUP_DELAY_SECONDS` | literal | `0` | Controlled readiness delay. |
@@ -77,21 +79,21 @@ The migration command is intentionally empty. It is reserved by the v1 applicati
 
 **[Watch the configuration update and redeployment (MP4, 3.7 MB)](assets/demo/02-configuration-update.mp4)**
 
-**Goal:** Demonstrate declarative configuration changes and immutable deployment history.
+**Goal:** Demonstrate declarative configuration changes and retained deployment history with immutable input snapshots.
 
-**Change:** Set `APP_VERSION=1.1.0` and update `FEATURE_MESSAGE`, then save and redeploy.
+**Change:** Update `FEATURE_MESSAGE`, then save and redeploy. The platform gives the new workload its own `APP_VERSION` build tag and its resolved `APP_COMMIT_SHA`.
 
 **What to watch:** A new deployment and image are created; the workload reports the updated values while the previous deployment remains available in history.
 
 **Reset:** Keep the new healthy version or restore the baseline values before another scenario.
 
-## 03 — Healthcheck failure and recovery
+## 03 — Readiness failure and recovery in Helm mode
 
 **[Watch the healthcheck failure and recovery (MP4, 10.2 MB)](assets/demo/03-healthcheck-failure.mp4)**
 
 **Goal:** Demonstrate persisted failure evidence and recovery through a new deployment.
 
-**Change:** Set `DEMO_HEALTH_STATUS=failed` and deploy. Inspect events, logs, and Kubernetes diagnostics, then restore `healthy` and redeploy.
+**Change:** Set `DEMO_HEALTH_STATUS=failed` and deploy. Helm waits for workload readiness and can time out before AutoDeploy reaches its separate HTTP probe through Service port-forward. Inspect events and diagnostics, then restore `healthy` and redeploy.
 
 **What to watch:** The failed deployment remains in history with its reason and diagnostics; recovery creates a separate healthy deployment instead of rewriting the failure.
 
@@ -99,11 +101,13 @@ The migration command is intentionally empty. It is reserved by the v1 applicati
 
 **[Watch the CrashLoopBackOff diagnostics (MP4, 4.8 MB)](assets/demo/04-crashloopbackoff.mp4)**
 
+**Recording status:** This clip predates the Helm failure snapshot remediation and primarily shows the generic Helm timeout. It does not demonstrate all diagnostic fields now supported. A replacement should show the persisted snapshot status/time, container state, restart count, current or previous logs, and recovery as a new deployment.
+
 **Goal:** Show actionable container failure diagnostics.
 
 **Change:** Set `DEMO_FAIL_STARTUP=true` and deploy.
 
-**What to watch:** Rollout failure, container state and restart count, current and previous Pod logs, event metadata, and likely-cause guidance.
+**What to record in the replacement clip:** The original Helm failure, snapshot capture status/time, container state and restart count, available current/previous Pod logs, and evidence-based likely-cause guidance. Explain any unavailable evidence rather than implying that every failure has previous logs.
 
 **Reset:** Restore `DEMO_FAIL_STARTUP=false` and redeploy before continuing.
 
@@ -115,7 +119,7 @@ The migration command is intentionally empty. It is reserved by the v1 applicati
 
 **Action:** Copy the exact Pod name from diagnostics and delete only that Pod.
 
-**What to watch:** Live health may briefly become unhealthy, the Deployment remains `running`, Kubernetes creates a replacement Pod, and live health recovers with a new hostname.
+**What to watch:** Diagnostics remain the persisted snapshot of the selected deployment; refreshing them does not inspect the replacement Pod. The control-plane API's live health may briefly become unhealthy, the Deployment remains `running`, Kubernetes creates a replacement Pod, and API live health recovers with a new hostname. Use **Open service in browser** to verify browser access, and the workload hostname or scoped `kubectl get pods` to verify the replacement.
 
 ## 06 — Diagnostics and cleanup
 
@@ -132,7 +136,6 @@ The migration command is intentionally empty. It is reserved by the v1 applicati
 Return to these values before the main recording and after every controlled-failure take:
 
 ```text
-APP_VERSION=1.0.0
 FEATURE_MESSAGE=Running through the local PaaS
 DEMO_STARTUP_DELAY_SECONDS=0
 DEMO_FAIL_STARTUP=false

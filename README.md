@@ -6,7 +6,7 @@ AutoDeploy is an operator-facing PaaS control plane that turns project specifica
 
 ## See it in action
 
-The primary demo follows one deployment from a declarative project specification through source checkout, container build and test, immutable registry push, Helm rollout, health verification, and persisted diagnostics.
+The primary demo follows one deployment from a declarative project specification through source checkout, container build and test, registry push with digest pinning, Helm rollout, health verification, and persisted diagnostics.
 
 [![AutoDeploy happy-path Kubernetes deployment](docs/assets/demo/01-happy-path.gif)](docs/assets/demo/01-happy-path.mp4)
 
@@ -80,7 +80,7 @@ flowchart LR
     WORKER -->|checkout source| GIT
     WORKER -->|build and test image| BUILD
     WORKER -->|runtime side effects| EXEC
-    REG -->|immutable image| MODE
+    REG -->|digest-pinned image| MODE
     RECON -.->|detect drift and clean up| EXEC
 
     classDef operatorNode fill:#e0f2fe,stroke:#0369a1,color:#0c4a6e;

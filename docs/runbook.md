@@ -52,7 +52,7 @@ This creates local files that are ignored by Git:
 
 Each local file is copied from its committed `.example` counterpart. `make env-init` never overwrites an existing local file, generates missing local MySQL passwords, and restricts all generated environment files to mode `0600`. Keep runtime configuration in the profile files and all credentials in `.env.secrets`. If local profile files already exist, copy newly added keys such as `CONTROL_PLANE_COMPOSE_DOCKER_SOCKET_ENABLED` from the matching `.example` file manually.
 
-The Makefile always loads `.env.<profile>` and `.env.secrets` together for runtime commands, so you do not need to manually export variables.
+The Makefile loads `.env.<profile>` and `.env.secrets` together as Compose interpolation inputs, so you do not need to manually export variables. Compose then maps credentials explicitly: API secrets to the API, registry credentials to the worker, Git credentials to API and worker, and only the database URL to migration and reconciliation.
 
 Important demo defaults:
 
@@ -60,11 +60,13 @@ Important demo defaults:
 - `CONTROL_PLANE_EXECUTOR=fake`
 - no real registry, Git, or API secrets required
 
-For private Git repositories, set a token in `.env.secrets` using the project's `git_secret_ref`. For example, a project with `git_secret_ref=GITHUB` uses:
+For private Git repositories, set a token in `.env.secrets` using the project's `git_secret_ref`. The committed Compose mapping supports `GITHUB` by default because that is the documented example:
 
 ```bash
 CONTROL_PLANE_GIT_TOKEN_GITHUB=replace-me
 ```
+
+If you use another reference such as `GITLAB`, add `CONTROL_PLANE_GIT_TOKEN_GITLAB` to both the API and worker `environment` mappings through a Compose override. Merely adding an arbitrary key to `.env.secrets` does not inject it into a container.
 
 Recommended first run:
 
@@ -149,7 +151,7 @@ Operational meaning:
 - `/health/activity` gives an operator-oriented platform activity summary
 - `/health/observability` reports the safe runtime posture for metrics, logging, and request correlation without exposing secrets
 
-For a selected running deployment with a public service URL, the UI polls its project healthcheck through `GET /api/projects/<id>/deployments/<deployment_id>/live-health`. This live signal is intentionally separate from the persisted deployment lifecycle status: a transient Pod replacement can show `unhealthy` and then recover to `healthy` without rewriting the deployment as failed.
+For a selected running deployment with a public service URL, the browser polls `GET /api/projects/<id>/deployments/<deployment_id>/live-health`, and the control-plane API performs the actual HTTP probe. This live signal therefore confirms reachability from the API environment, not from the operator's browser. It is intentionally separate from the persisted deployment lifecycle status: a transient Pod replacement can show `unhealthy` and then recover to `healthy` without rewriting the deployment as failed. Use **Open service in browser** to check access from the operator's machine.
 
 In Compose:
 
@@ -209,6 +211,8 @@ Apply the cleanup after reviewing the dry-run:
 ```
 
 The default cleanup removes workspace/build-log artifacts for old `failed` and `stopped` deployments and prunes only disposable `claim_*` and `reconcile.*` events. It preserves deployment lifecycle events, deployment/build rows, and webhook delivery records. Audit events are retained unless `--include-audit-events` is supplied explicitly together with `--apply`.
+
+Failure reconciliation removes supported orphan runtime resources, but it does not remove the failed deployment's workspace or raw logs. This separation leaves evidence available for investigation until an operator applies retention. After retention removes a workspace, the deployment summary reports the affected build/runtime log state as `retention_removed`; persisted lifecycle events and bounded Kubernetes diagnostic summaries remain readable. Export required raw evidence before applying deletion because workspace files cannot be reconstructed from the database.
 
 ## Production-Like Kubernetes Deployment
 
@@ -271,7 +275,16 @@ Release names use:
 paas-<project-slug>-<environment-slug>-<project-id-suffix>
 ```
 
-The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys should upgrade the same release. Stop uninstalls the same release in Helm mode. Deployment rows are immutable history records; the newest row for a project and environment owns the shared runtime release.
+Manifest-managed workloads use one DNS-1123-safe, attempt-specific base name:
+
+```text
+Deployment/Ingress: paas-<project-slug>-<deployment-id>
+Service:            paas-<project-slug>-<deployment-id>-svc
+```
+
+The project slug is shortened as needed so the Service, including its suffix, remains within 63 characters. The exact names are stored on the deployment record; use the diagnostics/API values for operational commands instead of reconstructing them. Migrated records retain names produced by the historical rule.
+
+The convention is one release per project/environment workload, not one release per deployment attempt. Redeploys should upgrade the same release. Stop uninstalls the same release in Helm mode. Deployment rows are mutable lifecycle records with immutable specification snapshots; the newest row for a project and environment owns the shared runtime release.
 
 Automatic Helm cleanup is ownership-aware. The reconciler refreshes its database view before cleanup and skips every failed or stopped record that has a newer deployment for the same project and environment. This matters with MySQL repeatable-read transactions: a reconciliation cycle may have started before a concurrent redeployment was created, but it must not uninstall the release after that redeployment upgrades it.
 
@@ -308,7 +321,7 @@ The chart does not deploy a database. For a production-like evaluation, the reco
 The chart supports exactly one of two runtime Secret modes:
 
 - `secrets.create=true` and an empty `secrets.existingSecret`: the chart creates and manages the runtime Secret from `secrets.values`; this is the convenient local-demo mode.
-- `secrets.create=false` and a non-empty `secrets.existingSecret`: API, worker, reconciler, and migration Job use an externally managed Secret; the chart does not create, modify, or delete it.
+- `secrets.create=false` and a non-empty `secrets.existingSecret`: components select their permitted keys from an externally managed Secret; the chart does not create, modify, or delete it.
 
 The chart rejects configurations where both modes are active or neither mode is configured.
 
@@ -339,10 +352,14 @@ For a shared or production-like environment, create the runtime Secret through t
 secrets:
   create: false
   existingSecret: autodeploy-control-plane-runtime
+  gitTokenKeys:
+    - CONTROL_PLANE_GIT_TOKEN_GITHUB
   values: {}
 ```
 
-In this mode Helm stores the Secret name, but the chart is not given the external Secret values. External Secrets, SOPS, Vault, or the cluster operator's standard secret-management mechanism can own those values and their rotation.
+Omit `gitTokenKeys` when private Git access is not needed. In external-Secret mode the list tells the chart which existing keys to expose to API and worker; Helm cannot discover them from the Secret. Each entry must follow `CONTROL_PLANE_GIT_TOKEN_<REF>`. With `secrets.create=true`, non-empty matching keys in `secrets.values` are detected automatically.
+
+In both modes the chart uses individual `secretKeyRef` selectors rather than importing the whole Secret. API receives its auth/webhook/metrics keys and configured Git tokens, worker receives registry credentials and configured Git tokens, while reconciler and migration receive only the database URL. Helm stores the external Secret name and Git key names, but not the externally managed values. External Secrets, SOPS, Vault, or the cluster operator's standard secret-management mechanism can own those values and their rotation.
 
 ### Local MicroK8s Registry Flow
 
@@ -408,6 +425,18 @@ helm template generic ./deploy/helm/generic-web-app -f <generated-values.yaml>
 ```
 
 ### Kubernetes Executor Notes
+
+#### User workload resources and probes
+
+Manifest and Helm modes apply the same project workload settings. `cpu` and `memory` create optional container `resources.requests`; they do not create limits. The configured `healthcheck_path` creates readiness and liveness HTTP probes on the named `http` container port. Readiness starts after 5 seconds and repeats every 10 seconds; liveness starts after 15 seconds and repeats every 20 seconds. Startup probes remain disabled.
+
+After a deployment, inspect the exact workload name shown in Kubernetes Diagnostics:
+
+```bash
+kubectl get deployment <deployment-name> --namespace default -o yaml
+```
+
+Confirm that the rendered container includes `resources.requests`, `readinessProbe`, and `livenessProbe`. Repeat the inspection once in manifest mode and once in Helm mode with the same project values. The container contract must match; only the resource management path and stable naming differ.
 
 The chart includes RBAC for the current Kubernetes executor surface:
 
@@ -598,7 +627,7 @@ CONTROL_PLANE_REGISTRY_PASSWORD=<dockerhub-token>
 CONTROL_PLANE_GIT_TOKEN_GITHUB=<github-token>
 ```
 
-The Makefile loads the selected profile and `.env.secrets` together, so manual `set -a` or ad hoc exports should not be needed.
+The Makefile loads the selected profile and `.env.secrets` as interpolation inputs, so manual `set -a` or ad hoc exports should not be needed. Compose injects the registry credentials only into the worker and the documented Git token into API and worker.
 
 ### Local Workload Ingress
 
@@ -628,7 +657,7 @@ make wsl-ingress-domain
 
 Copy the printed assignment into `.env.local-kubernetes`, recreate the runtime, and deploy again. WSL addresses may change after a Windows restart. `make k8s-demo-check PROFILE=local-kubernetes` validates the Ingress API, configured class, DNS resolution, and the newest Ingress URL when one exists.
 
-The deployment summary checks the public URL from the browser and reports when the browser cannot reach the WSL address. Use **Cleanup Kubernetes resources** on an old deployment to delete its Deployment, Service, and Ingress (or uninstall its Helm release) while preserving build, deployment, event, and audit history.
+The deployment summary's live-health indicator checks the public URL from the control-plane API environment. It cannot establish whether a Windows browser can reach the WSL address. Use **Open service in browser** after configuring the WSL ingress domain to verify that client path. Manifest resources belong to one deployment attempt and may be cleaned from its historical record. Helm uses one shared release per project and environment: select the newest deployment only when intentionally removing the current workload. Historical Helm stop or cleanup commands are recorded as skipped when a newer deployment owns that release.
 
 Kubernetes failure diagnostics expose pod phase, container reason, restart count, workload images, and imagePullSecrets as structured fields. **Copy bundle** and **Download bundle** export the currently loaded summary, diagnostics, events, build-log tail, and runtime-log tail as redacted JSON suitable for troubleshooting or a portfolio walkthrough.
 
@@ -695,13 +724,13 @@ For a generic demo workload, use application-owned environment variables such as
 
 ```text
 APP_ENV=demo
-APP_VERSION=1.0.0
-APP_COMMIT_SHA=<current-commit>
 FEATURE_MESSAGE=Running through the local PaaS
 DEMO_HEALTH_STATUS=healthy
 ```
 
 Do not pass `CONTROL_PLANE_*` values to the workload unless the workload explicitly expects them. Those variables configure the platform, not the deployed application.
+
+`APP_VERSION` and `APP_COMMIT_SHA` are reserved workload identity variables. The worker injects the unique build tag and exact build commit SHA immediately before deployment, replacing project entries with those names.
 
 ### Expected Successful Path
 
@@ -740,7 +769,7 @@ curl -X POST http://127.0.0.1:5000/api/projects/<project-id>/deployments/<deploy
 
 Load `CONTROL_PLANE_API_TOKEN_DEPLOYER` from the trusted local `.env.secrets` file before running this command. The Authorization header may be omitted only when the selected local development profile explicitly uses `CONTROL_PLANE_ALLOW_AUTH_DISABLED=true`.
 
-The cleanup action removes the managed Deployment, Service, and Ingress in manifest mode. In Helm mode it uninstalls the stable project/environment release, not an attempt-specific revision. Therefore, issue an explicit Helm cleanup only for the newest deployment of that project and environment and only when the workload itself should be removed; historical records can remain in the UI without consuming Kubernetes resources. Use direct `kubectl delete` only as a break-glass fallback after identifying the exact stale resource names:
+The cleanup action removes the managed Deployment, Service, and Ingress in manifest mode. In Helm mode it uninstalls the stable project/environment release, not an attempt-specific revision. Therefore, issue an explicit Helm stop or cleanup only for the newest deployment of that project and environment and only when the workload itself should be removed. Commands against a historical Helm deployment are skipped when a newer record owns the release; historical records remain in the UI without consuming separate Kubernetes resources. Use direct `kubectl delete` only as a break-glass fallback after identifying the exact stale resource names:
 
 ```bash
 docker compose exec control-plane-worker sh -lc \
@@ -1004,8 +1033,6 @@ For a workload exposing `/health`, a normal demo configuration might be:
 
 ```text
 APP_ENV=demo
-APP_VERSION=1.0.0
-APP_COMMIT_SHA=<current-commit>
 FEATURE_MESSAGE=Running through the local PaaS
 DEMO_STARTUP_DELAY_SECONDS=0
 DEMO_FAIL_STARTUP=false
@@ -1023,6 +1050,14 @@ Controlled demonstrations change one value and redeploy:
 Restore the healthy defaults and redeploy for recovery. `DEMO_SECRET` should use a Kubernetes `secret_key_ref`; the workload reports only whether the secret is mounted.
 
 If the UI event is `kubernetes.healthcheck_failed` but the pod says `CrashLoopBackOff`, treat it as an application boot failure first. Read `kubectl logs --previous`; the control-plane healthcheck failed because there was no healthy application process to probe.
+
+### Helm fails before the Service healthcheck
+
+When `helm upgrade --install --wait` fails, inspect Diagnostics for both the original Helm error and its persisted Kubernetes snapshot. Container reason/restart count and **Current logs** / **Previous logs** can explain a generic readiness timeout. **Pod descriptions and events** and the Deployment/Service descriptions provide additional context. A timeout alone does not establish CrashLoopBackOff.
+
+The snapshot is collected by the worker, not by refreshing the UI. Diagnostics shows `diagnostics_snapshot_at` for the stored evidence; older records can report no capture time. Its status is `complete`, `partial`, or `unavailable`; a partial result lists safe collection errors such as missing previous logs, denied access, or an exhausted budget. Fix permissions or use scoped host-side `kubectl` checks if evidence is unavailable. Collection does not replace the original Helm failure or change it into a healthcheck failure.
+
+Failure log excerpts are stored in event metadata and exported by **Copy bundle** / **Download bundle**, even if the Runtime log panel is empty. Detailed workspace files can be removed by existing reconciliation/retention; the persisted excerpts remain. Demonstrate startup failure and recovery with a dedicated project so validation does not affect another workload.
 
 ### Kubernetes diagnostics endpoint says the deployment is not Kubernetes
 
@@ -1059,11 +1094,14 @@ Current platform capabilities:
 - stop a deployment through the dedicated stop action
 - clean up old Kubernetes runtime resources while preserving control-plane history
 
+Use retry when the selected deployment's persisted commit and configuration must be repeated. Retry fails with `409` if its historical snapshot cannot be validated. Use redeploy when project edits, the current project default test command, and the branch's current head should apply. Summary labels the result as `Historical snapshot` or `Current project`; both actions create a new history record.
+
 Current deployment-platform tradeoffs:
 
 - there is no full release orchestration or rollout-history manager yet
 - Kubernetes cleanup preserves control-plane history and removes the managed Deployment, Service, and Ingress or Helm release
 - database schema rollback is not automated in the deployment story
+- project environment entries marked `is_secret: true` but supplied as literal values are plaintext in the project row, deployment snapshots, and database backups; masking on API reads is not encryption. This is accepted only for trusted local/portfolio use. Use `secret_key_ref` or an external secret workflow for real credentials
 
 For platform rollout rollback:
 
@@ -1075,6 +1113,13 @@ For platform rollout rollback:
 
 - replace Docker-socket-dependent build execution with a dedicated builder pattern
 - add richer execution telemetry for scheduled reconciler jobs
-- add chart-level support for existing shared ConfigMaps/Secrets instead of inline secret values
+- add chart-level support for an externally managed runtime ConfigMap; `secrets.existingSecret` already supports an externally managed runtime Secret
 - support managed/external database documentation more deeply
 - add image signing, scanning, and supply-chain metadata once the deployment story grows beyond evaluation/demo scope
+
+
+## Registry digest verification
+
+For a new registry-backed deployment, inspect the push and verification events before rollout. The push event records the publishing tag and reported digest; the Summary deployment image becomes `repository@sha256:...`. If the push reports no valid digest, the worker fails the push step. If the registry cannot serve that digest, verification fails and rollout does not start. Resolve registry connectivity, credentials, or missing artifact availability and create a new deployment; do not substitute a mutable tag to bypass verification.
+
+Historical tag-based deployments are not converted automatically. Registry-disabled local execution has no registry digest guarantee. Validate tag changes only with a dedicated image and project so another workload's images cannot be affected.

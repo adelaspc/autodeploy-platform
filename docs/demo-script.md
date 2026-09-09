@@ -40,8 +40,6 @@ Use these healthy workload variables:
 
 ```text
 APP_ENV=demo
-APP_VERSION=1.0.0
-APP_COMMIT_SHA=<current-workload-commit>
 FEATURE_MESSAGE=Running through the local PaaS
 DEMO_STARTUP_DELAY_SECONDS=0
 DEMO_FAIL_STARTUP=false
@@ -51,13 +49,15 @@ DEMO_RESPONSE_DELAY_MS=0
 
 If `DEMO_SECRET` is part of the recording, select the **Secret key** source and provide only its Kubernetes resource name and key. Do not use or show a literal secret.
 
+`APP_VERSION` and `APP_COMMIT_SHA` are reserved platform-owned variables. Do not configure literal values for them in the project. The running workload receives the unique build tag and exact build commit SHA automatically.
+
 ## Main Recording — 3–5 Minutes
 
 ### 1. Frame the project — 20 seconds
 
 Open the Overview and say:
 
-> This is a local operator-facing PaaS control plane. The API persists desired work, the worker builds and deploys immutable images, and MicroK8s runs the workload. It is deliberately scoped as a portfolio system rather than a public multi-tenant platform.
+> This is a local operator-facing PaaS control plane. The API persists desired work, the worker builds images and pins registry-backed deployments by digest, and MicroK8s runs the workload. It is deliberately scoped as a portfolio system rather than a public multi-tenant platform.
 
 Point out:
 
@@ -77,18 +77,20 @@ Open the sample workload project and briefly show:
 - environment variables and Secret reference support;
 - CPU/memory fields and selected runtime.
 
+Say that CPU and memory become Kubernetes requests, and that the selected health endpoint configures both readiness and liveness in either Kubernetes deployment mode.
+
 Do not spend time editing every field. The point is that application configuration is declarative and separate from control-plane configuration.
 
 ### 3. Run a happy-path deployment — 60–90 seconds
 
 Trigger **Run deploy / test**.
 
-Narrate the persisted event sequence as it appears:
+Before the pending deployment appears, say that the API resolves the selected branch head to an exact commit SHA. If that lookup fails, the request returns `409` and does not queue work. Then narrate the persisted event sequence as it appears:
 
-1. resolve and clone the exact Git commit;
+1. worker clones the exact commit resolved by the API;
 2. build the Docker image with BuildKit;
 3. run the configured test command;
-4. tag and push the immutable commit-based image;
+4. tag each build uniquely, push it, and retain the reported digest;
 5. verify the remote image with `docker buildx imagetools inspect`;
 6. validate referenced ConfigMaps and Secrets;
 7. install or upgrade the Helm-managed Kubernetes workload;
@@ -110,7 +112,7 @@ Select **Open service** and show the workload response:
 - Secret mounted/not-configured state without its value;
 - current failure posture.
 
-Return to the PaaS and point out the selected deployment’s live health result. Clarify that initial rollout health is persisted, while this post-deploy signal is transient and polled separately.
+Return to the PaaS and point out the selected deployment’s live health result. Explain that this probe originates from the control-plane API, while **Open service in browser** verifies the operator's browser path. Clarify that initial rollout health is persisted, while this post-deploy signal is transient and polled separately.
 
 ### 5. Demonstrate Kubernetes self-healing — 45–60 seconds
 
@@ -129,7 +131,7 @@ In the PaaS, show:
 - Kubernetes Deployment/ReplicaSet creates a replacement Pod;
 - live health returns to `healthy`.
 
-Refresh diagnostics and compare the new Pod name or open the workload again to show the changed hostname.
+Open the workload again to show the changed hostname, or inspect the replacement with `kubectl get pods`. Keep the original Pod evidence in Diagnostics visible and point out its capture time. Refreshing Diagnostics only rereads this persisted snapshot; it does not collect the new Pod.
 
 Say:
 
@@ -146,7 +148,9 @@ Show:
 
 Close with:
 
-> The project demonstrates the control-plane boundaries end to end: authenticated configuration, immutable build and registry flow, Kubernetes deployment, health and failure diagnostics, reconciliation, observability, and safe cleanup.
+> The project demonstrates the control-plane boundaries end to end: authenticated configuration, digest-pinned registry deployment flow, Kubernetes deployment, health and failure diagnostics, reconciliation, observability, and safe cleanup.
+
+When discussing retention, show a failed deployment whose raw log remains available after reconciliation. Preview `cleanup-observability` in dry-run mode, then explain that applying the age-based policy removes eligible workspace files and changes the Summary log state to “removed by the retention policy.” Do not describe runtime cleanup and observability retention as the same operation.
 
 ## Focused Scenario Recordings
 
@@ -157,11 +161,35 @@ Record these separately rather than forcing every state transition into the main
 Change:
 
 ```text
-APP_VERSION=1.1.0
 FEATURE_MESSAGE=Configuration update deployed successfully
 ```
 
 Save and redeploy. Show that the new workload receipt reflects the updated values and that deployment history retains the previous release.
+
+### Historical retry versus redeploy
+
+Start from a completed deployment and note its build tag and commit. Change a project-controlled variable such as `FEATURE_MESSAGE` and the project default test command, but do not overwrite the selected historical record.
+
+Select the earlier deployment and queue **Retry failed** (a controlled failed attempt is appropriate for the UI action). Show in Summary:
+
+- `Requested as: retry of #<source>`;
+- `Inputs: Historical snapshot`;
+- the same commit SHA as the source attempt;
+- the workload retaining the retry's newly generated build tag, the original commit SHA, and the original effective test choice.
+
+Then choose **Redeploy latest**. Show `Requested as: redeploy of #<source>`, `Inputs: Current project`, the branch's newly resolved head, the platform-injected build tag, and the current default test command. If the branch did not move during recording, say that the new HEAD happens to equal the earlier commit; the configuration source still differs.
+
+Caption the limit precisely: “Retry repeats persisted inputs. Referenced secrets, external dependencies, registry/cluster state, and platform code remain current.” Never show Secret values or credentials.
+
+### Kubernetes workload contract
+
+Use a project with `cpu=250m`, `memory=512Mi`, and `healthcheck_path=/health`. Deploy it once in manifest mode and once in Helm mode, then inspect each exact Deployment name from Kubernetes Diagnostics:
+
+```bash
+kubectl get deployment <deployment-name> --namespace default -o yaml
+```
+
+Show the `app` container's `resources.requests`, named `http` port, and readiness/liveness probes. Both modes must show `250m`, `512Mi`, `/health`, readiness `5/10` seconds, and liveness `15/20` seconds. State that CPU/memory limits and startup probes are not part of the project contract. Do not claim that the existing Helm-focused clips demonstrate manifest mode; record this as an additional validation segment when needed.
 
 ### Healthcheck failure and recovery
 
@@ -171,9 +199,11 @@ Set:
 DEMO_HEALTH_STATUS=failed
 ```
 
-Deploy and show the failed healthcheck, events, logs, and Kubernetes diagnostics. Helm waits for its configured rollout timeout before AutoDeploy can persist the failure, so remove most of that inactive wait from the final clip. Restore `healthy` and deploy again to demonstrate recovery as a new immutable history record.
+Deploy and show the Helm readiness failure, events, and available diagnostic snapshot. Helm may time out during `--wait` before AutoDeploy reaches its separate Service port-forward HTTP probe. Remove most inactive waiting from the clip. Restore `healthy` and deploy again to demonstrate recovery as a new history record.
 
 ### CrashLoopBackOff and previous logs
+
+The existing clip 04 predates the Helm snapshot remediation. In its replacement, show the original Helm error, persisted snapshot status/time, container state, restart count, available current or previous logs, and recovery. Keep the existing filename when publishing the replacement.
 
 Set:
 
@@ -184,9 +214,13 @@ DEMO_FAIL_STARTUP=true
 Deploy and show:
 
 - rollout failure;
+- snapshot collection time and `complete`/`partial`/`unavailable` status;
 - container reason/restart count;
-- current and previous Pod logs;
-- likely-cause guidance in Diagnostics.
+- **Current logs** and **Previous logs** in Diagnostics when available;
+- likely-cause guidance backed by container state or logs;
+- a downloaded diagnostic bundle retaining the failed attempt evidence.
+
+Keep the original Helm error visible. Explain missing previous logs or collection errors honestly; the Runtime log panel may remain empty for a failed install.
 
 Restore `false`, redeploy, and show the healthy replacement.
 
@@ -208,7 +242,7 @@ make k8s-demo-check PROFILE=local-kubernetes
 kubectl get pods,deployments,services,ingresses --namespace default
 ```
 
-Use the PaaS cleanup action for obsolete demo deployments. Delete or scale a Deployment only when intentionally stopping a workload; deleting a managed Pod alone triggers Kubernetes self-healing.
+Use the PaaS cleanup action for an obsolete manifest deployment, or select the newest Helm deployment when intentionally removing its current shared release. A cleanup or stop command against a historical Helm record is correctly shown as skipped. Delete or scale a Deployment only when intentionally stopping a workload; deleting a managed Pod alone triggers Kubernetes self-healing.
 
 ## Recording Notes
 
@@ -217,3 +251,6 @@ Use the PaaS cleanup action for obsolete demo deployments. Delete or scale a Dep
 - Keep one controlled failure in history because it makes diagnostics and recovery visible.
 - Use exact Pod names for deletion.
 - Never display local environment files, Docker Hub tokens, GitHub tokens, bearer tokens, kubeconfig contents, or Kubernetes Secret values.
+
+
+For the image identity guarantee, show the persisted `repository@sha256:...` reference, a controlled tag replacement in a dedicated validation project, and a newly created Pod that still uses the original reference. Existing clips do not demonstrate this tag-mutation check.

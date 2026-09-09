@@ -132,7 +132,7 @@ The workflow gives its `GITHUB_TOKEN` read-only access to repository contents. N
 | Dependency Audit | Informational Python and production npm advisory scans |
 | Docker Build | Image build plus informational high/critical vulnerability scan |
 | Compose Config | Rendered Compose configuration is valid |
-| Helm Template | Control-plane and workload charts render/lint successfully |
+| Helm Template | Both charts lint; the control-plane chart and generic-workload default/example values render successfully |
 
 Advisory databases change independently of this repository, so dependency and image vulnerability audits are informational. Runtime image/tool versions and action revisions remain pinned so upgrades arrive as explicit reviewable changes.
 
