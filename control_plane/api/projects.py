@@ -384,8 +384,23 @@ def retry_project_deployment(project_id, deployment_id):
     try:
         _build, deployment, commit_sha = create_historical_retry(project, original)
     except ValueError as exc:
-        current_app.logger.warning("Historical retry rejected: %s", exc)
-        return jsonify({"error": f"{exc}; use redeploy to apply current project configuration"}), 409
+        current_app.logger.warning(
+            "Historical retry rejected for project %s, deployment %s: %s",
+            project_id,
+            deployment_id,
+            exc,
+        )
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "Historical deployment cannot be retried; "
+                        "use redeploy to apply current project configuration"
+                    )
+                }
+            ),
+            409,
+        )
     branch = get_deployment_branch(deployment)
     record_audit_event(
         action="deployment.retry_triggered",

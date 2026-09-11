@@ -651,8 +651,9 @@ def test_retry_deployment_rejects_invalid_historical_snapshot(
     response = client.post(f"/api/projects/{project_id}/deployments/{original_deployment_id}/retry")
 
     assert response.status_code == 409
-    assert "Historical deployment specification" in response.get_json()["error"]
-    assert "use redeploy" in response.get_json()["error"]
+    assert response.get_json() == {
+        "error": "Historical deployment cannot be retried; use redeploy to apply current project configuration"
+    }
 
 
 def test_retry_deployment_rejects_missing_historical_commit(client, app, monkeypatch):
@@ -674,7 +675,7 @@ def test_retry_deployment_rejects_missing_historical_commit(client, app, monkeyp
 
     assert response.status_code == 409
     assert response.get_json() == {
-        "error": "Historical deployment commit is unavailable; use redeploy to apply current project configuration"
+        "error": "Historical deployment cannot be retried; use redeploy to apply current project configuration"
     }
 
 
