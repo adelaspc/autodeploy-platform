@@ -24,6 +24,7 @@ CONFIG_KEY_BY_ROLE = {
 }
 
 LOCAL_AUTH_DISABLED_ENVS = {"development", "local", "test"}
+AUTH_DISABLED_ALLOWED_CONFIG_KEY = "CONTROL_PLANE_API_AUTH_DISABLED_ALLOWED_AT_STARTUP"
 TOKEN_MISSING = "missing"
 TOKEN_MALFORMED = "malformed"
 TOKEN_PRESENT = "present"
@@ -76,6 +77,10 @@ def api_auth_disabled_allowed_for_config(config):
     return env_name in LOCAL_AUTH_DISABLED_ENVS and _truthy_config_value(
         config.get("CONTROL_PLANE_ALLOW_AUTH_DISABLED", False)
     )
+
+
+def api_auth_disabled_allowed_at_startup():
+    return bool(current_app.config.get(AUTH_DISABLED_ALLOWED_CONFIG_KEY, False))
 
 
 def _json_configured_api_tokens(config):
@@ -203,10 +208,13 @@ def _record_denied_request_audit(*, reason, required_role, actor_role=None):
 
 
 def authorize_request(required_role):
-    # Local profiles may deliberately run without tokens; startup validation
-    # decides whether that configuration is safe.
     if not api_auth_enabled():
-        return None
+        # Non-API CLI processes intentionally start the shared Flask app without
+        # API tokens. Keep protected routes fail-closed if such a process is ever
+        # exposed as an HTTP server by mistake.
+        if api_auth_disabled_allowed_at_startup():
+            return None
+        return _unauthorized_response("API authentication is not configured")
 
     principal = _cached_request_principal()
     if principal is None:

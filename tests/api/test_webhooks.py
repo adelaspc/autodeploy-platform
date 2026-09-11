@@ -124,6 +124,26 @@ def test_github_webhook_triggers_deployment_for_matching_push_event(client, app)
         assert delivery.deployment_id == deployment_id
 
 
+def test_github_webhook_fans_out_to_matching_projects_without_a_direct_delivery_link(client, app):
+    create_project(client, name="push-fanout-first")
+    create_project(client, name="push-fanout-second")
+    payload = {
+        "ref": "refs/heads/main",
+        "after": "abcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        "repository": {"clone_url": "https://github.com/example/webhook-app.git"},
+    }
+    body, headers = github_headers(app, payload, delivery_id="push-fanout")
+
+    response = client.post("/api/webhooks/github", data=body, headers=headers)
+
+    assert response.status_code == 202
+    assert len(response.get_json()["deployments"]) == 2
+    with app.app_context():
+        delivery = WebhookDelivery.query.filter_by(delivery_id="push-fanout").one()
+        assert delivery.status == "accepted"
+        assert delivery.deployment_id is None
+
+
 def test_github_webhook_uses_project_default_test_command(client, app):
     project_response = create_project(client, name="push-triggered-default-tests-app", default_test_command="pytest -q")
     project_id = project_response.get_json()["id"]
@@ -258,6 +278,20 @@ def test_github_webhook_treats_zero_after_sha_as_deleted_branch(client, app):
 
     assert response.status_code == 202
     assert response.get_json()["reason"] == "branch_deleted"
+
+
+def test_github_webhook_rejects_malformed_commit_sha(client, app):
+    payload = {
+        "ref": "refs/heads/main",
+        "after": "not-a-git-object-id",
+        "repository": {"clone_url": "https://github.com/example/webhook-app.git"},
+    }
+    body, headers = github_headers(app, payload, delivery_id="push-invalid-sha")
+
+    response = client.post("/api/webhooks/github", data=body, headers=headers)
+
+    assert response.status_code == 400
+    assert "commit_sha" in response.get_json()["error"]
 
 
 def test_github_webhook_ignores_push_when_kubernetes_executor_is_not_ready(client, app):

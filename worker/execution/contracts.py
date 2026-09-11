@@ -11,6 +11,7 @@ class ExecutionResult:
     events: list = field(default_factory=list)
     log_path: str | None = None
     workspace_path: str | None = None
+    command_output: str | None = None
     image_tag: str | None = None
     image_ref: str | None = None
     service_url: str | None = None

@@ -123,7 +123,7 @@ def test_reconciler_marks_running_deployment_failed_when_container_missing(clien
         assert any(event.event_type == "reconcile.container_missing" for event in updated.events)
 
 
-def test_reconciler_cleans_orphan_container_and_workspace(client, app, monkeypatch, tmp_path):
+def test_reconciler_cleans_orphan_container_and_preserves_workspace(client, app, monkeypatch, tmp_path):
     deployment_payload = create_deployment(client, name="failed-cleanup", status="failed", build_status="failed")
     deployment_id = deployment_payload["id"]
     workspace_dir = tmp_path / "workspace"
@@ -150,16 +150,6 @@ def test_reconciler_cleans_orphan_container_and_workspace(client, app, monkeypat
                 log_path="/tmp/reconcile-stop.log",
             )
 
-        def cleanup_workspace(self, deployment):
-            removed_paths = []
-            if workspace_dir.exists():
-                workspace_dir.rmdir()
-                removed_paths.append(str(workspace_dir))
-            if log_file.exists():
-                log_file.unlink()
-                removed_paths.append(str(log_file))
-            return {"workspace_removed": True, "log_removed": True, "removed_paths": removed_paths}
-
     import worker.reconciliation.service as reconcile_module
 
     monkeypatch.setattr(reconcile_module, "create_executor_for_deployment", lambda deployment: CleanupExecutor())
@@ -170,9 +160,9 @@ def test_reconciler_cleans_orphan_container_and_workspace(client, app, monkeypat
         updated = db.session.get(PlatformDeployment, deployment_id)
         event_types = [event.event_type for event in updated.events]
         assert "reconcile.container_removed" in event_types
-        assert "reconcile.workspace_removed" in event_types
-        assert not workspace_dir.exists()
-        assert not log_file.exists()
+        assert "reconcile.workspace_removed" not in event_types
+        assert workspace_dir.exists()
+        assert log_file.exists()
 
 
 def test_reconciler_keeps_running_kubernetes_deployment_when_resources_exist(client, app, monkeypatch):

@@ -1,5 +1,7 @@
 """Push and verify images in the configured container registry."""
 
+import re
+
 from worker.execution.contracts import ExecutionResult, WorkerExecutionError
 
 
@@ -61,7 +63,16 @@ class RegistryServiceMixin:
 
         push_result = self._run_command("image.push", ["docker", "push", registry_image_ref], log_path=log_path)
         push_result.image_tag = deployment.build.image_tag
-        push_result.image_ref = registry_image_ref
+        digests = re.findall(r"\bdigest:\s*(sha256:[0-9a-f]{64})\b", push_result.command_output or "")
+        if len(set(digests)) != 1:
+            raise WorkerExecutionError(
+                "image.push", "Registry push did not report one valid image digest",
+                metadata={"tagged_image_ref": registry_image_ref}, log_path=str(log_path),
+            )
+        repository = registry_image_ref.rsplit(":", 1)[0]
+        push_result.image_ref = f"{repository}@{digests[0]}"
+        push_result.metadata |= {"tagged_image_ref": registry_image_ref, "image_digest": digests[0]}
+
         push_result.metadata |= login_metadata
         return push_result
 
@@ -80,6 +91,9 @@ class RegistryServiceMixin:
             )
         if not registry_image_ref:
             raise WorkerExecutionError("image.verify", "Registry image reference is missing before verification step")
+
+        if not re.fullmatch(r"[^@]+@sha256:[0-9a-f]{64}", registry_image_ref):
+            raise WorkerExecutionError("image.verify", "Registry deployment requires a digest reported by image push")
 
         verify_result = self._run_command(
             "image.verify",

@@ -4,7 +4,6 @@
 - continuous background health monitoring with thresholds, recovery events, and retention
 - metrics such as CPU, memory, and restarts
 - optional external dashboards for the existing Prometheus-compatible metrics endpoint
-- automatic workload release identity injection (`APP_COMMIT_SHA` / `APP_VERSION`)
 - Playwright coverage for the main operator workflow
 - registry authentication versus Kubernetes imagePullSecret pre-deploy warnings
 - resource request/limit validation and display

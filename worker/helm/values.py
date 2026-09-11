@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from control_plane.deployment_spec import project_for_deployment
 from control_plane.security import env_var_is_secret
+from worker.kubernetes_workload import health_probes, resource_requests
+from worker.workload_environment import resolved_workload_environment
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,7 @@ def generic_web_app_values(deployment, config: GenericWebAppValuesConfig | None 
         "image": {
             "repository": repository,
             "tag": tag,
+            "digest": (build.image_ref or "").partition("@")[2],
             "pullPolicy": config.image_pull_policy,
             "pullSecrets": _image_pull_secrets(config.image_pull_secret),
         },
@@ -34,7 +37,7 @@ def generic_web_app_values(deployment, config: GenericWebAppValuesConfig | None 
         "container": {
             "port": project.port,
         },
-        "env": _env_values(project.env_vars),
+        "env": _env_values(resolved_workload_environment(deployment)),
         "envFrom": {
             "configMaps": [],
             "secrets": [],
@@ -44,8 +47,8 @@ def generic_web_app_values(deployment, config: GenericWebAppValuesConfig | None 
             "port": project.port,
             "targetPort": "",
         },
-        "resources": _resource_values(project),
-        "probes": _probe_values(project.healthcheck_path),
+        "resources": resource_requests(project),
+        "probes": health_probes(project),
         "ingress": (
             {
                 "enabled": True,
@@ -65,6 +68,8 @@ def generic_web_app_values(deployment, config: GenericWebAppValuesConfig | None 
 def _image_repository_and_tag(build):
     image_ref = _clean_string(getattr(build, "image_ref", None))
     image_tag = _clean_string(getattr(build, "image_tag", None))
+    if image_ref and "@" in image_ref:
+        return image_ref.split("@", 1)[0], image_tag or "latest"
     if image_ref:
         parsed = _split_tagged_image_ref(image_ref)
         if parsed:
@@ -142,46 +147,6 @@ def _env_values(env_vars):
             )
 
     return rendered
-
-
-def _resource_values(project):
-    requests = {}
-    cpu = _clean_string(getattr(project, "cpu", None))
-    memory = _clean_string(getattr(project, "memory", None))
-    if cpu:
-        requests["cpu"] = cpu
-    if memory:
-        requests["memory"] = memory
-    if not requests:
-        return {}
-    return {"requests": requests}
-
-
-def _probe_values(healthcheck_path):
-    path = _clean_string(healthcheck_path) or "/"
-    return {
-        "readiness": {
-            "enabled": True,
-            "httpGet": {
-                "path": path,
-                "port": "http",
-            },
-            "initialDelaySeconds": 5,
-            "periodSeconds": 10,
-        },
-        "liveness": {
-            "enabled": True,
-            "httpGet": {
-                "path": path,
-                "port": "http",
-            },
-            "initialDelaySeconds": 15,
-            "periodSeconds": 20,
-        },
-        "startup": {
-            "enabled": False,
-        },
-    }
 
 
 def _clean_string(value):

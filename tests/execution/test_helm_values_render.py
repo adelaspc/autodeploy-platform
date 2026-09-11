@@ -71,6 +71,50 @@ def rendered_role(rendered):
     return next(doc for doc in rendered_docs(rendered) if doc.get("kind") == "Role")
 
 
+def runtime_containers(docs):
+    deployments = {
+        doc["metadata"]["name"].rsplit("-", 1)[-1]: doc["spec"]["template"]["spec"][
+            "containers"
+        ][0]
+        for doc in docs
+        if doc.get("kind") == "Deployment"
+        and doc["metadata"]["name"].endswith(("-api", "-worker"))
+    }
+    reconciler = next(doc for doc in docs if doc.get("kind") == "CronJob")
+    migration = next(doc for doc in docs if doc.get("kind") == "Job")
+    return {
+        **deployments,
+        "reconciler": reconciler["spec"]["jobTemplate"]["spec"]["template"]["spec"][
+            "containers"
+        ][0],
+        "migrate": migration["spec"]["template"]["spec"]["containers"][0],
+    }
+
+
+def secret_env_names(container):
+    return {
+        item["name"]
+        for item in container.get("env", [])
+        if "secretKeyRef" in item.get("valueFrom", {})
+    }
+
+
+def secret_ref_names(container):
+    return {
+        item["valueFrom"]["secretKeyRef"]["name"]
+        for item in container.get("env", [])
+        if "secretKeyRef" in item.get("valueFrom", {})
+    }
+
+
+def literal_env(container):
+    return {
+        item["name"]: item["value"]
+        for item in container.get("env", [])
+        if "value" in item
+    }
+
+
 def role_rules_for(role, *, api_group, resource):
     return [
         rule
@@ -198,18 +242,22 @@ def test_control_plane_chart_creates_and_references_runtime_secret_by_default():
     docs = rendered_docs(rendered)
     secret = next(doc for doc in docs if doc.get("kind") == "Secret")
     config_map = next(doc for doc in docs if doc.get("kind") == "ConfigMap")
-    migration_job = next(doc for doc in docs if doc.get("kind") == "Job")
-    migration_container = migration_job["spec"]["template"]["spec"]["containers"][0]
+    containers = runtime_containers(docs)
 
     assert secret["metadata"]["name"] == "control-plane-secret-autodeploy-control-plane-secret"
     assert secret["stringData"]["CONTROL_PLANE_DATABASE_URL"] == "sqlite:////tmp/control-plane.db"
     assert "helm.sh/hook" not in secret["metadata"].get("annotations", {})
     assert "helm.sh/hook" not in config_map["metadata"].get("annotations", {})
-    assert rendered.count("name: control-plane-secret-autodeploy-control-plane-secret") == 4
-    assert {
-        item["name"]: item["value"] for item in migration_container["env"]
-    }["CONTROL_PLANE_DATABASE_URL"] == "sqlite:////tmp/control-plane.db"
-    assert "envFrom" not in migration_container
+    assert all(
+        "CONTROL_PLANE_DATABASE_URL" in secret_env_names(container)
+        for container in containers.values()
+    )
+    assert all(
+        secret_ref_names(container)
+        == {"control-plane-secret-autodeploy-control-plane-secret"}
+        for container in containers.values()
+    )
+    assert "envFrom" not in containers["migrate"]
 
 
 def test_control_plane_chart_references_external_runtime_secret_without_creating_it():
@@ -222,14 +270,109 @@ def test_control_plane_chart_references_external_runtime_secret_without_creating
         "secrets.existingSecret=externally-managed-runtime",
     )
     docs = rendered_docs(rendered)
-    migration_job = next(doc for doc in docs if doc.get("kind") == "Job")
-    migration_container = migration_job["spec"]["template"]["spec"]["containers"][0]
+    containers = runtime_containers(docs)
 
     assert not any(doc.get("kind") == "Secret" for doc in docs)
-    assert rendered.count("name: externally-managed-runtime") == 4
-    assert migration_container["envFrom"] == [
-        {"secretRef": {"name": "externally-managed-runtime"}}
-    ]
+    assert all(
+        "CONTROL_PLANE_DATABASE_URL" in secret_env_names(container)
+        for container in containers.values()
+    )
+    assert all(
+        secret_ref_names(container) == {"externally-managed-runtime"}
+        for container in containers.values()
+    )
+    assert all(
+        not any("secretRef" in source for source in container.get("envFrom", []))
+        for container in containers.values()
+    )
+
+
+def test_control_plane_chart_scopes_secret_keys_by_component():
+    settings = []
+    secret_keys = {
+        "CONTROL_PLANE_DATABASE_URL",
+        "CONTROL_PLANE_GITHUB_WEBHOOK_SECRET",
+        "CONTROL_PLANE_API_TOKEN_READ_ONLY",
+        "CONTROL_PLANE_API_TOKEN_DEPLOYER",
+        "CONTROL_PLANE_API_TOKEN_ADMIN",
+        "CONTROL_PLANE_API_TOKENS_JSON",
+        "CONTROL_PLANE_REGISTRY_USERNAME",
+        "CONTROL_PLANE_REGISTRY_PASSWORD",
+        "CONTROL_PLANE_METRICS_TOKEN",
+        "CONTROL_PLANE_GIT_TOKEN_GITHUB",
+    }
+    for key in sorted(secret_keys):
+        settings.extend(("--set-string", f"secrets.values.{key}=test-value"))
+
+    containers = runtime_containers(
+        rendered_docs(
+            helm_template(
+                "control-plane-scoped-secrets",
+                "./deploy/helm/autodeploy-control-plane",
+                *settings,
+            )
+        )
+    )
+
+    assert secret_env_names(containers["api"]) == {
+        "CONTROL_PLANE_DATABASE_URL",
+        "CONTROL_PLANE_GITHUB_WEBHOOK_SECRET",
+        "CONTROL_PLANE_API_TOKEN_READ_ONLY",
+        "CONTROL_PLANE_API_TOKEN_DEPLOYER",
+        "CONTROL_PLANE_API_TOKEN_ADMIN",
+        "CONTROL_PLANE_API_TOKENS_JSON",
+        "CONTROL_PLANE_METRICS_TOKEN",
+        "CONTROL_PLANE_GIT_TOKEN_GITHUB",
+    }
+    assert secret_env_names(containers["worker"]) == {
+        "CONTROL_PLANE_DATABASE_URL",
+        "CONTROL_PLANE_REGISTRY_USERNAME",
+        "CONTROL_PLANE_REGISTRY_PASSWORD",
+        "CONTROL_PLANE_GIT_TOKEN_GITHUB",
+    }
+    assert secret_env_names(containers["reconciler"]) == {
+        "CONTROL_PLANE_DATABASE_URL"
+    }
+    assert secret_env_names(containers["migrate"]) == {"CONTROL_PLANE_DATABASE_URL"}
+    assert {
+        name: literal_env(container)["CONTROL_PLANE_COMPONENT"]
+        for name, container in containers.items()
+    } == {name: name for name in containers}
+
+
+def test_control_plane_chart_selects_external_git_token_for_api_and_worker():
+    containers = runtime_containers(
+        rendered_docs(
+            helm_template(
+                "control-plane-external-git-token",
+                "./deploy/helm/autodeploy-control-plane",
+                "--set",
+                "secrets.create=false",
+                "--set",
+                "secrets.existingSecret=externally-managed-runtime",
+                "--set",
+                "secrets.gitTokenKeys[0]=CONTROL_PLANE_GIT_TOKEN_CUSTOM",
+            )
+        )
+    )
+
+    assert "CONTROL_PLANE_GIT_TOKEN_CUSTOM" in secret_env_names(containers["api"])
+    assert "CONTROL_PLANE_GIT_TOKEN_CUSTOM" in secret_env_names(containers["worker"])
+    assert "CONTROL_PLANE_GIT_TOKEN_CUSTOM" not in secret_env_names(
+        containers["reconciler"]
+    )
+    assert "CONTROL_PLANE_GIT_TOKEN_CUSTOM" not in secret_env_names(containers["migrate"])
+
+
+def test_control_plane_chart_rejects_invalid_git_token_key():
+    stderr = helm_template_failure(
+        "control-plane-invalid-git-token",
+        "./deploy/helm/autodeploy-control-plane",
+        "--set",
+        "secrets.gitTokenKeys[0]=GITHUB_TOKEN",
+    )
+
+    assert 'invalid secrets.gitTokenKeys entry "GITHUB_TOKEN"' in stderr
 
 
 @pytest.mark.parametrize(

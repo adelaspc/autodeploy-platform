@@ -2,6 +2,7 @@
 
 from flask import current_app
 
+from control_plane.deployment_runtime_metadata import persist_kubernetes_runtime_identity
 from control_plane.extensions import db
 from control_plane.models import PlatformDeployment
 from sqlalchemy import update  # noqa: F401 - compatibility for existing pipeline consumers
@@ -213,6 +214,27 @@ def process_deployment(deployment, executor=None):
         if deploy_target and deploy_target != "unknown":
             ensure_claim_owned(deployment)
             deployment.deploy_target = deploy_target
+            if deploy_target == "kubernetes":
+                deployment_mode = getattr(
+                    executor,
+                    "deployment_mode",
+                    current_app.config.get("CONTROL_PLANE_K8S_DEPLOYMENT_MODE", "manifest"),
+                )
+                resource_identity = {}
+                if deployment_mode == "manifest":
+                    resource_identity_fn = getattr(executor, "kubernetes_resource_identity", None)
+                    if callable(resource_identity_fn):
+                        resource_identity = resource_identity_fn(deployment)
+                persist_kubernetes_runtime_identity(
+                    deployment,
+                    deployment_mode=deployment_mode,
+                    namespace=getattr(
+                        executor,
+                        "namespace",
+                        current_app.config.get("CONTROL_PLANE_K8S_NAMESPACE", "default"),
+                    ),
+                    **resource_identity,
+                )
             db.session.commit()
         preflight_fn = getattr(executor, "preflight_deploy", None)
         if callable(preflight_fn):

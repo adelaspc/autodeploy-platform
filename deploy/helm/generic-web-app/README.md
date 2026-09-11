@@ -71,3 +71,8 @@ Example values are available in:
 - `examples/minimal.yaml`
 - `examples/node-express.yaml`
 - `examples/python-fastapi.yaml`
+
+
+## Image Digest
+
+Set `image.digest` to a SHA-256 digest to render `image.repository@image.digest`. A nonempty digest takes precedence over `image.tag`; an empty digest preserves the chart's existing repository/tag behavior. The platform supplies the digest reported by registry push and verified before rollout. `image.pullPolicy` still controls pulling, while the digest fixes image identity.

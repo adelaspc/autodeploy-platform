@@ -3,6 +3,7 @@
 import json
 
 from control_plane.deployment_spec import project_for_deployment
+from control_plane.deployment_runtime_metadata import kubernetes_ingress_name
 from worker.execution.contracts import ExecutionResult, WorkerExecutionError
 from worker.executors.kubernetes.manifest_renderer import KubernetesManifestRendererMixin
 
@@ -17,6 +18,7 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
         port_forward_log_path = logs_dir / "kubernetes-port-forward.log"
         deployment_name = self._k8s_deployment_name(deployment)
         service_name = self._k8s_service_name(deployment)
+        ingress_name = kubernetes_ingress_name(deployment) or deployment_name
         internal_service_url = self._service_url(service_name, project.port)
         ingress_host = self._ingress_host(deployment.id)
         service_url = self._ingress_url(ingress_host)
@@ -24,6 +26,13 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
         healthcheck_url = f"{effective_url}{project.healthcheck_path}"
         manifest = self._manifest(deployment, deployment_name=deployment_name, service_name=service_name)
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        resource_metadata = {
+            "deployment_name": deployment_name,
+            "service_name": service_name,
+            "ingress_name": ingress_name if self.ingress_enabled else None,
+            "manifest_path": str(manifest_path),
+            "namespace": self.namespace,
+        }
 
         events = [
             self._event(
@@ -31,7 +40,7 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                 "deploying",
                 "Applying Kubernetes Deployment and Service manifests",
                 step="deploy.kubernetes.apply",
-                metadata={"manifest_path": str(manifest_path), "namespace": self.namespace},
+                metadata=resource_metadata,
             )
         ]
 
@@ -45,11 +54,11 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                     "deploying",
                     "Kubernetes manifests applied successfully",
                     step="deploy.kubernetes.apply",
-                    metadata={"manifest_path": str(manifest_path), "namespace": self.namespace},
+                    metadata=resource_metadata,
                 ),
                 failure_event_type="kubernetes.manifest_apply_failed",
                 failure_step="deploy.kubernetes.apply",
-                failure_metadata={"manifest_path": str(manifest_path), "namespace": self.namespace},
+                failure_metadata=resource_metadata,
                 existing_events=events,
             )
         except WorkerExecutionError as exc:
@@ -80,7 +89,7 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                         "namespace": self.namespace,
                         "service_url": service_url,
                         "internal_service_url": internal_service_url,
-                        "ingress_name": deployment_name if self.ingress_enabled else None,
+                        "ingress_name": ingress_name if self.ingress_enabled else None,
                         "ingress_host": ingress_host,
                         "ingress_class": self.ingress_class_name or None,
                         "port": project.port,
@@ -169,7 +178,7 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                     "namespace": self.namespace,
                     "service_url": service_url,
                     "internal_service_url": internal_service_url,
-                    "ingress_name": deployment_name if self.ingress_enabled else None,
+                    "ingress_name": ingress_name if self.ingress_enabled else None,
                     "ingress_host": ingress_host,
                     "ingress_class": self.ingress_class_name or None,
                     "healthcheck_url": healthcheck_url,
@@ -192,7 +201,7 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                             "namespace": self.namespace,
                             "service_url": service_url,
                             "internal_service_url": internal_service_url,
-                            "ingress_name": deployment_name if self.ingress_enabled else None,
+                            "ingress_name": ingress_name if self.ingress_enabled else None,
                             "ingress_host": ingress_host,
                             "ingress_class": self.ingress_class_name or None,
                             "healthcheck_url": healthcheck_url,
@@ -214,7 +223,7 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                     "namespace": self.namespace,
                     "service_url": service_url,
                     "internal_service_url": internal_service_url,
-                    "ingress_name": deployment_name if self.ingress_enabled else None,
+                    "ingress_name": ingress_name if self.ingress_enabled else None,
                     "ingress_host": ingress_host,
                     "ingress_class": self.ingress_class_name or None,
                     "healthcheck_url": healthcheck_url,
@@ -232,7 +241,7 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                 "manifest_path": str(manifest_path),
                 "service_url": service_url,
                 "internal_service_url": internal_service_url,
-                "ingress_name": deployment_name if self.ingress_enabled else None,
+                "ingress_name": ingress_name if self.ingress_enabled else None,
                 "ingress_host": ingress_host,
                 "ingress_class": self.ingress_class_name or None,
                 "healthcheck_url": healthcheck_url,
@@ -311,14 +320,21 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
     def _stop_with_manifest(self, deployment):
         _workspace_dir, _repo_dir, logs_dir = self._prepare_workspace(deployment)
         log_path = logs_dir / "kubernetes-delete.log"
+        namespace = self._namespace_for_deployment(deployment)
         deployment_name = self._k8s_deployment_name(deployment)
         service_name = self._k8s_service_name(deployment)
+        ingress_name = kubernetes_ingress_name(deployment) or deployment_name
         start_event = self._event(
             "kubernetes.resources_delete_started",
             "stopped",
             "Deleting Kubernetes Deployment, Service, and Ingress resources",
             step="deploy.kubernetes.delete",
-            metadata={"deployment_name": deployment_name, "service_name": service_name, "namespace": self.namespace},
+            metadata={
+                "deployment_name": deployment_name,
+                "service_name": service_name,
+                "ingress_name": ingress_name,
+                "namespace": namespace,
+            },
         )
         delete_result = self._run_kubectl_with_events(
             "deploy.kubernetes.delete",
@@ -326,9 +342,10 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                 "delete",
                 f"deployment/{deployment_name}",
                 f"service/{service_name}",
-                f"ingress/{deployment_name}",
+                f"ingress/{ingress_name}",
                 "--ignore-not-found=true",
                 "--wait=false",
+                namespace=namespace,
             ),
             log_path=log_path,
             success_event=self._event(
@@ -336,11 +353,21 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                 "stopped",
                 "Kubernetes resources deleted successfully",
                 step="deploy.kubernetes.delete",
-                metadata={"deployment_name": deployment_name, "service_name": service_name, "namespace": self.namespace},
+                metadata={
+                    "deployment_name": deployment_name,
+                    "service_name": service_name,
+                    "ingress_name": ingress_name,
+                    "namespace": namespace,
+                },
             ),
             failure_event_type="kubernetes.resources_delete_failed",
             failure_step="deploy.kubernetes.delete",
-            failure_metadata={"deployment_name": deployment_name, "service_name": service_name, "namespace": self.namespace},
+            failure_metadata={
+                "deployment_name": deployment_name,
+                "service_name": service_name,
+                "ingress_name": ingress_name,
+                "namespace": namespace,
+            },
             existing_events=[start_event],
         )
         return ExecutionResult(
@@ -349,7 +376,8 @@ class ManifestDeploymentMixin(KubernetesManifestRendererMixin):
                 "executor": self.deploy_target,
                 "deployment_name": deployment_name,
                 "service_name": service_name,
-                "namespace": self.namespace,
+                "ingress_name": ingress_name,
+                "namespace": namespace,
                 "stopped": True,
             },
             events=[start_event, delete_result.events[-1]],

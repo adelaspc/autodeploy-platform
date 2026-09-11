@@ -1,7 +1,15 @@
 import re
 from types import SimpleNamespace
 
-from worker.executors.kubernetes.names import MAX_HELM_RELEASE_LENGTH, dns_slug, helm_release_name, workload_labels, workload_name
+from worker.executors.kubernetes.names import (
+    MAX_HELM_RELEASE_LENGTH,
+    dns_slug,
+    helm_release_name,
+    manifest_deployment_name,
+    manifest_service_name,
+    workload_labels,
+    workload_name,
+)
 
 
 DNS_LABEL_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
@@ -99,10 +107,26 @@ def test_all_generated_names_are_dns_safe():
         dns_slug(project.name),
         workload_name(project),
         helm_release_name(project, deployment),
+        manifest_deployment_name(project, deployment),
+        manifest_service_name(project, deployment),
     ]
 
     for value in values:
         assert_dns_safe(value)
+
+
+def test_manifest_names_replace_docker_only_characters_and_reserve_service_suffix():
+    project = make_project(42, "My_API.release" + "x" * 100)
+    deployment = make_deployment(deployment_id=9223372036854775807)
+
+    deployment_name = manifest_deployment_name(project, deployment)
+    service_name = manifest_service_name(project, deployment)
+
+    assert "_" not in deployment_name
+    assert "." not in deployment_name
+    assert service_name == f"{deployment_name}-svc"
+    assert_dns_safe(deployment_name)
+    assert_dns_safe(service_name)
 
 
 def test_labels_include_expected_stable_selectors():

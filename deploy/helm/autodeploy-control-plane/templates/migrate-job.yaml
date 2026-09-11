@@ -37,18 +37,9 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-            {{- if .Values.secrets.create }}
-            {{- range $key, $value := .Values.secrets.values }}
-            {{- if ne ($value | toString) "" }}
-            - name: {{ $key }}
-              value: {{ $value | quote }}
-            {{- end }}
-            {{- end }}
-            {{- else }}
-          envFrom:
-            - secretRef:
-                name: {{ include "autodeploy-control-plane.runtimeSecretName" . }}
-            {{- end }}
+            {{- include "autodeploy-control-plane.secretEnv" (dict "root" . "component" "migrate") | nindent 12 }}
+            - name: CONTROL_PLANE_COMPONENT
+              value: migrate
           volumeMounts:
             - name: workspace
               mountPath: {{ include "autodeploy-control-plane.workspaceMountPath" . }}

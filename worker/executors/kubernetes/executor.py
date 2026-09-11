@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from control_plane.deployment_spec import project_for_deployment
+from control_plane.deployment_runtime_metadata import (
+    kubernetes_deployment_mode,
+    kubernetes_deployment_name,
+    kubernetes_ingress_name,
+    kubernetes_namespace,
+    kubernetes_service_name,
+)
 from worker.execution.contracts import ExecutorContract
 from worker.executors.local_docker import LocalDockerExecutor
 from worker.executors.kubernetes.diagnostics import KubernetesDiagnosticsMixin
 from worker.executors.kubernetes.healthcheck import PortForwardHealthcheckMixin
 from worker.executors.kubernetes.helm import HelmDeploymentMixin
 from worker.executors.kubernetes.manifest import ManifestDeploymentMixin
+from worker.executors.kubernetes.names import manifest_deployment_name, manifest_service_name
 from worker.executors.kubernetes.preflight import KubernetesPreflightMixin
 from worker.helm.runner import HelmRunner
 
@@ -129,40 +137,76 @@ class KubernetesExecutor(
         return self._deploy_with_manifest(deployment)
 
     def stop(self, deployment):
-        if self.deployment_mode == "helm" or self._deployment_has_helm_release_metadata(deployment):
+        deployment_mode = kubernetes_deployment_mode(deployment) or self.deployment_mode
+        if deployment_mode == "helm":
             return self._stop_with_helm(deployment)
         return self._stop_with_manifest(deployment)
 
     def runtime_resource_status(self, deployment):
+        namespace = self._namespace_for_deployment(deployment)
         deployment_name = self._k8s_deployment_name(deployment)
         service_name = self._k8s_service_name(deployment)
-        deployment_exists = self._kubectl_resource_exists("deployment", deployment_name)
-        service_exists = self._kubectl_resource_exists("service", service_name)
-        ingress_exists = self._kubectl_resource_exists("ingress", deployment_name)
+        ingress_name = kubernetes_ingress_name(deployment) or deployment_name
+        deployment_exists = self._kubectl_resource_exists("deployment", deployment_name, namespace=namespace)
+        service_exists = self._kubectl_resource_exists("service", service_name, namespace=namespace)
+        ingress_exists = self._kubectl_resource_exists("ingress", ingress_name, namespace=namespace)
         return {
-            "namespace": self.namespace,
+            "namespace": namespace,
             "deployment_name": deployment_name,
             "service_name": service_name,
             "deployment_exists": deployment_exists,
             "service_exists": service_exists,
-            "ingress_name": deployment_name,
+            "ingress_name": ingress_name,
             "ingress_exists": ingress_exists,
         }
 
-    def _kubectl_args(self, *parts):
+    def _kubectl_args(self, *parts, namespace=None):
         args = [self.kubectl_bin]
         if self.kubeconfig:
             args.extend(["--kubeconfig", self.kubeconfig])
-        args.extend(["--namespace", self.namespace])
+        args.extend(["--namespace", namespace or self.namespace])
         args.extend(parts)
         return args
 
+    def _namespace_for_deployment(self, deployment):
+        return kubernetes_namespace(deployment) or self.namespace
+
+    def _run_helm_command(
+        self,
+        args,
+        *,
+        capture_output=True,
+        text=True,
+        check=False,
+        input=None,
+        env=None,
+        **_kwargs,
+    ):
+        """Run Helm through the executor command loop so claims stay alive."""
+        return self._execute_command(
+            args,
+            stdin_input=input,
+            env=env,
+            timeout=self.command_timeout,
+        )
+
     def _k8s_deployment_name(self, deployment):
-        base = self._sanitize_image_component(project_for_deployment(deployment).name)
-        return f"paas-{base}-{deployment.id}"
+        return kubernetes_deployment_name(deployment) or manifest_deployment_name(
+            project_for_deployment(deployment), deployment
+        )
 
     def _k8s_service_name(self, deployment):
-        return f"{self._k8s_deployment_name(deployment)}-svc"
+        return kubernetes_service_name(deployment) or manifest_service_name(
+            project_for_deployment(deployment), deployment
+        )
+
+    def kubernetes_resource_identity(self, deployment):
+        deployment_name = self._k8s_deployment_name(deployment)
+        return {
+            "deployment_name": deployment_name,
+            "service_name": self._k8s_service_name(deployment),
+            "ingress_name": kubernetes_ingress_name(deployment) or deployment_name,
+        }
 
     def _service_url(self, service_name, port):
         return f"http://{service_name}.{self.namespace}.svc.cluster.local:{port}"

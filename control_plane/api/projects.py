@@ -4,16 +4,28 @@ from flask import Blueprint, current_app, jsonify, request
 
 from control_plane.api.audit_service import record_audit_event
 from control_plane.api.auth import authorize_request, require_api_role
-from control_plane.application.deployments.orchestration import create_user_facing_deployment, get_deployment_branch, get_latest_project_deployment_record
+from control_plane.application.deployments.orchestration import (
+    create_historical_retry,
+    create_user_facing_deployment,
+    get_deployment_branch,
+    get_latest_project_deployment_record,
+)
 from control_plane.application.deployments.queries import get_project_deployment_or_404, get_project_or_404
 from control_plane.application.deployments.service import (
     apply_deployment_update,
     create_manual_deployment,
 )
 from control_plane.application.command_requests import request_deployment_command
-from control_plane.api.request_parsing import parse_bool_arg, parse_limit_arg, parse_optional_int_arg, parse_status_filter_arg
+from control_plane.api.request_parsing import (
+    parse_bool_arg,
+    parse_json_object,
+    parse_limit_arg,
+    parse_optional_int_arg,
+    parse_status_filter_arg,
+)
 from control_plane.application.projects.validation import (
     kubernetes_deployment_prereq_error,
+    normalize_deployment_request_payload,
     normalize_project_spec_fields,
     resolve_effective_test_command,
     validate_deployment_patch_payload,
@@ -65,7 +77,9 @@ def list_projects():
 @projects_bp.post("")
 @require_api_role("admin")
 def create_project():
-    payload = request.get_json(silent=True) or {}
+    payload, error_response, status_code = parse_json_object(request=request)
+    if error_response is not None:
+        return error_response, status_code
     validation_error = validate_project_payload(payload)
     if validation_error:
         return jsonify({"error": validation_error}), 400
@@ -168,7 +182,9 @@ def get_project_activity(project_id):
 @require_api_role("admin")
 def update_project(project_id):
     project = get_project_or_404(project_id)
-    payload = request.get_json(silent=True) or {}
+    payload, error_response, status_code = parse_json_object(request=request)
+    if error_response is not None:
+        return error_response, status_code
     update_data, validation_error = validate_project_patch_payload(payload, project)
     if validation_error:
         return jsonify({"error": validation_error}), 400
@@ -261,10 +277,13 @@ def get_latest_project_deployment(project_id):
 @require_api_role("admin")
 def create_project_deployment(project_id):
     project = get_project_or_404(project_id)
-    payload = request.get_json(silent=True) or {}
+    payload, error_response, status_code = parse_json_object(request=request)
+    if error_response is not None:
+        return error_response, status_code
     validation_error = validate_deployment_request_payload(payload)
     if validation_error:
         return jsonify({"error": validation_error}), 400
+    payload = normalize_deployment_request_payload(payload)
     deployment_prereq_error = kubernetes_deployment_prereq_error()
     if deployment_prereq_error:
         return jsonify({"error": deployment_prereq_error}), 409
@@ -298,7 +317,9 @@ def create_project_deployment(project_id):
 @require_api_role("deployer")
 def deploy_project(project_id):
     project = get_project_or_404(project_id)
-    payload = request.get_json(silent=True) or {}
+    payload, error_response, status_code = parse_json_object(request=request)
+    if error_response is not None:
+        return error_response, status_code
     validation_error = validate_project_deploy_payload(payload)
     if validation_error:
         return jsonify({"error": validation_error}), 400
@@ -319,6 +340,11 @@ def deploy_project(project_id):
             branch=branch,
             test_command=test_command,
             message_prefix="Deployment requested",
+            deployment_metadata={
+                "creation_action": "deploy",
+                "configuration_source": "current_project",
+                "commit_source": "resolved_branch_head",
+            },
         )
     except ValueError as exc:
         current_app.logger.warning("Deployment source resolution failed: %s", exc)
@@ -335,7 +361,14 @@ def deploy_project(project_id):
     )
 
     return (
-        jsonify(serialize_triggered_deployment(deployment, branch=branch)),
+        jsonify(
+            serialize_triggered_deployment(
+                deployment,
+                branch=branch,
+                creation_action="deploy",
+                configuration_source="current_project",
+            )
+        ),
         201,
     )
 
@@ -348,19 +381,27 @@ def retry_project_deployment(project_id, deployment_id):
     deployment_prereq_error = kubernetes_deployment_prereq_error()
     if deployment_prereq_error:
         return jsonify({"error": deployment_prereq_error}), 409
-    branch = get_deployment_branch(original)
-    test_command = original.build.test_command
-
     try:
-        build, deployment, commit_sha = create_user_facing_deployment(
-            project,
-            branch=branch,
-            test_command=test_command,
-            message_prefix="Deployment retry requested",
-        )
+        _build, deployment, commit_sha = create_historical_retry(project, original)
     except ValueError as exc:
-        current_app.logger.warning("Deployment source resolution failed: %s", exc)
-        return jsonify({"error": "Unable to resolve deployment source"}), 409
+        current_app.logger.warning(
+            "Historical retry rejected for project %s, deployment %s: %s",
+            project_id,
+            deployment_id,
+            exc,
+        )
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "Historical deployment cannot be retried; "
+                        "use redeploy to apply current project configuration"
+                    )
+                }
+            ),
+            409,
+        )
+    branch = get_deployment_branch(deployment)
     record_audit_event(
         action="deployment.retry_triggered",
         resource_type="deployment",
@@ -380,6 +421,8 @@ def retry_project_deployment(project_id, deployment_id):
                 branch=branch,
                 source_deployment_field="retried_from_deployment_id",
                 source_deployment_id=original.id,
+                creation_action="retry",
+                configuration_source="historical_snapshot",
             )
         ),
         201,
@@ -398,7 +441,7 @@ def redeploy_project(project_id):
         return jsonify({"error": deployment_prereq_error}), 409
 
     branch = get_deployment_branch(original)
-    test_command = original.build.test_command or project.default_test_command
+    test_command = project.default_test_command
 
     try:
         build, deployment, _commit_sha = create_user_facing_deployment(
@@ -406,6 +449,12 @@ def redeploy_project(project_id):
             branch=branch,
             test_command=test_command,
             message_prefix="Project redeploy requested",
+            deployment_metadata={
+                "creation_action": "redeploy",
+                "source_deployment_id": original.id,
+                "configuration_source": "current_project",
+                "commit_source": "resolved_branch_head",
+            },
         )
     except ValueError as exc:
         current_app.logger.warning("Deployment source resolution failed: %s", exc)
@@ -429,6 +478,8 @@ def redeploy_project(project_id):
                 branch=branch,
                 source_deployment_field="redeployed_from_deployment_id",
                 source_deployment_id=original.id,
+                creation_action="redeploy",
+                configuration_source="current_project",
             )
         ),
         201,
@@ -521,9 +572,9 @@ def _queue_deployment_command(project_id, deployment, command_type, *, message=N
 @require_api_role("deployer")
 def stop_project_deployment(project_id, deployment_id):
     deployment = get_project_deployment_or_404(project_id, deployment_id)
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict):
-        return jsonify({"error": "Invalid stop payload. Expected a JSON object"}), 400
+    payload, error_response, status_code = parse_json_object(request=request)
+    if error_response is not None:
+        return error_response, status_code
 
     unsupported_fields = sorted(set(payload) - {"message"})
     if unsupported_fields:
@@ -543,9 +594,9 @@ def stop_project_deployment(project_id, deployment_id):
 @require_api_role("deployer")
 def cleanup_project_deployment(project_id, deployment_id):
     deployment = get_project_deployment_or_404(project_id, deployment_id)
-    payload = request.get_json(silent=True) or {}
-    if not isinstance(payload, dict):
-        return jsonify({"error": "Invalid cleanup payload. Expected a JSON object"}), 400
+    payload, error_response, status_code = parse_json_object(request=request)
+    if error_response is not None:
+        return error_response, status_code
     unsupported_fields = sorted(set(payload) - {"message"})
     if unsupported_fields:
         return jsonify({"error": "Unsupported cleanup fields: " + ", ".join(unsupported_fields)}), 400
@@ -562,7 +613,9 @@ def cleanup_project_deployment(project_id, deployment_id):
 @require_api_role("admin")
 def update_project_deployment(project_id, deployment_id):
     deployment = get_project_deployment_or_404(project_id, deployment_id)
-    payload = request.get_json(silent=True) or {}
+    payload, error_response, status_code = parse_json_object(request=request)
+    if error_response is not None:
+        return error_response, status_code
     update_data, validation_error = validate_deployment_patch_payload(payload, deployment)
     if validation_error:
         return jsonify({"error": validation_error}), 400

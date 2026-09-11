@@ -1,9 +1,12 @@
 import base64
 import subprocess
+from copy import deepcopy
+
+import pytest
 
 from control_plane.application.deployments import orchestration as deployment_orchestration_api
 from control_plane.extensions import db
-from control_plane.models import PlatformDeployment
+from control_plane.models import PlatformDeployment, Project
 from tests.api.project_test_helpers import create_project, event_by_type
 
 
@@ -170,7 +173,7 @@ def test_update_deployment_rejects_service_url(client):
     )
 
     assert response.status_code == 400
-    assert response.get_json() == {"error": "Provide at least one updatable field: status, build_status"}
+    assert response.get_json() == {"error": "Unsupported deployment patch fields: service_url"}
 
 
 def test_trigger_deployment_rejects_missing_commit_sha(client):
@@ -181,6 +184,67 @@ def test_trigger_deployment_rejects_missing_commit_sha(client):
 
     assert response.status_code == 400
     assert response.get_json() == {"error": "Missing required field: commit_sha"}
+
+
+@pytest.mark.parametrize("commit_sha", ["abc123", "not-a-sha", 1234567, "a" * 41, "a" * 65])
+def test_trigger_deployment_rejects_invalid_commit_sha(client, commit_sha):
+    project_id = create_project(client, name="invalid-commit-app").get_json()["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": commit_sha},
+    )
+
+    assert response.status_code == 400
+    assert "commit_sha" in response.get_json()["error"]
+
+
+def test_trigger_deployment_normalizes_commit_sha(client):
+    project_id = create_project(client, name="normalized-commit-app").get_json()["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "ABCDEF0123456789"},
+    )
+
+    assert response.status_code == 201
+    assert response.get_json()["build"]["commit_sha"] == "abcdef0123456789"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("registry", 123),
+        ("image_name", []),
+        ("image_tag", {}),
+        ("image_ref", True),
+        ("environment", None),
+        ("service_url", "relative/path"),
+        ("message", ["invalid"]),
+    ],
+)
+def test_trigger_deployment_rejects_invalid_manual_field_types(client, field_name, value):
+    project_id = create_project(client, name="invalid-manual-field-app").get_json()["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abcdef0123456789", field_name: value},
+    )
+
+    assert response.status_code == 400
+    assert field_name in response.get_json()["error"]
+
+
+def test_trigger_deployment_rejects_unknown_manual_fields(client):
+    project_id = create_project(client, name="unknown-manual-field-app").get_json()["id"]
+
+    response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abcdef0123456789", "unexpected": "value"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "Unsupported manual deployment fields: unexpected"}
 
 
 def test_api_rejects_request_body_over_configured_limit(client, app):
@@ -314,6 +378,23 @@ def test_deploy_project_allows_explicit_null_test_command_override(client, monke
     assert deployment["build"]["test_command"] is None
 
 
+def test_deploy_project_rejects_empty_test_command_override(client, monkeypatch):
+    project_response = create_project(client, name="empty-deploy-command-app", default_test_command="pytest -q")
+    project_id = project_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+    )
+
+    response = client.post(
+        f"/api/projects/{project_id}/deploy",
+        json={"test_command": ""},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "Invalid test_command. Expected a non-empty string"}
+
+
 def test_deploy_project_rejects_shell_wrapper_test_command(client, monkeypatch):
     project_response = create_project(client, name="invalid-deploy-command-app")
     project_id = project_response.get_json()["id"]
@@ -346,6 +427,7 @@ def test_deploy_project_returns_conflict_when_commit_resolution_fails(client, mo
 
     assert response.status_code == 409
     assert response.get_json() == {"error": "Unable to resolve deployment source"}
+    assert client.get(f"/api/projects/{project_id}/deployments").get_json()["items"] == []
 
 
 def test_deploy_project_resolves_private_github_commit_with_token_env(client, monkeypatch):
@@ -465,8 +547,13 @@ def test_get_latest_deployment_returns_most_recent_deployment(client, monkeypatc
     assert payload["updated_at"] is not None
 
 
-def test_retry_deployment_creates_new_pending_deployment_from_original_settings(client, monkeypatch):
-    project_response = create_project(client, name="retry-app")
+def test_retry_deployment_reproduces_historical_commit_and_configuration(client, app, monkeypatch):
+    project_response = create_project(
+        client,
+        name="retry-app",
+        port=5000,
+        env_vars=[{"name": "APP_VERSION", "value_source": "literal", "value": "historical"}],
+    )
     project_id = project_response.get_json()["id"]
 
     monkeypatch.setattr(
@@ -478,8 +565,24 @@ def test_retry_deployment_creates_new_pending_deployment_from_original_settings(
     )
     original_deployment_id = original_response.get_json()["deployment_id"]
 
+    with app.app_context():
+        original = db.session.get(PlatformDeployment, original_deployment_id)
+        original.environment = "staging"
+        historical_snapshot = deepcopy(original.spec_snapshot_json)
+        project = db.session.get(Project, project_id)
+        project.repo_url = "https://github.com/example/changed-repository"
+        project.branch = "changed-branch"
+        project.port = 8080
+        project.healthcheck_path = "/ready"
+        project.env_vars = [{"name": "APP_VERSION", "value_source": "literal", "value": "current"}]
+        project.cpu = "500m"
+        project.memory = "1Gi"
+        db.session.commit()
+
     monkeypatch.setattr(
-        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "fedcba9876543210"
+        deployment_orchestration_api,
+        "resolve_project_commit_sha",
+        lambda project, branch: (_ for _ in ()).throw(AssertionError("retry must not resolve the branch head")),
     )
     retry_response = client.post(f"/api/projects/{project_id}/deployments/{original_deployment_id}/retry")
 
@@ -490,9 +593,11 @@ def test_retry_deployment_creates_new_pending_deployment_from_original_settings(
     assert payload["project_id"] == project_id
     assert payload["status"] == "pending"
     assert payload["branch"] == "release"
-    assert payload["commit_sha"] == "fedcba9876543210"
-    assert payload["image_tag"] == "fedcba987654"
-    assert payload["image_ref"] == "retry-app:fedcba987654"
+    assert payload["commit_sha"] == "0123456789abcdef"
+    assert payload["image_tag"] == "0123456789ab"
+    assert payload["image_ref"] == "retry-app:0123456789ab"
+    assert payload["creation_action"] == "retry"
+    assert payload["configuration_source"] == "historical_snapshot"
     assert payload["preflight_status"] is None
     assert payload["preflight_summary"] is None
     assert payload["preflight_completed_at"] is None
@@ -500,10 +605,27 @@ def test_retry_deployment_creates_new_pending_deployment_from_original_settings(
     deployment_response = client.get(f"/api/projects/{project_id}/deployments/{payload['deployment_id']}")
     deployment = deployment_response.get_json()
     assert deployment["build"]["test_command"] == "pytest -q"
-    assert deployment["events"][0]["message"] == "Deployment retry requested for branch 'release' at commit 'fedcba987654'"
+    created_event = event_by_type(deployment["events"], "deployment.created")
+    assert created_event["message"] == "Deployment retry requested for branch 'release' at commit '0123456789ab'"
+    assert created_event["metadata_json"]["source_deployment_id"] == original_deployment_id
+    assert created_event["metadata_json"]["configuration_source"] == "historical_snapshot"
+
+    summary = client.get(f"/api/projects/{project_id}/deployments/{payload['deployment_id']}/summary").get_json()
+    assert summary["creation_action"] == "retry"
+    assert summary["source_deployment_id"] == original_deployment_id
+    assert summary["configuration_source"] == "historical_snapshot"
+
+    with app.app_context():
+        retry = db.session.get(PlatformDeployment, payload["deployment_id"])
+        assert retry.spec_snapshot_json == historical_snapshot
+        assert retry.environment == "staging"
+        assert retry.build.image_name == "retry-app"
 
 
-def test_retry_deployment_returns_conflict_when_commit_resolution_fails(client, monkeypatch):
+@pytest.mark.parametrize("invalid_snapshot", ["missing", "unsupported", "incomplete", "cross_project"])
+def test_retry_deployment_rejects_invalid_historical_snapshot(
+    client, app, monkeypatch, invalid_snapshot
+):
     project_response = create_project(client, name="broken-retry-app")
     project_id = project_response.get_json()["id"]
 
@@ -513,16 +635,48 @@ def test_retry_deployment_returns_conflict_when_commit_resolution_fails(client, 
     original_response = client.post(f"/api/projects/{project_id}/deploy", json={})
     original_deployment_id = original_response.get_json()["deployment_id"]
 
-    monkeypatch.setattr(
-        deployment_orchestration_api,
-        "resolve_project_commit_sha",
-        lambda project, branch: (_ for _ in ()).throw(ValueError("Unable to resolve commit for branch 'main': boom")),
-    )
+    with app.app_context():
+        original = db.session.get(PlatformDeployment, original_deployment_id)
+        if invalid_snapshot == "missing":
+            original.spec_snapshot_json = None
+        elif invalid_snapshot == "unsupported":
+            original.spec_snapshot_json = {**original.spec_snapshot_json, "version": 999}
+        elif invalid_snapshot == "incomplete":
+            original.spec_snapshot_json = {"version": 1, "project": {"id": project_id}}
+        else:
+            original.spec_snapshot_json = deepcopy(original.spec_snapshot_json)
+            original.spec_snapshot_json["project"]["id"] = project_id + 1
+        db.session.commit()
 
     response = client.post(f"/api/projects/{project_id}/deployments/{original_deployment_id}/retry")
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": "Unable to resolve deployment source"}
+    assert response.get_json() == {
+        "error": "Historical deployment cannot be retried; use redeploy to apply current project configuration"
+    }
+
+
+def test_retry_deployment_rejects_missing_historical_commit(client, app, monkeypatch):
+    project_response = create_project(client, name="missing-retry-commit-app")
+    project_id = project_response.get_json()["id"]
+
+    monkeypatch.setattr(
+        deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0123456789abcdef"
+    )
+    original_response = client.post(f"/api/projects/{project_id}/deploy", json={})
+    original_deployment_id = original_response.get_json()["deployment_id"]
+
+    with app.app_context():
+        original = db.session.get(PlatformDeployment, original_deployment_id)
+        original.build.commit_sha = ""
+        db.session.commit()
+
+    response = client.post(f"/api/projects/{project_id}/deployments/{original_deployment_id}/retry")
+
+    assert response.status_code == 409
+    assert response.get_json() == {
+        "error": "Historical deployment cannot be retried; use redeploy to apply current project configuration"
+    }
 
 
 def test_retry_deployment_rejects_kubernetes_executor_without_required_settings(client, app, monkeypatch):
@@ -575,8 +729,8 @@ def test_redeploy_project_returns_404_when_project_has_no_deployments(client):
     assert response.get_json() == {"error": "Project has no deployments"}
 
 
-def test_redeploy_project_creates_new_pending_deployment_from_latest_settings(client, monkeypatch):
-    project_response = create_project(client, name="redeploy-app")
+def test_redeploy_project_creates_new_pending_deployment_from_current_settings(client, app, monkeypatch):
+    project_response = create_project(client, name="redeploy-app", default_test_command="python -m unittest")
     project_id = project_response.get_json()["id"]
 
     monkeypatch.setattr(
@@ -593,6 +747,13 @@ def test_redeploy_project_creates_new_pending_deployment_from_latest_settings(cl
     )
     latest_deployment_id = latest_response.get_json()["deployment_id"]
 
+    with app.app_context():
+        project = db.session.get(Project, project_id)
+        project.default_test_command = "python -m compileall -q backend"
+        project.port = 8080
+        project.env_vars = [{"name": "APP_VERSION", "value_source": "literal", "value": "current"}]
+        db.session.commit()
+
     monkeypatch.setattr(
         deployment_orchestration_api, "resolve_project_commit_sha", lambda project, branch: "0011223344556677"
     )
@@ -608,14 +769,24 @@ def test_redeploy_project_creates_new_pending_deployment_from_latest_settings(cl
     assert payload["commit_sha"] == "0011223344556677"
     assert payload["image_tag"] == "001122334455"
     assert payload["image_ref"] == "redeploy-app:001122334455"
+    assert payload["creation_action"] == "redeploy"
+    assert payload["configuration_source"] == "current_project"
     assert payload["preflight_status"] is None
     assert payload["preflight_summary"] is None
     assert payload["preflight_completed_at"] is None
 
     deployment_response = client.get(f"/api/projects/{project_id}/deployments/{payload['deployment_id']}")
     deployment = deployment_response.get_json()
-    assert deployment["build"]["test_command"] == "pytest -q"
-    assert deployment["events"][0]["message"] == "Project redeploy requested for branch 'release' at commit '001122334455'"
+    assert deployment["build"]["test_command"] == "python -m compileall -q backend"
+    created_event = event_by_type(deployment["events"], "deployment.created")
+    assert created_event["message"] == "Project redeploy requested for branch 'release' at commit '001122334455'"
+    assert created_event["metadata_json"]["source_deployment_id"] == latest_deployment_id
+    assert created_event["metadata_json"]["configuration_source"] == "current_project"
+
+    with app.app_context():
+        redeployment = db.session.get(PlatformDeployment, payload["deployment_id"])
+        assert redeployment.spec_snapshot_json["project"]["port"] == 8080
+        assert redeployment.spec_snapshot_json["project"]["env_vars"][0]["value"] == "current"
 
 
 def test_get_project_deployment_and_list_include_preflight_fields(client, app):
@@ -649,6 +820,41 @@ def test_get_project_deployment_and_list_include_preflight_fields(client, app):
     assert list_payload["items"][0]["preflight_status"] == "failed"
     assert list_payload["items"][0]["preflight_summary"] == "Missing Kubernetes referenced resources: ConfigMap/my-app-config"
     assert list_payload["items"][0]["preflight_completed_at"] is not None
+
+
+def test_all_preflight_field_serializers_redact_legacy_summary(client, app):
+    secret = "legacy-preflight-secret-value"
+    project_response = create_project(
+        client,
+        name="preflight-summary-redaction",
+        env_vars=[{"name": "PRIVATE_VALUE", "value": secret, "is_secret": True}],
+    )
+    project_id = project_response.get_json()["id"]
+    deployment_response = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "failed", "build_status": "failed"},
+    )
+    deployment_id = deployment_response.get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        # Simulate a legacy/direct write that bypassed worker-side sanitization.
+        deployment.preflight_status = "failed"
+        deployment.preflight_summary = f"Preflight output contained {secret}"
+        deployment.preflight_completed_at = deployment.created_at
+        db.session.commit()
+
+    responses = (
+        client.get(f"/api/projects/{project_id}/deployments/{deployment_id}"),
+        client.get(f"/api/projects/{project_id}/deployments"),
+        client.get(f"/api/projects/{project_id}/deployments/latest"),
+    )
+
+    for response in responses:
+        assert response.status_code == 200
+        serialized = str(response.get_json())
+        assert secret not in serialized
+        assert "[REDACTED]" in serialized
 
 
 def test_deployment_live_health_endpoint_returns_safe_probe_result(client, monkeypatch):
@@ -743,6 +949,8 @@ def test_redeploy_project_returns_conflict_when_commit_resolution_fails(client, 
 
     assert response.status_code == 409
     assert response.get_json() == {"error": "Unable to resolve deployment source"}
+    deployments = client.get(f"/api/projects/{project_id}/deployments").get_json()["items"]
+    assert len(deployments) == 1
 
 
 def test_redeploy_project_rejects_kubernetes_executor_without_required_settings(client, app, monkeypatch):

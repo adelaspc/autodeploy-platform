@@ -1,5 +1,7 @@
 """Build and tag container images from a prepared project workspace."""
 
+from uuid import uuid4
+
 from control_plane.command_validation import CommandValidationError, parse_optional_command
 from control_plane.deployment_spec import project_for_deployment
 from worker.execution.contracts import WorkerExecutionError
@@ -80,7 +82,5 @@ class ImageBuildServiceMixin:
         return self._sanitize_image_component(deployment.build.image_name or project_for_deployment(deployment).name)
 
     def _tag_suffix(self, deployment):
-        raw = deployment.build.image_tag or deployment.build.commit_sha[:12] or str(deployment.id)
-        if ":" in raw:
-            raw = raw.rsplit(":", 1)[-1]
-        return self._sanitize_image_component(raw)
+        # A fresh tag isolates concurrent builds and retries of the same commit.
+        return f"{self._sanitize_image_component(deployment.build.commit_sha[:12])}-{uuid4().hex}"

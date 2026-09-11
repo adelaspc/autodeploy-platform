@@ -10,4 +10,4 @@ These records capture decisions that materially shape AutoDeploy. They document 
 | [0004](0004-stable-helm-release-identity.md) | Use one stable Helm release per project and environment |
 | [0005](0005-kubernetes-port-forward-healthcheck.md) | Verify Kubernetes rollout health through a temporary Service port-forward |
 
-Each decision is currently **Accepted**. A future change should add a new ADR and mark the replaced record **Superseded** rather than rewriting the original rationale.
+Each decision is currently **Accepted**, as shown in the individual ADR. A future change should add a new ADR and mark the replaced record **Superseded** rather than rewriting the original rationale.

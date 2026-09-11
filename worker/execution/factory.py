@@ -2,6 +2,8 @@
 
 from flask import current_app
 
+from control_plane.deployment_runtime_metadata import kubernetes_deployment_mode, kubernetes_namespace
+
 
 def _executor_types():
     from worker.executors.fake import FakeDeploymentExecutor
@@ -46,15 +48,15 @@ def _build_local_docker_executor():
     return LocalDockerExecutor(**_common_settings())
 
 
-def _build_kubernetes_executor():
+def _build_kubernetes_executor(*, deployment_mode=None, namespace=None):
     from worker.executors.kubernetes.executor import KubernetesExecutor
 
     return KubernetesExecutor(
         **_common_settings(),
         kubeconfig=current_app.config.get("CONTROL_PLANE_KUBECONFIG"),
-        namespace=current_app.config.get("CONTROL_PLANE_K8S_NAMESPACE", "default"),
+        namespace=namespace or current_app.config.get("CONTROL_PLANE_K8S_NAMESPACE", "default"),
         image_pull_secret=current_app.config.get("CONTROL_PLANE_K8S_IMAGE_PULL_SECRET"),
-        deployment_mode=current_app.config.get("CONTROL_PLANE_K8S_DEPLOYMENT_MODE", "manifest"),
+        deployment_mode=deployment_mode or current_app.config.get("CONTROL_PLANE_K8S_DEPLOYMENT_MODE", "manifest"),
         helm_chart_path=current_app.config.get("CONTROL_PLANE_K8S_HELM_CHART_PATH", "deploy/helm/generic-web-app"),
         helm_binary=current_app.config.get("CONTROL_PLANE_K8S_HELM_BINARY", "helm"),
         helm_timeout=current_app.config.get("CONTROL_PLANE_K8S_HELM_TIMEOUT", "180s"),
@@ -72,7 +74,13 @@ def create_executor():
 def create_executor_for_deployment(deployment):
     # Reconciliation and cleanup must return to the original runtime even if the
     # platform executor changed after this deployment was created.
-    return _create_executor_for_name(deployment.deploy_target or current_app.config.get("CONTROL_PLANE_EXECUTOR", "fake"))
+    executor_name = deployment.deploy_target or current_app.config.get("CONTROL_PLANE_EXECUTOR", "fake")
+    if executor_name.strip().lower() == "kubernetes":
+        return _build_kubernetes_executor(
+            deployment_mode=kubernetes_deployment_mode(deployment),
+            namespace=kubernetes_namespace(deployment),
+        )
+    return _create_executor_for_name(executor_name)
 
 
 def _create_executor_for_name(executor_name):

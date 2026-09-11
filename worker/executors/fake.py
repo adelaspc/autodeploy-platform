@@ -2,6 +2,7 @@
 
 from control_plane.deployment_spec import project_for_deployment
 from worker.execution.contracts import DeploymentExecutor, ExecutionResult, ExecutorContract, PreflightResult
+from worker.workload_environment import resolved_workload_environment
 
 
 class FakeDeploymentExecutor(DeploymentExecutor):
@@ -72,7 +73,10 @@ class FakeDeploymentExecutor(DeploymentExecutor):
         project = project_for_deployment(deployment)
         return ExecutionResult(
             "Deployment marked as running",
-            metadata={"executor": self.deploy_target},
+            metadata={
+                "executor": self.deploy_target,
+                "platform_environment_names": [item["name"] for item in resolved_workload_environment(deployment)],
+            },
             service_url=deployment.service_url or f"https://{project.name}.local",
             deploy_target=self.deploy_target,
         )

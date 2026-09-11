@@ -10,10 +10,11 @@ Start with the [simplified architecture overview](../diagrams/autodeploy-archite
 flowchart LR
     Operator[Operator browser] --> API[Control-plane API + UI]
     API <--> DB[(MySQL)]
+    API --> GitHub[GitHub repository\nresolve branch head]
     Worker[Deployment worker]
     Reconciler[Reconciler] <--> DB
     Worker <--> DB
-    Worker --> GitHub[GitHub repository]
+    Worker --> GitHub
     Worker --> Docker[Host Docker daemon]
     Docker --> Registry[Container registry]
     Worker --> K8s[MicroK8s API]
@@ -25,7 +26,7 @@ flowchart LR
     Service --> Pods
 ```
 
-The API persists desired work and presents status. The worker owns deployment execution. The reconciler repairs stale control-plane state and removes leftover runtime resources.
+The API resolves a deploy or redeploy branch to an exact Git commit, persists desired work, and presents status. The worker checks out that recorded commit and owns deployment execution. The reconciler repairs stale control-plane state and removes leftover runtime resources.
 
 The relational ownership graph is documented in the [Data model](data-model.md). The design rationale is captured in the [Architectural Decision Records](decisions/README.md), while concrete failure and recovery behavior is summarized in [Reliability and recovery](reliability.md).
 
@@ -43,10 +44,12 @@ sequenceDiagram
     participant K as MicroK8s
 
     O->>A: Trigger deployment
-    A->>D: Create Build + Deployment
+    A->>A: Validate request and resolve branch head via Git
+    A->>D: Create Build + Deployment with commit SHA
+    A-->>O: 201 Created
     W->>D: Claim pending deployment
     W->>W: Clone, build, optional test
-    W->>R: Push immutable image
+    W->>R: Push image; retain reported digest
     W->>R: Verify remote image with Buildx
     W->>K: Preflight referenced resources
     W->>K: Apply manifests or Helm release
@@ -61,7 +64,7 @@ Pending deployments are claimed atomically. Claims are renewed during long comma
 
 Stop requests are also cooperative cancellation signals. A deployment worker checks for an active stop command at step boundaries and through executor heartbeats, then releases its deployment claim without recording an execution failure. Command workers do not claim stop work while the deployment still has a live claim; after the deployment worker acknowledges cancellation, the command worker owns runtime cleanup and the final transition to `stopped`. This prevents deployment and stop workers from applying conflicting runtime side effects concurrently.
 
-Deployment execution reads a versioned project-spec snapshot stored with the deployment rather than the mutable Project row. Project edits therefore configure future deployments only. Retry preserves the original build's explicit test-command choice, including an explicit decision to disable tests.
+Deployment execution reads a versioned project-spec snapshot stored with the deployment rather than the mutable Project row. Project edits therefore configure future deployments only. Retry validates and copies the selected snapshot and reuses its exact commit, effective test-command choice (including explicit disablement), environment, and image name. Redeploy resolves the recorded branch again and creates a new snapshot from the current project.
 
 Deployment and build status changes go through their model transition methods in the API application layer, worker, command processor, and reconciler. Invalid internal transitions fail instead of silently creating an impossible lifecycle combination. Cleanup is the explicit exception that permits a failed deployment to become stopped after its runtime resources are removed.
 
@@ -86,7 +89,7 @@ Stop or cleanup removes Deployment, Service, and Ingress resources; Helm workloa
 
 Deployment events record step-level progress for clone, build, test, push, preflight, rollout, healthcheck, stop, and cleanup. Known secret values are redacted before metadata and logs are returned.
 
-After a successful Kubernetes healthcheck, the worker captures a best-effort, 200-line snapshot from all workload containers into `runtime.log`. The same runtime-log API and console panel used by the local Docker executor expose this snapshot. It is a point-in-time capture, not a continuous log stream; Kubernetes diagnostics separately collect current and previous Pod logs when rollout or healthcheck failures occur.
+After a successful Kubernetes healthcheck, the worker captures a best-effort, 200-line snapshot from all workload containers into `runtime.log`. The same runtime-log API and console panel used by the local Docker executor expose this snapshot. It is a point-in-time capture, not a continuous log stream; Kubernetes diagnostics separately collect current and previous Pod logs when rollout or healthcheck failures occur. A failed Helm upgrade/install also triggers a bounded, best-effort snapshot using the release-based Pod selector. The original Helm failure and available Kubernetes evidence are persisted together; missing evidence is reported explicitly. These failure log excerpts appear in Diagnostics and the exported bundle, not automatically in the Runtime log panel.
 
 While the selected deployment is active, the operator console polls its summary and persisted events every two seconds. The event stream therefore advances without a page refresh through `pending`, clone, build, optional test, push, and deploy stages. Polling stops when the deployment reaches `running`, `failed`, or `stopped`, and the console reloads final logs and diagnostics once at that boundary.
 
@@ -109,6 +112,8 @@ The operator can copy or download a JSON bundle containing the selected deployme
 
 The reconciler clears stale claims, detects missing Docker/Kubernetes/Helm resources, marks invalid running deployments failed, and performs best-effort cleanup of leftover resources.
 
+Runtime reconciliation does not own observability retention. For a failed deployment it may remove an orphan container or managed Kubernetes/Helm resources, while retaining the source workspace and raw logs. The explicit retention command later removes eligible terminal-deployment workspaces after an operator reviews its dry-run. The database keeps lifecycle events, diagnostic summaries, and an `observability.artifacts_removed` marker so clients can distinguish retained-file deletion from a log that was never produced.
+
 ## Security and Scope Boundaries
 
 - Bearer tokens provide a small `read_only`, `deployer`, and `admin` role model.
@@ -116,3 +121,10 @@ The reconciler clears stale claims, detects missing Docker/Kubernetes/Helm resou
 - Workload secret environment variables must use Kubernetes Secret references.
 - The Docker socket and kubeconfig are deliberate local-demo trust boundaries; the base Helm chart keeps Docker socket mounting disabled unless a local override enables it explicitly.
 - Namespace-per-tenant isolation, external identity, TLS automation, and hardened build isolation are outside the current scope.
+
+
+### Registry image identity
+
+Registry-backed deployments use the digest reported by the successful push, verified against the registry before rollout. Each build receives a fresh commit-prefixed tag to isolate retries and concurrent builds. The persisted `image_ref` becomes `repository@sha256:...`; Helm, Kubernetes manifests, and the registry-enabled Docker executor use that reference. A later tag change cannot redirect that deployment. The build tag remains available for traceability.
+
+This guarantee fixes artifact identity; it does not make repeated builds reproducible, enforce registry tag immutability, or prevent registry deletion. Fake execution and registry-disabled local execution do not provide registry digest verification. Existing historical deployments retain their original references. Architecture diagram labels referring to immutable images describe this scoped digest-pinning guarantee.

@@ -77,12 +77,12 @@ class KubernetesDiagnosticsMixin:
             "apply_services_output_tail": self._tail_lines(services_output),
         } | self._collect_pod_diagnostics(deployment_name=None, prefix="apply", logs_dir=logs_dir)
 
-    def _collect_healthcheck_diagnostics(self, deployment_name, *, service_name, logs_dir):
+    def _collect_healthcheck_diagnostics(self, deployment_name, *, service_name, logs_dir, pod_selector=None):
         pods_log_path = logs_dir / "kubernetes-healthcheck-pods.log"
         deployment_log_path = logs_dir / "kubernetes-healthcheck-describe-deployment.log"
         service_log_path = logs_dir / "kubernetes-healthcheck-describe-service.log"
         pods_output = self._run_diagnostic_command(
-            self._kubectl_args("get", "pods", "-o", "wide"),
+            self._kubectl_args("get", "pods", "-l", pod_selector or f"app.kubernetes.io/instance={deployment_name}", "-o", "wide"),
             log_path=pods_log_path,
         )
         deployment_output = self._run_diagnostic_command(
@@ -103,13 +103,13 @@ class KubernetesDiagnosticsMixin:
             "healthcheck_service_log_path": str(service_log_path),
             "healthcheck_service_summary": self._summarize_output(service_output),
             "healthcheck_service_output_tail": self._tail_lines(service_output),
-        } | self._collect_pod_diagnostics(deployment_name, prefix="healthcheck", logs_dir=logs_dir)
+        } | self._collect_pod_diagnostics(deployment_name, prefix="healthcheck", logs_dir=logs_dir, pod_selector=pod_selector)
 
-    def _collect_pod_diagnostics(self, deployment_name, *, prefix, logs_dir):
+    def _collect_pod_diagnostics(self, deployment_name, *, prefix, logs_dir, pod_selector=None):
         pod_names_log_path = logs_dir / f"kubernetes-{prefix}-pod-names.log"
         pod_name_args = ["get", "pods"]
-        if deployment_name:
-            pod_name_args.extend(["-l", f"app.kubernetes.io/instance={deployment_name}"])
+        if pod_selector or deployment_name:
+            pod_name_args.extend(["-l", pod_selector or f"app.kubernetes.io/instance={deployment_name}"])
         pod_name_args.extend(["-o", "name"])
         pod_names_output = self._run_diagnostic_command(
             self._kubectl_args(*pod_name_args),
@@ -167,9 +167,9 @@ class KubernetesDiagnosticsMixin:
             f"{prefix}_pod_previous_logs_summary": " | ".join(previous_logs_summaries)[:1000]
             if previous_logs_summaries
             else None,
-        } | self._collect_pod_runtime_metadata(deployment_name, prefix=prefix, logs_dir=logs_dir)
+        } | self._collect_pod_runtime_metadata(deployment_name, prefix=prefix, logs_dir=logs_dir, pod_selector=pod_selector)
 
-    def _collect_pod_runtime_metadata(self, deployment_name, *, prefix, logs_dir):
+    def _collect_pod_runtime_metadata(self, deployment_name, *, prefix, logs_dir, pod_selector=None):
         if not deployment_name:
             return {}
         pod_json_log_path = logs_dir / f"kubernetes-{prefix}-pods.json.log"
@@ -179,7 +179,7 @@ class KubernetesDiagnosticsMixin:
                     "get",
                     "pods",
                     "-l",
-                    f"app.kubernetes.io/instance={deployment_name}",
+                    pod_selector or f"app.kubernetes.io/instance={deployment_name}",
                     "-o",
                     "json",
                 ),
@@ -194,6 +194,10 @@ class KubernetesDiagnosticsMixin:
         if not items:
             return {}
 
+        return self._pod_runtime_metadata(items, prefix=prefix, pod_json_log_path=pod_json_log_path)
+
+    @staticmethod
+    def _pod_runtime_metadata(items, *, prefix, pod_json_log_path):
         pods = []
         for item in items[:3]:
             spec = item.get("spec") or {}

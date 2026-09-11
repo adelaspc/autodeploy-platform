@@ -331,5 +331,15 @@ jobs:
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
 
-      - name: Render Helm chart
-        run: helm template ci ./deploy/helm/autodeploy-control-plane -f ./deploy/helm/autodeploy-control-plane/values.ci.yaml > /dev/null
+      - name: Lint Helm charts
+        run: |
+          helm lint ./deploy/helm/autodeploy-control-plane
+          helm lint ./deploy/helm/generic-web-app
+
+      - name: Render Helm charts
+        run: |
+          helm template ci ./deploy/helm/autodeploy-control-plane -f ./deploy/helm/autodeploy-control-plane/values.ci.yaml > /dev/null
+          helm template generic ./deploy/helm/generic-web-app > /dev/null
+          helm template generic-minimal ./deploy/helm/generic-web-app -f ./deploy/helm/generic-web-app/examples/minimal.yaml > /dev/null
+          helm template generic-node ./deploy/helm/generic-web-app -f ./deploy/helm/generic-web-app/examples/node-express.yaml > /dev/null
+          helm template generic-python ./deploy/helm/generic-web-app -f ./deploy/helm/generic-web-app/examples/python-fastapi.yaml > /dev/null

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from flask import current_app
 
+from control_plane.deployment_runtime_metadata import kubernetes_deployment_mode, kubernetes_namespace
 from control_plane.deployment_spec import project_for_deployment
 from control_plane.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
 
@@ -55,6 +56,19 @@ def latest_meaningful_event(deployment):
     return None
 
 
+def deployment_creation_context(deployment):
+    for event in sorted(deployment.events, key=lambda item: (item.created_at, item.id or 0)):
+        if event.event_type != "deployment.created":
+            continue
+        metadata = event.metadata_json or {}
+        return {
+            "creation_action": metadata.get("creation_action"),
+            "source_deployment_id": metadata.get("source_deployment_id"),
+            "configuration_source": metadata.get("configuration_source"),
+        }
+    return {"creation_action": None, "source_deployment_id": None, "configuration_source": None}
+
+
 def is_safe_log_path(path):
     allowed_roots = [
         Path(current).resolve()
@@ -77,6 +91,18 @@ def build_log_available(deployment):
 def runtime_log_available(deployment):
     log_path = get_runtime_log_path(deployment)
     return bool(log_path and is_safe_log_path(log_path) and log_path.is_file())
+
+
+def artifact_state(deployment, artifact):
+    available = build_log_available(deployment) if artifact == "build_log" else runtime_log_available(deployment)
+    if available:
+        return "available"
+    for event in sorted(deployment.events, key=lambda item: (item.created_at, item.id or 0), reverse=True):
+        if event.event_type != "observability.artifacts_removed":
+            continue
+        if artifact in ((event.metadata_json or {}).get("removed_artifacts") or []):
+            return "retention_removed"
+    return "not_produced"
 
 
 def latest_push_event(deployment):
@@ -110,6 +136,7 @@ def kubernetes_summary_fields(deployment):
     secret_values = deployment_secret_values(deployment)
     if deployment.deploy_target != "kubernetes":
         return {
+            "kubernetes_deployment_mode": None,
             "kubernetes_namespace": None,
             "kubernetes_deployment_name": None,
             "kubernetes_service_name": None,
@@ -200,10 +227,11 @@ def kubernetes_summary_fields(deployment):
             )
 
     return {
-        "kubernetes_namespace": deployment.helm_namespace or metadata.get("namespace"),
-        "kubernetes_deployment_name": metadata.get("deployment_name"),
-        "kubernetes_service_name": metadata.get("service_name"),
-        "kubernetes_ingress_name": metadata.get("ingress_name"),
+        "kubernetes_deployment_mode": kubernetes_deployment_mode(deployment),
+        "kubernetes_namespace": kubernetes_namespace(deployment) or metadata.get("namespace"),
+        "kubernetes_deployment_name": deployment.kubernetes_deployment_name or metadata.get("deployment_name"),
+        "kubernetes_service_name": deployment.kubernetes_service_name or metadata.get("service_name"),
+        "kubernetes_ingress_name": deployment.kubernetes_ingress_name or metadata.get("ingress_name"),
         "kubernetes_ingress_host": metadata.get("ingress_host"),
         "kubernetes_ingress_class": metadata.get("ingress_class"),
         "internal_service_url": metadata.get("internal_service_url"),
@@ -347,6 +375,7 @@ def serialize_kubernetes_diagnostics(deployment):
             "failure_summary": failure_summary,
             "failure_event_type": "deployment.preflight_failed",
             "failure_event_at": preflight_record["completed_at"],
+            "diagnostics_snapshot_at": preflight_record["completed_at"],
             "missing_resources": missing_resources,
             "checked_resources": metadata.get("checked_resources"),
             "configmap_refs_used": metadata.get("configmap_refs_used"),
@@ -373,6 +402,7 @@ def serialize_kubernetes_diagnostics(deployment):
         )
     ):
         failure_event = helm_event
+        source_event = helm_event
         metadata = redact_sensitive_data(helm_event.metadata_json or {}, secret_values=secret_values)
         failure_stage = "helm"
         failure_summary = helm_failure_summary(helm_event, metadata)
@@ -385,7 +415,10 @@ def serialize_kubernetes_diagnostics(deployment):
             secret_values=secret_values,
         )
 
-    pod_stage = failure_stage if failure_stage in {"manifest_apply", "rollout", "healthcheck"} else "healthcheck"
+    pod_stage = failure_stage if failure_stage in {"manifest_apply", "rollout", "healthcheck", "helm"} else "healthcheck"
+    snapshot_at = metadata.get("diagnostics_collected_at") or (
+        source_event.created_at.isoformat() if source_event and source_event.created_at else None
+    )
 
     return {
         "deployment_id": deployment.id,
@@ -401,11 +434,17 @@ def serialize_kubernetes_diagnostics(deployment):
         "failure_summary": failure_summary,
         "failure_event_type": failure_event.event_type if failure_event else None,
         "failure_event_at": failure_event.created_at.isoformat() if failure_event and failure_event.created_at else None,
+        "diagnostics_snapshot_at": snapshot_at,
         "missing_resources": metadata.get("missing_resources"),
         "checked_resources": metadata.get("checked_resources"),
         "configmap_refs_used": metadata.get("configmap_refs_used"),
         "secret_refs_used": metadata.get("secret_refs_used"),
         "image_pull_secret": metadata.get("image_pull_secret"),
+        "diagnostics_collected_at": metadata.get("diagnostics_collected_at"),
+        "diagnostics_collection_status": metadata.get("diagnostics_collection_status"),
+        "diagnostics_collection_errors": metadata.get("diagnostics_collection_errors", []),
+        "deployment_describe_summary": metadata.get(f"{pod_stage}_deployment_summary"),
+        "service_describe_summary": metadata.get(f"{pod_stage}_service_summary"),
         "pod_names": metadata.get(f"{pod_stage}_pod_names"),
         "pod_phase": metadata.get(f"{pod_stage}_pod_phase"),
         "container_reason": metadata.get(f"{pod_stage}_container_reason"),
@@ -415,17 +454,17 @@ def serialize_kubernetes_diagnostics(deployment):
         "pod_runtime": metadata.get(f"{pod_stage}_pod_runtime"),
         "pod_describe_summary": (
             metadata.get(f"{failure_stage}_pod_describe_summary")
-            if failure_stage in {"manifest_apply", "rollout", "healthcheck"}
+            if failure_stage in {"manifest_apply", "rollout", "healthcheck", "helm"}
             else None
         ),
         "pod_logs_summary": (
             metadata.get(f"{failure_stage}_pod_logs_summary")
-            if failure_stage in {"manifest_apply", "rollout", "healthcheck"}
+            if failure_stage in {"manifest_apply", "rollout", "healthcheck", "helm"}
             else None
         ),
         "pod_previous_logs_summary": (
             metadata.get(f"{failure_stage}_pod_previous_logs_summary")
-            if failure_stage in {"manifest_apply", "rollout", "healthcheck"}
+            if failure_stage in {"manifest_apply", "rollout", "healthcheck", "helm"}
             else None
         ),
         "diagnostics": metadata,
@@ -471,12 +510,14 @@ def serialize_deployment_summary(deployment, *, branch):
         "deploy_target": deployment.deploy_target,
         "build_log_available": build_log_available(deployment),
         "runtime_log_available": runtime_log_available(deployment),
+        "build_log_state": artifact_state(deployment, "build_log"),
+        "runtime_log_state": artifact_state(deployment, "runtime_log"),
         "started_at": deployment.started_at.isoformat() if deployment.started_at else None,
         "finished_at": deployment.finished_at.isoformat() if deployment.finished_at else None,
         "created_at": deployment.created_at.isoformat() if deployment.created_at else None,
         "updated_at": deployment.updated_at.isoformat() if deployment.updated_at else None,
         "events": [event.to_dict() for event in reversed(recent_deployment_events(deployment))],
-    } | kubernetes_summary_fields(deployment) | helm_summary_fields(deployment)
+    } | deployment_creation_context(deployment) | kubernetes_summary_fields(deployment) | helm_summary_fields(deployment)
 
 
 def read_log_tail(path, *, tail_lines, secret_values=()):

@@ -1,9 +1,11 @@
+import subprocess
+
 from control_plane.extensions import db
 from control_plane.models import DeploymentEvent, PlatformDeployment
 from tests.api.project_test_helpers import create_project
 
 
-def test_get_kubernetes_diagnostics_returns_structured_failure_view(client, app):
+def test_get_kubernetes_diagnostics_returns_structured_failure_view(client, app, monkeypatch):
     project_response = create_project(client, name="k8s-diagnostics-app")
     project_id = project_response.get_json()["id"]
     deployment_response = client.post(
@@ -45,6 +47,10 @@ def test_get_kubernetes_diagnostics_returns_structured_failure_view(client, app)
         )
         db.session.commit()
 
+    def unexpected_cluster_command(*_args, **_kwargs):
+        raise AssertionError("Diagnostics reads must not invoke a cluster command")
+
+    monkeypatch.setattr(subprocess, "run", unexpected_cluster_command)
     response = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics")
 
     assert response.status_code == 200
@@ -65,7 +71,13 @@ def test_get_kubernetes_diagnostics_returns_structured_failure_view(client, app)
     assert payload["restart_count"] == 4
     assert payload["images"] == ["docker.io/example/app:v1"]
     assert payload["image_pull_secrets"] == ["dockerhub-pull"]
+    assert payload["diagnostics_snapshot_at"] == payload["failure_event_at"]
     assert payload["diagnostics"]["healthcheck_service_summary"] == "Endpoints: <none> | Session Affinity: None"
+
+    repeated_payload = client.get(
+        f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics"
+    ).get_json()
+    assert repeated_payload == payload
 
 
 def test_get_kubernetes_diagnostics_includes_helm_deploy_failure_context(client, app):
@@ -119,6 +131,9 @@ def test_get_kubernetes_diagnostics_includes_helm_deploy_failure_context(client,
     assert payload["helm_stderr_summary"] == "Error: rendered manifests contain a resource that already exists"
     assert payload["helm_log_path"] == "/tmp/helm-upgrade-install.log"
     assert payload["diagnostics"]["deployment_mode"] == "helm"
+    assert payload["diagnostics_collection_status"] is None
+    assert payload["diagnostics_collected_at"] is None
+    assert payload["pod_previous_logs_summary"] is None
 
 
 def test_get_kubernetes_diagnostics_includes_helm_reconcile_context(client, app):
@@ -351,6 +366,25 @@ def test_get_kubernetes_diagnostics_prefers_persisted_preflight_failure_context(
     assert payload["configmap_refs_used"] == ["my-app-config"]
 
 
+def test_get_kubernetes_diagnostics_marks_legacy_records_without_a_capture_time(client, app):
+    project_response = create_project(client, name="legacy-k8s-diagnostics-app")
+    project_id = project_response.get_json()["id"]
+    deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc123def456", "status": "running", "build_status": "succeeded"},
+    ).get_json()["id"]
+
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        db.session.commit()
+
+    payload = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics").get_json()
+
+    assert payload["diagnostics_snapshot_at"] is None
+    assert payload["failure_event_at"] is None
+
+
 def test_get_kubernetes_diagnostics_returns_404_for_non_kubernetes_deployment(client):
     project_response = create_project(client, name="non-k8s-diagnostics-app")
     project_id = project_response.get_json()["id"]
@@ -364,3 +398,51 @@ def test_get_kubernetes_diagnostics_returns_404_for_non_kubernetes_deployment(cl
 
     assert response.status_code == 404
     assert response.get_json() == {"error": "Deployment does not use the Kubernetes target"}
+
+
+def test_helm_snapshot_survives_workspace_removal_and_preserves_partial_evidence(client, app, tmp_path):
+    from worker.processing.events import record_auxiliary_events
+
+    project_id = create_project(client, name="helm-snapshot").get_json()["id"]
+    deployment_id = client.post(
+        f"/api/projects/{project_id}/deployments",
+        json={"commit_sha": "abc1234", "status": "failed", "build_status": "failed"},
+    ).get_json()["id"]
+    log_path = tmp_path / "previous.log"
+    log_path.write_text("Application boot failed")
+    with app.app_context():
+        deployment = db.session.get(PlatformDeployment, deployment_id)
+        deployment.deploy_target = "kubernetes"
+        record_auxiliary_events(deployment, [{
+            "event_type": "kubernetes.helm_deploy_failed", "status": "failed",
+            "step": "deploy.kubernetes.helm", "level": "error", "message": "Helm release failed to deploy",
+            "metadata_json": {
+                "namespace": "apps", "deployment_name": "demo-generic-web-app", "service_name": "demo-generic-web-app",
+                "helm_release_name": "demo", "helm_returncode": 1, "helm_stderr_summary": "context deadline exceeded",
+                "diagnostics_collected_at": "2026-09-06T10:00:00+00:00",
+                "diagnostics_collection_status": "partial",
+                "diagnostics_collection_errors": [{"operation": "helm-service", "reason": "access_denied"}],
+                "helm_pod_names": ["demo-pod"], "helm_container_reason": "CrashLoopBackOff",
+                "helm_restart_count": 3, "helm_pod_logs_summary": "Current boot attempt",
+                "helm_pod_previous_logs_summary": log_path.read_text(),
+                "helm_pod_describe_summary": "Back-off restarting failed container",
+                "helm_deployment_summary": "Available: 0/1",
+                "helm_pod_runtime": [{"name": "demo-pod", "containers": [{"reason": "CrashLoopBackOff"}]}],
+            },
+        }])
+        db.session.commit()
+    log_path.unlink()
+    payload = client.get(f"/api/projects/{project_id}/deployments/{deployment_id}/kubernetes-diagnostics").get_json()
+    assert payload["failure_stage"] == "helm"
+    assert payload["failure_summary"] == "context deadline exceeded"
+    assert payload["container_reason"] == "CrashLoopBackOff"
+    assert payload["pod_names"] == ["demo-pod"]
+    assert payload["restart_count"] == 3
+    assert payload["pod_logs_summary"] == "Current boot attempt"
+    assert payload["pod_previous_logs_summary"] == "Application boot failed"
+    assert payload["pod_describe_summary"] == "Back-off restarting failed container"
+    assert payload["deployment_describe_summary"] == "Available: 0/1"
+    assert payload["diagnostics_collection_status"] == "partial"
+    assert payload["diagnostics_collected_at"] == "2026-09-06T10:00:00+00:00"
+    assert payload["diagnostics_snapshot_at"] == "2026-09-06T10:00:00+00:00"
+    assert payload["diagnostics_collection_errors"][0]["reason"] == "access_denied"

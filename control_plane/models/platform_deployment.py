@@ -45,6 +45,11 @@ class PlatformDeployment(db.Model):
     host_port = db.Column(db.Integer, nullable=True)
     healthcheck_url = db.Column(db.String(1024), nullable=True)
     service_url = db.Column(db.String(255), nullable=True)
+    kubernetes_deployment_mode = db.Column(db.String(32), nullable=True)
+    kubernetes_namespace = db.Column(db.String(255), nullable=True)
+    kubernetes_deployment_name = db.Column(db.String(255), nullable=True)
+    kubernetes_service_name = db.Column(db.String(255), nullable=True)
+    kubernetes_ingress_name = db.Column(db.String(255), nullable=True)
     helm_release_name = db.Column(db.String(255), nullable=True)
     helm_namespace = db.Column(db.String(255), nullable=True)
     helm_chart_path = db.Column(db.String(1024), nullable=True)
@@ -103,11 +108,18 @@ class PlatformDeployment(db.Model):
             "host_port": self.host_port,
             "healthcheck_url": self.healthcheck_url,
             "service_url": self.service_url,
+            "kubernetes_deployment_mode": self.kubernetes_deployment_mode,
+            "kubernetes_namespace": self.kubernetes_namespace,
+            "kubernetes_deployment_name": self.kubernetes_deployment_name,
+            "kubernetes_service_name": self.kubernetes_service_name,
+            "kubernetes_ingress_name": self.kubernetes_ingress_name,
             "helm_release_name": self.helm_release_name,
             "helm_namespace": self.helm_namespace,
             "helm_chart_path": self.helm_chart_path,
             "preflight_status": self.preflight_status,
-            "preflight_summary": self.preflight_summary,
+            "preflight_summary": (
+                redact_text(self.preflight_summary, secret_values=secret_values) if self.preflight_summary else None
+            ),
             "preflight_metadata_json": redact_sensitive_data(
                 self.preflight_metadata_json,
                 secret_values=secret_values,

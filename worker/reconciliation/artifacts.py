@@ -1,4 +1,4 @@
-"""Remove runtime artifacts left behind by failed deployments."""
+"""Remove runtime resources left behind by failed deployments."""
 
 from control_plane.extensions import db
 from worker.execution.contracts import WorkerExecutionError
@@ -10,9 +10,8 @@ def reconcile_failed_artifacts(deployment, *, executor_factory):
         return False
 
     changed = False
-    executor = executor_factory(deployment)
-
     if deployment.deploy_target == "local-docker":
+        executor = executor_factory(deployment)
         try:
             if executor.container_exists(deployment):
                 stop_result = executor.stop(deployment)
@@ -39,25 +38,6 @@ def reconcile_failed_artifacts(deployment, *, executor_factory):
                 level="error",
                 metadata={"action": "container_cleanup"},
             )
-
-    try:
-        cleanup_metadata = executor.cleanup_workspace(deployment)
-        if cleanup_metadata.get("workspace_removed") or cleanup_metadata.get("log_removed"):
-            record_reconcile_event(
-                deployment,
-                "reconcile.workspace_removed",
-                "Removed stale workspace artifacts from failed deployment",
-                metadata=cleanup_metadata,
-            )
-            changed = True
-    except Exception as exc:
-        record_reconcile_event(
-            deployment,
-            "reconcile.cleanup_failed",
-            f"Failed to remove workspace artifacts: {exc}",
-            level="error",
-            metadata={"action": "workspace_cleanup"},
-        )
 
     db.session.commit()
     return changed

@@ -3,8 +3,10 @@
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
+from control_plane.deployment_spec import project_for_deployment
 from control_plane.extensions import db
 from control_plane.models import PlatformDeployment, Project
+from control_plane.security import redact_text, secret_values_from_env_vars
 
 
 class ProjectConflictError(Exception):
@@ -13,9 +15,14 @@ class ProjectConflictError(Exception):
 
 def serialize_preflight_fields(deployment):
     # Keep the preflight fields consistent across deployment responses.
+    secret_values = secret_values_from_env_vars(project_for_deployment(deployment).env_vars)
     return {
         "preflight_status": deployment.preflight_status,
-        "preflight_summary": deployment.preflight_summary,
+        "preflight_summary": (
+            redact_text(deployment.preflight_summary, secret_values=secret_values)
+            if deployment.preflight_summary
+            else None
+        ),
         "preflight_completed_at": (
             deployment.preflight_completed_at.isoformat() if deployment.preflight_completed_at else None
         ),
@@ -105,6 +112,8 @@ def serialize_triggered_deployment(
     branch,
     source_deployment_field=None,
     source_deployment_id=None,
+    creation_action=None,
+    configuration_source=None,
 ):
     # Return the fields needed immediately after a deployment is queued.
     payload = {
@@ -119,6 +128,10 @@ def serialize_triggered_deployment(
     # Retry and redeploy responses also point to their source deployment.
     if source_deployment_field and source_deployment_id is not None:
         payload[source_deployment_field] = source_deployment_id
+    if creation_action:
+        payload["creation_action"] = creation_action
+    if configuration_source:
+        payload["configuration_source"] = configuration_source
     return payload
 
 

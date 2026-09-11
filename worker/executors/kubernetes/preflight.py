@@ -204,17 +204,18 @@ class KubernetesPreflightMixin:
         )
 
 
-    def _kubectl_resource_exists(self, kind, name):
+    def _kubectl_resource_exists(self, kind, name, *, namespace=None):
+        resolved_namespace = namespace or self.namespace
         try:
             result = self._execute_command(
-                self._kubectl_args("get", f"{kind}/{name}"),
+                self._kubectl_args("get", f"{kind}/{name}", namespace=resolved_namespace),
                 allow_heartbeat=False,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
             raise WorkerExecutionError(
                 "reconcile.kubernetes_resource_exists",
                 f"Failed to inspect Kubernetes resource '{kind}/{name}': {exc}",
-                metadata={"kind": kind, "name": name, "namespace": self.namespace},
+                metadata={"kind": kind, "name": name, "namespace": resolved_namespace},
             ) from exc
         return result.returncode == 0
 

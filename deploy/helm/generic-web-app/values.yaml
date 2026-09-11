@@ -3,6 +3,7 @@ replicaCount: 1
 image:
   repository: nginx
   tag: stable-alpine
+  digest: ""
   pullPolicy: IfNotPresent
   pullSecrets: []
 

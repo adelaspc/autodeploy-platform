@@ -32,6 +32,42 @@
 {{- end -}}
 {{- end -}}
 
+{{- define "autodeploy-control-plane.secretEnv" -}}
+{{- $root := .root -}}
+{{- $component := .component -}}
+{{- $secretName := include "autodeploy-control-plane.runtimeSecretName" $root -}}
+{{- $keys := list "CONTROL_PLANE_DATABASE_URL" -}}
+{{- if eq $component "api" -}}
+{{- $keys = concat $keys (list "CONTROL_PLANE_GITHUB_WEBHOOK_SECRET" "CONTROL_PLANE_API_TOKEN_READ_ONLY" "CONTROL_PLANE_API_TOKEN_DEPLOYER" "CONTROL_PLANE_API_TOKEN_ADMIN" "CONTROL_PLANE_API_TOKENS_JSON" "CONTROL_PLANE_METRICS_TOKEN") -}}
+{{- end -}}
+{{- if eq $component "worker" -}}
+{{- $keys = concat $keys (list "CONTROL_PLANE_REGISTRY_USERNAME" "CONTROL_PLANE_REGISTRY_PASSWORD") -}}
+{{- end -}}
+{{- if or (eq $component "api") (eq $component "worker") -}}
+{{- range $key := $root.Values.secrets.gitTokenKeys -}}
+{{- if not (regexMatch "^CONTROL_PLANE_GIT_TOKEN_[A-Za-z_][A-Za-z0-9_]*$" ($key | toString)) -}}
+{{- fail (printf "invalid secrets.gitTokenKeys entry %q" $key) -}}
+{{- end -}}
+{{- $keys = append $keys ($key | toString) -}}
+{{- end -}}
+{{- if $root.Values.secrets.create -}}
+{{- range $key, $value := $root.Values.secrets.values -}}
+{{- if and (hasPrefix "CONTROL_PLANE_GIT_TOKEN_" $key) (ne ($value | toString) "") -}}
+{{- $keys = append $keys $key -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range $key := uniq $keys }}
+- name: {{ $key }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $secretName }}
+      key: {{ $key }}
+      optional: true
+{{- end -}}
+{{- end -}}
+
 {{- define "autodeploy-control-plane.validateRuntime" -}}
 {{- $executor := index .Values.config "CONTROL_PLANE_EXECUTOR" | default "fake" | toString | trim -}}
 {{- $workloadNamespace := index .Values.config "CONTROL_PLANE_K8S_NAMESPACE" | default "default" | toString | trim -}}

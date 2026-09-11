@@ -6,13 +6,27 @@ x-control-plane-env: &control-plane-env
   CONTROL_PLANE_DEPLOY_HOST: ${CONTROL_PLANE_DEPLOY_HOST:-host.docker.internal}
   DOCKER_BUILDKIT: ${DOCKER_BUILDKIT:-1}
 
+# Compose uses .env.secrets only as an interpolation source. Explicit mappings
+# below keep unrelated credentials out of each service environment.
+x-api-secrets: &api-secrets
+  CONTROL_PLANE_GITHUB_WEBHOOK_SECRET: ${CONTROL_PLANE_GITHUB_WEBHOOK_SECRET:-}
+  CONTROL_PLANE_API_TOKEN_READ_ONLY: ${CONTROL_PLANE_API_TOKEN_READ_ONLY:-}
+  CONTROL_PLANE_API_TOKEN_DEPLOYER: ${CONTROL_PLANE_API_TOKEN_DEPLOYER:-}
+  CONTROL_PLANE_API_TOKEN_ADMIN: ${CONTROL_PLANE_API_TOKEN_ADMIN:-}
+  CONTROL_PLANE_API_TOKENS_JSON: ${CONTROL_PLANE_API_TOKENS_JSON:-}
+  CONTROL_PLANE_METRICS_TOKEN: ${CONTROL_PLANE_METRICS_TOKEN:-}
+  CONTROL_PLANE_GIT_TOKEN_GITHUB: ${CONTROL_PLANE_GIT_TOKEN_GITHUB:-}
+
+x-worker-secrets: &worker-secrets
+  CONTROL_PLANE_REGISTRY_USERNAME: ${CONTROL_PLANE_REGISTRY_USERNAME:-}
+  CONTROL_PLANE_REGISTRY_PASSWORD: ${CONTROL_PLANE_REGISTRY_PASSWORD:-}
+  CONTROL_PLANE_GIT_TOKEN_GITHUB: ${CONTROL_PLANE_GIT_TOKEN_GITHUB:-}
+
 x-control-plane-base: &control-plane-base
   build:
     context: .
   env_file:
     - path: ${CONTROL_PLANE_ENV_FILE:-.env.demo}
-      required: false
-    - path: .env.secrets
       required: false
   environment:
     <<: *control-plane-env
@@ -28,6 +42,9 @@ services:
       db:
         condition: service_healthy
     command: ["python", "-m", "flask", "--app", "wsgi:app", "db", "upgrade"]
+    environment:
+      <<: *control-plane-env
+      CONTROL_PLANE_COMPONENT: migrate
     restart: "no"
 
   control-plane-api:
@@ -40,7 +57,7 @@ services:
     ports:
       - "127.0.0.1:${CONTROL_PLANE_APP_PORT:-5000}:${PORT:-5000}"
     environment:
-      <<: *control-plane-env
+      <<: [*control-plane-env, *api-secrets]
       CONTROL_PLANE_COMPONENT: api
     healthcheck:
       test:
@@ -68,7 +85,7 @@ services:
         condition: service_completed_successfully
     command: ["python", "-m", "flask", "--app", "wsgi:app", "run-worker"]
     environment:
-      <<: *control-plane-env
+      <<: [*control-plane-env, *worker-secrets]
       CONTROL_PLANE_COMPONENT: worker
     restart: unless-stopped
 
@@ -94,8 +111,6 @@ services:
     image: mysql:26.7@sha256:66aec17cd21a956029b83f083b813073859e8355dc1a00e55df6ba02f0e32345
     env_file:
       - path: ${CONTROL_PLANE_ENV_FILE:-.env.demo}
-        required: false
-      - path: .env.secrets
         required: false
     environment:
       MYSQL_DATABASE: ${CONTROL_PLANE_MYSQL_DATABASE:-control_plane}

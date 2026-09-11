@@ -26,6 +26,19 @@ defineEmits(["copy", "download"]);
       <span>{{ view.stageLabel }}</span><strong>{{ view.summary }}</strong>
       <small>{{ view.eventType }}<template v-if="view.eventAt"> - {{ formatTime(view.eventAt) }}</template></small>
     </div>
+    <div class="diagnostics-summary">
+      <strong>Persisted diagnostic snapshot</strong>
+      <small v-if="view.snapshotAt">Captured {{ formatTime(view.snapshotAt) }}. Refresh reloads this evidence; it does not query the cluster.</small>
+      <small v-else>Capture time was not recorded. Refresh reloads persisted evidence; it does not query the cluster.</small>
+    </div>
+    <div v-if="view.collectionStatus" class="diagnostics-summary">
+      <strong>Collection status: {{ view.collectionStatus }}</strong>
+      <small v-if="view.collectedAt">Detailed collection started {{ formatTime(view.collectedAt) }}.</small>
+      <p v-if="view.collectionStatus !== 'complete'">Some evidence could not be collected. The original Helm error is preserved.</p>
+      <ul v-if="view.collectionErrors?.length">
+        <li v-for="(error, index) in view.collectionErrors" :key="index">{{ error.operation }}: {{ error.reason }}</li>
+      </ul>
+    </div>
     <div v-if="view.insights.length" class="diagnostics-insights">
       <article v-for="insight in view.insights" :key="insight.title" class="diagnostics-insight">
         <span>Likely cause</span><strong>{{ insight.title }}</strong><p>{{ insight.detail }}</p><small>{{ insight.action }}</small>
@@ -51,9 +64,11 @@ defineEmits(["copy", "download"]);
         <div v-if="view.missingResources.length" class="diagnostics-list"><span>Missing resources</span><strong>{{ view.missingResources.join(", ") }}</strong></div>
         <div v-if="view.checkedResources.length" class="diagnostics-list"><span>Checked resources</span><strong>{{ view.checkedResources.join(", ") }}</strong></div>
         <div v-if="view.podNames.length" class="diagnostics-list"><span>Pods</span><strong>{{ view.podNames.join(", ") }}</strong></div>
-        <pre v-if="view.podDescribeSummary" class="diagnostics-snippet">{{ view.podDescribeSummary }}</pre>
-        <pre v-if="view.podLogsSummary" class="diagnostics-snippet">{{ view.podLogsSummary }}</pre>
-        <pre v-if="view.podPreviousLogsSummary" class="diagnostics-snippet">{{ view.podPreviousLogsSummary }}</pre>
+        <template v-if="view.deploymentDescribeSummary"><h3>Deployment description</h3><pre class="diagnostics-snippet">{{ view.deploymentDescribeSummary }}</pre></template>
+        <template v-if="view.serviceDescribeSummary"><h3>Service description</h3><pre class="diagnostics-snippet">{{ view.serviceDescribeSummary }}</pre></template>
+        <template v-if="view.podDescribeSummary"><h3>Pod descriptions and events</h3><pre class="diagnostics-snippet">{{ view.podDescribeSummary }}</pre></template>
+        <template v-if="view.podLogsSummary"><h3>Current logs</h3><pre class="diagnostics-snippet">{{ view.podLogsSummary }}</pre></template>
+        <template v-if="view.podPreviousLogsSummary"><h3>Previous logs</h3><pre class="diagnostics-snippet">{{ view.podPreviousLogsSummary }}</pre></template>
       </article>
     </div>
     <details class="diagnostics-raw"><summary>Raw diagnostics</summary><pre>{{ view.rawJson }}</pre></details>

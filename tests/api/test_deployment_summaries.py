@@ -91,6 +91,8 @@ def test_get_deployment_summary_returns_successful_view(client, app, monkeypatch
     assert payload["deploy_target"] == "local-docker"
     assert payload["build_log_available"] is True
     assert payload["runtime_log_available"] is True
+    assert payload["build_log_state"] == "available"
+    assert payload["runtime_log_state"] == "available"
     assert payload["started_at"] is not None
     assert payload["created_at"] is not None
     assert payload["updated_at"] is not None

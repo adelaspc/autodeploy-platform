@@ -12,6 +12,7 @@ from control_plane.models import DeploymentCommand, DeploymentEvent, PlatformDep
 from control_plane.security import redact_sensitive_data, redact_text, secret_values_from_env_vars
 from worker.execution.contracts import WorkerExecutionError
 from worker.execution.factory import create_executor_for_deployment
+from worker.helm.ownership import deployment_has_helm_release_metadata, newer_helm_workload_owner_id
 
 
 INTERNAL_ERROR_MESSAGE = "Worker encountered an unexpected internal error"
@@ -136,11 +137,47 @@ def _record_event(deployment, event_type, status, message, *, step, level="info"
     )
 
 
+def skip_historical_helm_command(command, deployment, *, expected_worker_id):
+    """Skip a command that would uninstall a Helm release owned by newer work."""
+    if command.command_type not in {"stop", "cleanup"}:
+        return None
+    if deployment.deploy_target != "kubernetes" or not deployment_has_helm_release_metadata(deployment):
+        return None
+
+    owner_id = newer_helm_workload_owner_id(deployment)
+    if owner_id is None:
+        return None
+
+    command = db.session.get(DeploymentCommand, command.id)
+    deployment = command.deployment
+    refresh_command_claim(command, expected_worker_id=expected_worker_id)
+    command_type = command.command_type
+    _record_event(
+        deployment,
+        f"deployment.{command_type}_skipped",
+        deployment.status,
+        f"Skipped {command_type} because deployment #{owner_id} owns the shared Helm release",
+        step=f"deploy.{command_type}",
+        level="warning",
+        metadata={
+            "command_id": command.id,
+            "newer_deployment_id": owner_id,
+            "reason": "newer_deployment_owns_shared_helm_release",
+        },
+    )
+    command.status = "skipped"
+    command.active_key = None
+    command.claimed_by = None
+    command.claimed_at = None
+    command.completed_at = now_utc()
+    command.last_error = None
+    db.session.commit()
+    return deployment
+
+
 def process_deployment_command(command, executor=None):
     deployment = command.deployment
-    executor = executor or create_executor_for_deployment(deployment)
     expected_worker_id = command.claimed_by or command_worker_id()
-    attach_command_heartbeat(executor, command, expected_worker_id=expected_worker_id)
     command_type = command.command_type
     step = f"deploy.{command_type}"
     current_app.logger.info(
@@ -163,6 +200,15 @@ def process_deployment_command(command, executor=None):
             metadata={"command_id": command.id, "origin_request_id": command.origin_request_id},
         )
         db.session.commit()
+        skipped_deployment = skip_historical_helm_command(
+            command,
+            deployment,
+            expected_worker_id=expected_worker_id,
+        )
+        if skipped_deployment is not None:
+            return skipped_deployment
+        executor = executor or create_executor_for_deployment(deployment)
+        attach_command_heartbeat(executor, command, expected_worker_id=expected_worker_id)
         result = executor.stop(deployment)
         refresh_command_claim(command, expected_worker_id=expected_worker_id)
         deployment.transition_to("stopped")

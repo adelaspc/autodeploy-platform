@@ -3,19 +3,23 @@
 from control_plane.deployment_spec import project_for_deployment
 from control_plane.security import env_var_is_secret
 from worker.execution.contracts import WorkerExecutionError
+from worker.executors.kubernetes.names import workload_name
+from worker.kubernetes_workload import manifest_health_probes, resource_requests
+from worker.workload_environment import resolved_workload_environment
 
 
 class KubernetesManifestRendererMixin:
     def _manifest(self, deployment, *, deployment_name, service_name):
         project = project_for_deployment(deployment)
         labels = {
-            "app.kubernetes.io/name": self._sanitize_image_component(project.name),
+            "app.kubernetes.io/name": workload_name(project),
             "app.kubernetes.io/managed-by": "autodeploy-control-plane",
             "app.kubernetes.io/instance": deployment_name,
         }
+        environment = resolved_workload_environment(deployment)
         literal_secret_names = [
             item.get("name")
-            for item in project.env_vars or []
+            for item in environment
             if isinstance(item, dict) and env_var_is_secret(item) and item.get("value") is not None
         ]
         if literal_secret_names:
@@ -24,7 +28,7 @@ class KubernetesManifestRendererMixin:
                 "Kubernetes deployments require secret_key_ref for secret env vars",
                 metadata={"secret_env_var_names": sorted(str(name) for name in literal_secret_names if name)},
             )
-        env = self._kubernetes_env_vars(project.env_vars)
+        env = self._kubernetes_env_vars(environment)
 
         pod_spec = {
             "automountServiceAccountToken": False,
@@ -33,9 +37,11 @@ class KubernetesManifestRendererMixin:
                 {
                     "name": "app",
                     "image": deployment.build.image_ref,
-                    "ports": [{"containerPort": project.port}],
+                    "ports": [{"name": "http", "containerPort": project.port}],
                     "env": env,
+                    "resources": resource_requests(project),
                     "securityContext": {"allowPrivilegeEscalation": False},
+                    **manifest_health_probes(project),
                 }
             ]
         }

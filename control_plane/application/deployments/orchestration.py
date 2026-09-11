@@ -11,7 +11,11 @@ from flask import current_app
 from sqlalchemy.orm import selectinload
 
 from control_plane.extensions import db
-from control_plane.deployment_spec import create_deployment_spec_snapshot, project_for_deployment
+from control_plane.deployment_spec import (
+    copy_deployment_spec_snapshot,
+    create_deployment_spec_snapshot,
+    project_for_deployment,
+)
 from control_plane.models import Build, DeploymentEvent, PlatformDeployment
 from control_plane.api.request_context import current_request_id
 
@@ -159,6 +163,7 @@ def create_build_and_deployment_records(
     deployment_message="Deployment record created",
     deployment_metadata=None,
     deployment_branch=None,
+    spec_snapshot=None,
 ):
     """Persist a build and its deployment as one unit of work for the worker."""
     resolved_image_name = image_name or sanitize_image_component(project.name)
@@ -191,7 +196,11 @@ def create_build_and_deployment_records(
         environment=environment,
         status=deployment_status,
         service_url=service_url,
-        spec_snapshot_json=create_deployment_spec_snapshot(project, branch=deployment_branch),
+        spec_snapshot_json=(
+            spec_snapshot
+            if spec_snapshot is not None
+            else create_deployment_spec_snapshot(project, branch=deployment_branch)
+        ),
         origin_request_id=current_request_id(),
     )
     db.session.add(deployment)
@@ -232,15 +241,21 @@ def create_requested_deployment(
     message_prefix,
     deployment_metadata=None,
     extra_events=None,
+    environment="production",
+    image_name=None,
+    spec_snapshot=None,
     commit=True,
 ):
     build, deployment = create_build_and_deployment_records(
         project,
         commit_sha=commit_sha,
+        image_name=image_name,
         test_command=test_command,
+        environment=environment,
         deployment_message=f"{message_prefix} for branch '{branch}' at commit '{commit_sha[:12]}'",
         deployment_metadata={"branch": branch, "commit_sha": commit_sha} | (deployment_metadata or {}),
         deployment_branch=branch,
+        spec_snapshot=spec_snapshot,
     )
     for event in extra_events or ():
         create_deployment_event(
@@ -257,7 +272,7 @@ def create_requested_deployment(
     return build, deployment, commit_sha
 
 
-def create_user_facing_deployment(project, *, branch, test_command, message_prefix):
+def create_user_facing_deployment(project, *, branch, test_command, message_prefix, deployment_metadata=None):
     # Resolve the branch now and store the exact commit. This keeps queued work
     # stable even if the branch moves before a worker picks it up.
     commit_sha = resolve_project_commit_sha(project, branch)
@@ -267,6 +282,32 @@ def create_user_facing_deployment(project, *, branch, test_command, message_pref
         test_command=test_command,
         commit_sha=commit_sha,
         message_prefix=message_prefix,
+        deployment_metadata=deployment_metadata,
+    )
+
+
+def create_historical_retry(project, original):
+    """Create a new attempt from the original persisted execution inputs."""
+    snapshot = copy_deployment_spec_snapshot(original, project_id=project.id)
+    branch = snapshot["project"]["branch"]
+    commit_sha = (original.build.commit_sha or "").strip()
+    if not commit_sha:
+        raise ValueError("Historical deployment commit is unavailable")
+    return create_requested_deployment(
+        project,
+        branch=branch,
+        test_command=original.build.test_command,
+        commit_sha=commit_sha,
+        message_prefix="Deployment retry requested",
+        deployment_metadata={
+            "creation_action": "retry",
+            "source_deployment_id": original.id,
+            "configuration_source": "historical_snapshot",
+            "commit_source": "historical_build",
+        },
+        environment=original.environment,
+        image_name=original.build.image_name,
+        spec_snapshot=snapshot,
     )
 
 
