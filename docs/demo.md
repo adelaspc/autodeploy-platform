@@ -26,11 +26,23 @@ The recording uses the `local-kubernetes` profile with the control plane and MyS
 | Ingress | enabled with a local `nip.io` domain | Gives each deployment a browser-accessible service URL. |
 | Image pull Secret | `dockerhub-pull` | Keeps registry credentials outside project data. |
 
-Credentials remain in ignored local configuration or Kubernetes Secrets. No token, password, kubeconfig content, or Secret value should appear in a recording or in this document.
+Credentials remain in ignored local configuration or Kubernetes Secrets. The published walkthrough exposes symbolic references and resource names, never token, password, kubeconfig, or Secret values.
 
-The console presents the selected project's recent activity and deployment history. API filters, cursors, and cross-project search are not exposed in this UI; do not present the top bar as a working search control in a recording.
+The console presents the selected project's recent activity and deployment history. API filters, cursors, and cross-project search are not exposed in this UI, and the top bar is not a search control.
 
-## Project configuration
+## 00 — Project setup
+
+**[Watch the project configuration walkthrough (MP4, 1.4 MB)](assets/demo/00-project-setup.mp4)**
+
+**Goal:** Define the source, build, health, resource, and runtime configuration used by the deployment scenarios.
+
+**Action:** Create the reference project, configure its symbolic Git credential reference, and add literal, ConfigMap-backed, and Secret-backed environment variables.
+
+**What to watch:** Git credentials are referenced by name rather than displayed, Kubernetes configuration uses ConfigMap and Secret references, and no secret value is entered or exposed.
+
+**Result:** The validated project is saved and selected, but no deployment has started yet.
+
+### Project configuration
 
 | Project field | Value | Purpose |
 | --- | --- | --- |
@@ -43,7 +55,7 @@ The console presents the selected project's recent activity and deployment histo
 | Healthcheck | `/health` | Exposes healthy, starting, and controlled failure states. |
 | Test command | `python -m compileall -q backend` | Runs a deterministic validation inside the built runtime image. |
 | CPU / memory | `250m` / `512Mi` | Demonstrates Kubernetes resource configuration. |
-| Trigger | `manual` | Keeps timing under the operator's control during recording. |
+| Trigger | `manual` | Makes each deployment an explicit operator action. |
 
 The migration command is intentionally empty. It is reserved by the v1 application specification and is not executed for user workloads.
 
@@ -63,77 +75,57 @@ The migration command is intentionally empty. It is reserved by the v1 applicati
 
 ## 01 — Happy-path deployment
 
-[![AutoDeploy happy-path Kubernetes deployment](assets/demo/01-happy-path.gif)](assets/demo/01-happy-path.mp4)
+**[Watch with playback controls (MP4, 4.5 MB)](assets/demo/01-happy-path.mp4)**
 
-**[Watch with playback controls (MP4, 5.0 MB)](assets/demo/01-happy-path.mp4)**
+**Goal:** Show the complete asynchronous path from a saved project to a healthy workload.
 
-**Goal:** Show the complete asynchronous path from project configuration to a healthy workload.
+**Action:** Select the project configured in scenario 00 and choose **Run deploy / test**.
 
-**Action:** Create the project with the baseline configuration and select **Run deploy / test**.
+**What to watch:** The recording starts with the Kubernetes executor ready, then shows the request being persisted and queued before a background worker claims it. The deployment status and event stream expose source resolution, clone, image build, containerized test, registry push and digest verification, Kubernetes preflight, Helm rollout, and the transition to `running`. Build/runtime logs and Kubernetes diagnostics provide supporting evidence after the rollout.
 
-**What to watch:** Source resolution, clone, image build, containerized test, registry push and verification, Kubernetes preflight, Helm rollout, healthcheck, Pod diagnostics, and the final `running` state.
+**Result:** The final part opens the deployed service and compares its release identity, commit, environment, Pod hostname, secret-mounted state, and health posture with the persisted deployment summary. Secret presence is confirmed without displaying its value.
 
-**Result:** Open the service and compare its version, commit, environment, Pod hostname, secret-mounted state, and health posture with the persisted deployment summary.
+## 02 — CrashLoopBackOff diagnostics
 
-## 02 — Configuration update and redeploy
-
-**[Watch the configuration update and redeployment (MP4, 3.7 MB)](assets/demo/02-configuration-update.mp4)**
-
-**Goal:** Demonstrate declarative configuration changes and retained deployment history with immutable input snapshots.
-
-**Change:** Update `FEATURE_MESSAGE`, then save and redeploy. The platform gives the new workload its own `APP_VERSION` build tag and its resolved `APP_COMMIT_SHA`.
-
-**What to watch:** A new deployment and image are created; the workload reports the updated values while the previous deployment remains available in history.
-
-**Reset:** Keep the new healthy version or restore the baseline values before another scenario.
-
-## 03 — Readiness failure and recovery in Helm mode
-
-**[Watch the healthcheck failure and recovery (MP4, 10.2 MB)](assets/demo/03-healthcheck-failure.mp4)**
-
-**Goal:** Demonstrate persisted failure evidence and recovery through a new deployment.
-
-**Change:** Set `DEMO_HEALTH_STATUS=failed` and deploy. Helm waits for workload readiness and can time out before AutoDeploy reaches its separate HTTP probe through Service port-forward. Inspect events and diagnostics, then restore `healthy` and redeploy.
-
-**What to watch:** The failed deployment remains in history with its reason and diagnostics; recovery creates a separate healthy deployment instead of rewriting the failure.
-
-## 04 — CrashLoopBackOff diagnostics
-
-**[Watch the CrashLoopBackOff diagnostics (MP4, 4.8 MB)](assets/demo/04-crashloopbackoff.mp4)**
-
-**Recording status:** This clip predates the Helm failure snapshot remediation and primarily shows the generic Helm timeout. It does not demonstrate all diagnostic fields now supported. A replacement should show the persisted snapshot status/time, container state, restart count, current or previous logs, and recovery as a new deployment.
+**[Watch the CrashLoopBackOff diagnostics and recovery (MP4, 6.4 MB)](assets/demo/02-crash-loop-backoff.mp4)**
 
 **Goal:** Show actionable container failure diagnostics.
 
-**Change:** Set `DEMO_FAIL_STARTUP=true` and deploy.
+**Change:** Starting from the healthy deployment, set `DEMO_FAIL_STARTUP=true`, save the project, and deploy. The reference application then raises a controlled exception during startup, causing Kubernetes to restart its container while Helm waits for readiness.
 
-**What to record in the replacement clip:** The original Helm failure, snapshot capture status/time, container state and restart count, available current/previous Pod logs, and evidence-based likely-cause guidance. Explain any unavailable evidence rather than implying that every failure has previous logs.
+**What to watch:** The event timeline records successful image build, test, registry push, and digest verification before the Helm rollout fails. The persisted diagnostic snapshot is marked `partial`, preserves the original Helm error, identifies `CrashLoopBackOff`, reports the restart count, and includes previous container logs that identify the controlled startup failure. Supporting Kubernetes descriptions and events remain available in the same snapshot.
 
-**Reset:** Restore `DEMO_FAIL_STARTUP=false` and redeploy before continuing.
+**Build status semantics:** The Summary shows `Build: failed` because the current lifecycle model marks the associated Build record failed whenever the overall pipeline terminates unsuccessfully, including during Helm deployment. For this attempt, the persisted stage events establish that image build, test, push, and remote verification completed before the rollout failure. The aggregate Build status is therefore not stage-specific build evidence.
 
-## 05 — Kubernetes self-healing
+**Recovery:** Restore `DEMO_FAIL_STARTUP=false` and start a new deployment. The new attempt reaches `running`, while the failed deployment and its captured evidence remain in history.
 
-**[Watch Kubernetes replace a deleted Pod (MP4, 1.5 MB)](assets/demo/05-k8s-self-healing.mp4)**
+## 03 — Kubernetes self-healing
+
+**[Watch Kubernetes replace a deleted Pod (MP4, 1.8 MB)](assets/demo/03-k8s-self-healing.mp4)**
 
 **Goal:** Separate transient live health from persisted deployment lifecycle state.
 
-**Action:** Copy the exact Pod name from diagnostics and delete only that Pod.
+**Action:** Starting from the healthy recovery deployment in scenario 02, note the current Pod identity, delete only that exact Pod with `kubectl`, and observe the Deployment controller create its replacement.
 
-**What to watch:** Diagnostics remain the persisted snapshot of the selected deployment; refreshing them does not inspect the replacement Pod. The control-plane API's live health may briefly become unhealthy, the Deployment remains `running`, Kubernetes creates a replacement Pod, and API live health recovers with a new hostname. Use **Open service in browser** to verify browser access, and the workload hostname or scoped `kubectl get pods` to verify the replacement.
+**What to watch:** The terminal output shows the original Pod terminating and a differently named Pod becoming ready. AutoDeploy does not create another deployment record or mark the selected deployment failed; its lifecycle remains `running`, and the control-plane API reports the replacement workload healthy. The workload receipt confirms the new Pod hostname while retaining the same release and commit identity.
 
-## 06 — Diagnostics and cleanup
+**Health and diagnostics note:** Pod replacement can complete between the UI's live-health polls, so the recording does not promise that every replacement produces a visible `unhealthy` transition. Kubernetes Diagnostics remains the persisted snapshot captured for the deployment attempt; refreshing it rereads that evidence rather than inspecting the replacement Pod live.
 
-**[Watch the Kubernetes resource cleanup (MP4, 5.0 MB)](assets/demo/06-cleanup.mp4)**
+## 04 — Diagnostics and cleanup
+
+**[Watch persisted diagnostics and Helm cleanup (MP4, 5.0 MB)](assets/demo/04-diagnostics-and-cleanup.mp4)**
 
 **Goal:** Close the lifecycle while retaining operator evidence.
 
-**Action:** Review the event timeline, image identity, build and runtime log tails, structured Pod fields, and diagnostics bundle. Then select **Cleanup Kubernetes resources**.
+**Action:** Revisit the failed CrashLoopBackOff attempt and its persisted evidence, then select the newest healthy deployment that owns the shared Helm release and choose **Cleanup Kubernetes resources**.
 
-**What to watch:** Helm resources are removed while project, deployment, event, audit, and diagnostic history remain available in the control plane.
+**What to watch:** The cleanup request is persisted and processed asynchronously by the worker. The event timeline records the Helm uninstall and successful cleanup, the selected deployment transitions to `stopped`, and its service link is removed. Deployment history, events, logs, and the earlier failure snapshot remain available. The final `kubectl get pods` and `microk8s helm list` outputs confirm that the namespace contains neither workload Pods nor the Helm release.
 
-## Healthy baseline
+**Diagnostics export:** The Diagnostics panel provides **Copy bundle** and **Download bundle**. Exported bundles can contain application-produced output or operational data and must be reviewed before sharing.
 
-Return to these values before the main recording and after every controlled-failure take:
+## Reference workload baseline
+
+The healthy scenarios use these values. Controlled-failure scenarios change one value and restore it through a new deployment:
 
 ```text
 FEATURE_MESSAGE=Running through the local PaaS
@@ -143,16 +135,4 @@ DEMO_HEALTH_STATUS=healthy
 DEMO_RESPONSE_DELAY_MS=0
 ```
 
-For the recording order, narration, safety checks, and exact cleanup procedure, see the [recording script](demo-script.md). For environment setup and operational troubleshooting, see the [runbook](runbook.md).
-
-## Adding media
-
-Store small repository-hosted assets under `docs/assets/demo/`. The happy-path scenario uses `01-happy-path.gif` as its inline preview and links it to `01-happy-path.mp4` for playback controls. Prefer short, tightly cropped GIF or animated WebP previews for additional scenarios, and link longer MP4 recordings rather than embedding them to avoid slowing down the page.
-
-To add an inline preview that opens the full recording, use Markdown such as:
-
-```markdown
-[![Happy-path deployment](assets/demo/01-happy-path.gif)](assets/demo/01-happy-path.mp4)
-```
-
-Every clip should remain understandable without audio. Keep the surrounding goal, change, result, and reset text as the accessible fallback and narrative context.
+For environment setup and operational troubleshooting, see the [runbook](runbook.md).

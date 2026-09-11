@@ -8,11 +8,35 @@ AutoDeploy is an operator-facing PaaS control plane that turns project specifica
 
 The primary demo follows one deployment from a declarative project specification through source checkout, container build and test, registry push with digest pinning, Helm rollout, health verification, and persisted diagnostics.
 
-[![AutoDeploy happy-path Kubernetes deployment](docs/assets/demo/01-happy-path.gif)](docs/assets/demo/01-happy-path.mp4)
+[![AutoDeploy operator console with the Kubernetes executor ready](docs/assets/demo/01-autodeploy-control-plane.png)](docs/assets/demo/01-happy-path.mp4)
 
-**[Watch the happy-path deployment with playback controls (MP4, 5.0 MB)](docs/assets/demo/01-happy-path.mp4)**
+- Platform readiness and workload activity are presented separately, so an operator can distinguish control-plane health from deployment state.
+- The selected Kubernetes executor and persisted project sit next to the asynchronous deployment actions they drive.
 
-The [complete demo walkthrough](docs/demo.md) explains the configuration behind the recording and provides focused scenarios for configuration updates, controlled health and startup failures, Kubernetes self-healing, diagnostics, and cleanup.
+**[Watch the happy-path deployment with playback controls (MP4, 4.5 MB)](docs/assets/demo/01-happy-path.mp4)**
+
+### Declarative workload contract
+
+[![AutoDeploy project source, health, resource, ConfigMap, and Secret configuration](docs/assets/demo/02-edit-project.png)](docs/assets/demo/02-edit-project.png)
+
+- Source, healthcheck, test, CPU, and memory fields define the workload contract used by the deployment pipeline.
+- ConfigMap and Secret-backed variables identify Kubernetes resources by name and key without displaying a Secret value.
+
+### Persisted deployment evidence
+
+[![Successful AutoDeploy deployment summary and event timeline](docs/assets/demo/03-summary.png)](docs/assets/demo/03-summary.png)
+
+- The summary correlates a healthy workload with its unique build tag and digest-pinned deployment image.
+- Persisted events show the successful Helm apply, Kubernetes healthcheck, terminal `running` transition, and worker claim release.
+
+### Kubernetes diagnostics
+
+[![Persisted Kubernetes diagnostic snapshot and bundle export controls](docs/assets/demo/04-k8s-diagnostics.png)](docs/assets/demo/04-k8s-diagnostics.png)
+
+- The snapshot retains Helm and Pod evidence captured for the deployment attempt; refreshing it does not query the cluster again.
+- Copy and download controls export the evidence with an explicit reminder to review application and operational output before sharing.
+
+The [complete demo walkthrough](docs/demo.md) provides the project setup and focused recordings for a successful Kubernetes deployment, controlled CrashLoopBackOff diagnostics and recovery, Kubernetes self-healing, and Helm cleanup with retained control-plane evidence.
 
 ## What this project demonstrates
 
@@ -159,7 +183,7 @@ Open `http://127.0.0.1:5173`. Create a project with these minimum values:
 | Port | `5000` |
 | Healthcheck | `/health` |
 
-Save the project, select **Deploy**, and watch the fake worker move it to `running`. The console shows the deployment summary and persisted events without building or publishing an image. Local paths are accepted only in the development profile; production-style configurations accept canonical GitHub HTTPS URLs.
+Save the project, select **Run deploy / test**, and watch the fake worker move it to `running`. The console shows the deployment summary and persisted events without building or publishing an image. Local paths are accepted only in the development profile; production-style configurations accept canonical GitHub HTTPS URLs.
 
 To exercise the API directly instead, create and deploy a project with:
 
@@ -225,7 +249,6 @@ Docker socket access and kubeconfig access are deliberate trusted-operator bound
 | [Security](docs/security.md) | Authentication, roles, audit, correlation, secrets, Docker socket, Kubernetes RBAC |
 | [Development](docs/development.md) | Layout, setup, dependency locks, tests, builds, CI jobs |
 | [Demo walkthrough](docs/demo.md) | Public, media-led tour of the Kubernetes deployment scenarios |
-| [Recording script](docs/demo-script.md) | Operator checklist and narration for recording the demo |
 | [Manual MicroK8s validation](docs/microk8s-manual-validation.md) | End-to-end local Kubernetes validation |
 | [Platform contract](docs/deployment-contract.md) | Control-plane, worker, and user-workload ownership boundaries |
 | [Application specification](docs/specs.md) | Supported project fields and workload assumptions |

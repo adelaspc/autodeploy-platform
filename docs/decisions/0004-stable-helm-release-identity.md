@@ -1,6 +1,6 @@
 # ADR 0004: Stable Helm Release Identity
 
-**Status:** Accepted;
+**Status:** Accepted
 
 ## Context
 
