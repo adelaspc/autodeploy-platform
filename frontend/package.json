@@ -16,7 +16,7 @@
     "@vitejs/plugin-vue": "^6.0.8",
     "@vue/test-utils": "2.5.0",
     "jsdom": "30.0.1",
-    "vite": "^6.3.5",
+    "vite": "^6.4.5",
     "vitest": "5.0.0"
   }
 }
