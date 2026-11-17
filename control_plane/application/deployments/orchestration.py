@@ -23,6 +23,15 @@ from control_plane.api.request_context import current_request_id
 GIT_BRANCH_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$")
 
 
+class DeploymentSourceError(ValueError):
+    """Keep a safe operator message separate from Git's diagnostic output."""
+
+    def __init__(self, code, public_message, detail):
+        super().__init__(detail)
+        self.code = code
+        self.public_message = public_message
+
+
 def create_deployment_event(
     deployment_id,
     event_type,
@@ -122,23 +131,69 @@ def resolve_project_commit_sha(project, branch):
         try:
             env = git_auth_environment(project)
         except ValueError as exc:
-            raise ValueError(f"Unable to resolve commit for branch '{branch}': {exc}") from exc
+            raise DeploymentSourceError(
+                "git_credentials_missing",
+                "Git credentials are not configured. Check the project's Git credential reference and API environment.",
+                f"Unable to resolve commit for branch '{branch}': {exc}",
+            ) from exc
 
-    result = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DeploymentSourceError(
+            "git_connection_failed",
+            "Git source lookup timed out. Check connectivity and try again.",
+            f"Git source lookup timed out for branch '{branch}'",
+        ) from exc
+    except OSError as exc:
+        raise DeploymentSourceError(
+            "git_source_unavailable",
+            "Unable to run Git source lookup. Check the API logs.",
+            f"Unable to run Git source lookup: {exc}",
+        ) from exc
     if result.returncode != 0:
         error_output = (result.stderr or result.stdout).strip() or "Unknown git error"
+        error_lower = error_output.lower()
+        detail = f"Unable to resolve commit for branch '{branch}': {error_output}"
+        if any(marker in error_lower for marker in (
+            "authentication failed", "invalid username or token", "bad credentials",
+            "could not read username", "could not read password",
+        )):
+            raise DeploymentSourceError(
+                "git_authentication_failed",
+                "Git authentication failed. Check the configured token's validity and repository access.",
+                detail,
+            )
+        if "repository not found" in error_lower:
+            raise DeploymentSourceError(
+                "git_repository_inaccessible",
+                "Git repository is inaccessible. Check the repository URL and credential permissions.",
+                detail,
+            )
+        if any(marker in error_lower for marker in (
+            "could not resolve host", "could not resolve proxy", "failed to connect", "connection timed out",
+        )):
+            raise DeploymentSourceError(
+                "git_connection_failed",
+                "Unable to connect to the Git source. Check API network connectivity and try again.",
+                detail,
+            )
         raise ValueError(f"Unable to resolve commit for branch '{branch}': {error_output}")
 
     output = result.stdout.strip()
     if not output:
-        raise ValueError(f"Unable to resolve commit for branch '{branch}': no matching ref found")
+        raise DeploymentSourceError(
+            "git_branch_not_found",
+            "Git branch was not found. Check the selected branch in the repository.",
+            f"Unable to resolve commit for branch '{branch}': no matching ref found",
+        )
 
     commit_sha = output.split()[0].strip()
     if not commit_sha:

@@ -1,5 +1,6 @@
 import re
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 import pytest
 import yaml
@@ -141,10 +142,10 @@ def test_deployment_yaml_examples_are_parseable(path):
 def test_local_markdown_links_point_to_existing_paths(path):
     missing = []
     for target in MARKDOWN_LINK.findall(path.read_text(encoding="utf-8")):
-        target = target.strip().split("#", 1)[0]
-        if not target or "://" in target or target.startswith(("mailto:", "#")):
+        url = urlsplit(target.strip())
+        if url.scheme or url.netloc or not url.path:
             continue
-        resolved = (path.parent / target).resolve()
+        resolved = (path.parent / unquote(url.path)).resolve()
         if not resolved.exists():
             missing.append(target)
 

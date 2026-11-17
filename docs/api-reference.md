@@ -73,6 +73,8 @@ The history route accepts `limit`, `deployment_status` (repeatable/comma-separat
 
 All `limit` parameters accept integers from `1` through `100`. Deployment history and audit history default to `20`; project activity, health activity, and their nested lists default to `10`. Cursor parameters such as `before_deployment_id` and `before_webhook_delivery_id` are positive integer IDs; use the returned pagination cursor unchanged for the next page.
 
+Deploy and redeploy source lookup failures return `409` with a safe `error` message, `error_code`, and `request_id` (also in `X-Request-ID`). Codes include `git_credentials_missing`, `git_authentication_failed`, `git_repository_inaccessible`, `git_branch_not_found`, `git_connection_failed`, `git_source_unavailable`, and the fallback `git_source_resolution_failed`. Authentication errors do not distinguish expired tokens from revoked credentials or insufficient access. Detailed Git output stays in API logs; no deployment is created when source lookup fails.
+
 ### Manual deployment records
 
 `POST /api/projects/{project_id}/deployments` is an admin-only fixture and recovery interface. It creates persisted records but does not build, publish, or deploy a workload. `commit_sha` is required and must be a hexadecimal Git object ID: an abbreviated 7–40 character SHA-1 identifier or a complete 64-character SHA-256 identifier. It is normalized to lowercase. `status` and `build_status` default to `pending`; `environment` defaults to `production`; `test_command` inherits the project default unless explicitly set to `null`. Unknown fields and values whose types or lengths do not match the persisted model are rejected with `400`; `service_url`, when provided, must be an absolute HTTP or HTTPS URL.

@@ -426,8 +426,53 @@ def test_deploy_project_returns_conflict_when_commit_resolution_fails(client, mo
     response = client.post(f"/api/projects/{project_id}/deploy", json={})
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": "Unable to resolve deployment source"}
+    assert response.get_json() == {
+        "error": "Unable to resolve deployment source",
+        "error_code": "git_source_resolution_failed",
+        "request_id": response.headers["X-Request-ID"],
+    }
     assert client.get(f"/api/projects/{project_id}/deployments").get_json()["items"] == []
+
+
+@pytest.mark.parametrize("action", ["deploy", "redeploy"])
+@pytest.mark.parametrize("failure,expected_code", [
+    ("fatal: could not read Username for 'https://github.com': terminal prompts disabled", "git_authentication_failed"),
+    ("fatal: Authentication failed", "git_authentication_failed"),
+    ("remote: Repository not found.", "git_repository_inaccessible"),
+    ("fatal: Could not resolve host: github.com", "git_connection_failed"),
+    ("", "git_branch_not_found"),
+    ("timeout", "git_connection_failed"),
+    ("unexpected Git failure", "git_source_resolution_failed"),
+])
+def test_source_errors_are_actionable_and_safe(client, monkeypatch, action, failure, expected_code):
+    project_id = create_project(
+        client, name="source-error-app", repo_url="https://github.com/example/private-repo",
+    ).get_json()["id"]
+    if action == "redeploy":
+        response = client.post(f"/api/projects/{project_id}/deployments", json={"commit_sha": "abc1234"})
+        assert response.status_code == 201
+
+    def fake_run(command, **kwargs):
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, 30, stderr="private-git-detail")
+        return subprocess.CompletedProcess(
+            command, 128 if failure else 0,
+            stdout="", stderr=f"{failure}\nprivate-git-detail" if failure else "",
+        )
+
+    monkeypatch.setattr(deployment_orchestration_api.subprocess, "run", fake_run)
+    response = client.post(
+        f"/api/projects/{project_id}/{action}", json={}, headers={"X-Request-ID": "source-error-test"},
+    )
+
+    assert response.status_code == 409
+    payload = response.get_json()
+    assert payload["error_code"] == expected_code
+    assert payload["request_id"] == response.headers["X-Request-ID"] == "source-error-test"
+    assert "private-git-detail" not in response.get_data(as_text=True)
+    assert "expired" not in payload["error"]
+    deployments = client.get(f"/api/projects/{project_id}/deployments").get_json()["items"]
+    assert len(deployments) == (1 if action == "redeploy" else 0)
 
 
 def test_deploy_project_resolves_private_github_commit_with_token_env(client, monkeypatch):
@@ -478,7 +523,9 @@ def test_deploy_project_reports_missing_git_token_env_for_private_repo(client, m
     response = client.post(f"/api/projects/{project_id}/deploy", json={})
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": "Unable to resolve deployment source"}
+    assert response.get_json()["error_code"] == "git_credentials_missing"
+    assert "credential reference" in response.get_json()["error"]
+    assert response.get_json()["request_id"] == response.headers["X-Request-ID"]
 
 
 def test_deploy_project_rejects_kubernetes_executor_without_required_settings(client, app):
@@ -948,7 +995,11 @@ def test_redeploy_project_returns_conflict_when_commit_resolution_fails(client, 
     response = client.post(f"/api/projects/{project_id}/redeploy")
 
     assert response.status_code == 409
-    assert response.get_json() == {"error": "Unable to resolve deployment source"}
+    assert response.get_json() == {
+        "error": "Unable to resolve deployment source",
+        "error_code": "git_source_resolution_failed",
+        "request_id": response.headers["X-Request-ID"],
+    }
     deployments = client.get(f"/api/projects/{project_id}/deployments").get_json()["items"]
     assert len(deployments) == 1
 
