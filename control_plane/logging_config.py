@@ -51,6 +51,8 @@ class JsonLogFormatter(logging.Formatter):
 
 
 def install_structured_logging(app):
+    # Flask otherwise inherits WARNING under Gunicorn and drops correlation logs.
+    app.logger.setLevel(logging.INFO)
     if app.config.get("CONTROL_PLANE_LOG_FORMAT", "json").lower() != "json":
         return
     formatter = JsonLogFormatter(app.config.get("CONTROL_PLANE_COMPONENT", "api"))

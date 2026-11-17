@@ -2,8 +2,24 @@ import json
 import logging
 import pytest
 
-from control_plane.logging_config import JsonLogFormatter
+from control_plane.logging_config import JsonLogFormatter, install_structured_logging
 from control_plane.security import REDACTED, redact_log_text
+
+
+@pytest.mark.parametrize("log_format", ["json", "text"])
+def test_request_completion_is_logged_when_logger_previously_filtered_info(app, caplog, monkeypatch, log_format):
+    monkeypatch.setattr(app.logger, "level", logging.WARNING)
+    app.config["CONTROL_PLANE_LOG_FORMAT"] = log_format
+    install_structured_logging(app)
+
+    response = app.test_client().get("/health", headers={"X-Request-ID": "request-log-regression"})
+
+    assert response.status_code == 200
+    assert response.headers["X-Request-ID"] == "request-log-regression"
+    completed = [record for record in caplog.records if getattr(record, "event", None) == "request_completed"]
+    assert len(completed) == 1
+    assert completed[0].request_id == "request-log-regression"
+    assert completed[0].status_code == 200
 
 
 def test_json_log_formatter_emits_bounded_structured_context():
