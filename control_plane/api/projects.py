@@ -5,6 +5,7 @@ from flask import Blueprint, current_app, jsonify, request
 from control_plane.api.audit_service import record_audit_event
 from control_plane.api.auth import authorize_request, require_api_role
 from control_plane.application.deployments.orchestration import (
+    DeploymentSourceError,
     create_historical_retry,
     create_user_facing_deployment,
     get_deployment_branch,
@@ -55,11 +56,22 @@ from control_plane.application.deployments.read_models import (
 )
 from control_plane.application.projects.read_models import project_activity_payload, project_status_payload
 from control_plane.api.live_health import probe_deployment_health
+from control_plane.api.request_context import error_payload
 from control_plane.extensions import db
 from control_plane.models import Build, DeploymentEvent, PlatformDeployment, Project
 
 
 projects_bp = Blueprint("projects", __name__, url_prefix="/api/projects")
+
+
+def _deployment_source_error_response(exc):
+    code = exc.code if isinstance(exc, DeploymentSourceError) else "git_source_resolution_failed"
+    message = exc.public_message if isinstance(exc, DeploymentSourceError) else "Unable to resolve deployment source"
+    current_app.logger.warning(
+        "Deployment source resolution failed [%s]: %s", code, exc,
+        extra={"event": "deployment_source_resolution_failed"},
+    )
+    return jsonify(error_payload(message, error_code=code)), 409
 
 
 @projects_bp.before_request
@@ -347,8 +359,7 @@ def deploy_project(project_id):
             },
         )
     except ValueError as exc:
-        current_app.logger.warning("Deployment source resolution failed: %s", exc)
-        return jsonify({"error": "Unable to resolve deployment source"}), 409
+        return _deployment_source_error_response(exc)
     record_audit_event(
         action="deployment.deploy_triggered",
         resource_type="deployment",
@@ -457,8 +468,7 @@ def redeploy_project(project_id):
             },
         )
     except ValueError as exc:
-        current_app.logger.warning("Deployment source resolution failed: %s", exc)
-        return jsonify({"error": "Unable to resolve deployment source"}), 409
+        return _deployment_source_error_response(exc)
     record_audit_event(
         action="deployment.redeploy_triggered",
         resource_type="deployment",

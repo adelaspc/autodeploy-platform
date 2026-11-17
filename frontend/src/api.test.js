@@ -72,4 +72,22 @@ describe("apiRequest", () => {
       return true;
     });
   });
+
+  it("shows the source error and request ID without exposing response internals", async () => {
+    const payload = {
+      error: "Git authentication failed. Check the configured token's validity and repository access.",
+      error_code: "git_authentication_failed",
+      request_id: "source-error-test",
+    };
+    globalThis.fetch = mock.fn(() => Promise.resolve(
+      new Response(JSON.stringify(payload), { status: 409 }),
+    ));
+
+    await assert.rejects(apiRequest("/api/projects/7/deploy"), (error) => {
+      assert.equal(error.message, `${payload.error} (Request ID: source-error-test)`);
+      assert.equal(error.status, 409);
+      assert.deepEqual(error.payload, payload);
+      return true;
+    });
+  });
 });

@@ -31,7 +31,8 @@ export async function apiRequest(path, options = {}) {
     // Convert every non-successful HTTP response into the same Error shape so
     // Vue components can display a message and still inspect status/payload.
     const message = payload?.error || payload?.message || `Request failed (${response.status})`;
-    const error = new Error(message);
+    const requestId = payload?.request_id;
+    const error = new Error(requestId ? `${message} (Request ID: ${requestId})` : message);
     error.status = response.status;
     error.payload = payload;
     throw error;
