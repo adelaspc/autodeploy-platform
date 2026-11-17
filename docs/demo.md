@@ -4,6 +4,10 @@ This walkthrough demonstrates AutoDeploy as an operator-facing control plane rat
 
 The reference workload is [Deployment Lab](https://github.com/adelaspc/paas-demo-app). It is a small, stateless Flask and Vue application designed to expose which release and configuration are actually running without reproducing control-plane state inside the workload.
 
+Each scenario includes a video link and an MP4 download.
+
+Start with [project setup](#00--project-setup), or jump to the [successful deployment](#01--happy-path-deployment), [failure diagnostics](#02--crashloopbackoff-diagnostics), [Pod replacement](#03--kubernetes-self-healing), or [cleanup](#04--diagnostics-and-cleanup).
+
 ## What the demo proves
 
 - Project configuration is declarative and separated from control-plane configuration.
@@ -32,7 +36,7 @@ The console presents the selected project's recent activity and deployment histo
 
 ## 00 — Project setup
 
-**[Watch the project configuration walkthrough (MP4, 1.4 MB)](assets/demo/00-project-setup.mp4)**
+**[Watch project setup](https://github.com/user-attachments/assets/6813dbb5-7171-46e9-a3ac-fa902929166f)** · **[Download MP4 (1.4 MB)](assets/demo/00-project-setup.mp4?raw=true)**
 
 **Goal:** Define the source, build, health, resource, and runtime configuration used by the deployment scenarios.
 
@@ -75,7 +79,7 @@ The migration command is intentionally empty. It is reserved by the v1 applicati
 
 ## 01 — Happy-path deployment
 
-**[Watch with playback controls (MP4, 4.5 MB)](assets/demo/01-happy-path.mp4)**
+**[Watch the deployment](https://github.com/user-attachments/assets/a8d4428e-5cf2-4a15-acdf-03bf7de2cf90)** · **[Download MP4 (4.5 MB)](assets/demo/01-happy-path.mp4?raw=true)**
 
 **Goal:** Show the complete asynchronous path from a saved project to a healthy workload.
 
@@ -87,7 +91,7 @@ The migration command is intentionally empty. It is reserved by the v1 applicati
 
 ## 02 — CrashLoopBackOff diagnostics
 
-**[Watch the CrashLoopBackOff diagnostics and recovery (MP4, 6.4 MB)](assets/demo/02-crash-loop-backoff.mp4)**
+**[Watch failure diagnostics and recovery](https://github.com/user-attachments/assets/514eeb07-f2c6-4bf3-b781-6f9513851ffe)** · **[Download MP4 (6.4 MB)](assets/demo/02-crash-loop-backoff.mp4?raw=true)**
 
 **Goal:** Show actionable container failure diagnostics.
 
@@ -101,7 +105,7 @@ The migration command is intentionally empty. It is reserved by the v1 applicati
 
 ## 03 — Kubernetes self-healing
 
-**[Watch Kubernetes replace a deleted Pod (MP4, 1.8 MB)](assets/demo/03-k8s-self-healing.mp4)**
+**[Watch Kubernetes Pod replacement](https://github.com/user-attachments/assets/9e84eda6-4d28-485b-be19-0d7774ba12e4)** · **[Download MP4 (1.8 MB)](assets/demo/03-k8s-self-healing.mp4?raw=true)**
 
 **Goal:** Separate transient live health from persisted deployment lifecycle state.
 
@@ -113,7 +117,7 @@ The migration command is intentionally empty. It is reserved by the v1 applicati
 
 ## 04 — Diagnostics and cleanup
 
-**[Watch persisted diagnostics and Helm cleanup (MP4, 5.0 MB)](assets/demo/04-diagnostics-and-cleanup.mp4)**
+**[Watch diagnostics and cleanup](https://github.com/user-attachments/assets/55b7cb3a-35f0-46ad-add6-992dba938c35)** · **[Download MP4 (5.0 MB)](assets/demo/04-diagnostics-and-cleanup.mp4?raw=true)**
 
 **Goal:** Close the lifecycle while retaining operator evidence.
 

@@ -8,12 +8,12 @@ AutoDeploy is an operator-facing PaaS control plane that turns project specifica
 
 The primary demo follows one deployment from a declarative project specification through source checkout, container build and test, registry push with digest pinning, Helm rollout, health verification, and persisted diagnostics.
 
-[![AutoDeploy operator console with the Kubernetes executor ready](docs/assets/demo/01-autodeploy-control-plane.png)](docs/assets/demo/01-happy-path.mp4)
+[![AutoDeploy operator console with the Kubernetes executor ready](docs/assets/demo/01-autodeploy-control-plane.png)](docs/demo.md#01--happy-path-deployment)
+
+**[Watch the deployment demo](https://github.com/user-attachments/assets/e01dd08c-b16e-4aba-a1df-678cde2aac19)** · **[Download MP4 (4.5 MB)](docs/assets/demo/01-happy-path.mp4?raw=true)** · **[Read the demo walkthrough](docs/demo.md)**
 
 - Platform readiness and workload activity are presented separately, so an operator can distinguish control-plane health from deployment state.
 - The selected Kubernetes executor and persisted project sit next to the asynchronous deployment actions they drive.
-
-**[Watch the happy-path deployment with playback controls (MP4, 4.5 MB)](docs/assets/demo/01-happy-path.mp4)**
 
 ### Declarative workload contract
 
